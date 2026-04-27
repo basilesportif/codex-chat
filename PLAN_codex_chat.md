@@ -31,7 +31,10 @@ The following decisions have been confirmed by Tim and supersede any conflicting
 8. **Subagent access**: Subagents have the same access as the main agent (no read-only or sandbox restrictions by default).
 9. **Missed loop runs**: Durable-only. Loops marked `durable: true` may persist their schedule; missed runs are not replayed from the spool on restart for any loop. Spooling is removed from scope for non-durable loops.
 10. **Monitors**: Attach to a process if it is already running; start it if it is not. Both behaviors are required from the same monitor definition.
-11. **Transcription**: Provider is configurable. OpenAI is the default. Whether an OpenAI API key is required, or whether `codex exec` can perform the transcription itself, is **TBD pending research**.
+11. **Transcription**: Provider is configurable. OpenAI is the default. Voice messages are always auto-transcribed and forwarded to Codex — no manual trigger or caption command is needed. Whether an OpenAI API key is required, or whether `codex exec` can perform the transcription itself, is **TBD pending research** (the sole remaining open question).
+12. **Loop default routing**: `return_to_main` — loop events feed back to the warm main Codex session. The behavior pack's `AGENTS.md` determines how Codex handles each loop result. The default codex-chat behavior pack will ship with an `AGENTS.md` that covers common loop event handling.
+13. **Monitor remediation**: Pattern matches are routed to the main Codex session by default (`send_to_main`). A pattern may additionally specify a `command` pre-action that runs automatically before the event is sent to Codex (e.g. a lightweight remediation script). Codex then decides what to tell the user. `telegram_notify` is no longer the default action type — `send_to_main` replaces it. `run_command` is an optional pre-action that fires first when specified.
+14. **Default behavior pack**: The behavior pack ships with a default `AGENTS.md` for codex-chat that provides sensible out-of-the-box behavior covering: loop event handling, monitor alert handling, voice message handling, and image handling. Users can customize or replace this file to change how the main agent behaves.
 
 Non-goals for the first implementation:
 
@@ -609,7 +612,9 @@ interface Transcriber {
 }
 ```
 
-Config should allow transcription to be disabled. If disabled, voice messages should be stored and acknowledged with a short "voice transcription is not enabled" response.
+Voice transcription is always automatic — no manual trigger, caption command, or user action is required. Every voice message received from an authorized user is transcribed and forwarded to Codex without prompting the user.
+
+Config should allow transcription to be disabled globally. If disabled, voice messages should be stored and acknowledged with a short "voice transcription is not enabled" response.
 
 **TBD — pending research**: provider selection is configurable with OpenAI as the default, but it is not yet decided whether the default OpenAI path requires a separately configured `OPENAI_API_KEY`, or whether `codex exec` itself can perform the transcription using its existing credentials. The `Transcriber` interface above intentionally allows either implementation. Resolve this before finalizing Phase 5.
 
@@ -666,6 +671,15 @@ behavior/
 - What to do with images, voice messages, and monitor alerts.
 - Safety boundaries.
 - How to emit service directives.
+
+**Default behavior pack**: codex-chat ships with a default `AGENTS.md` that provides sensible out-of-the-box behavior. The default covers:
+
+- **Loop event handling**: how to interpret and respond to loop results fed back to the main session.
+- **Monitor alert handling**: how to react to `send_to_main` monitor events, including when to investigate, dispatch a subagent, or notify the user.
+- **Voice message handling**: how to respond to auto-transcribed voice input.
+- **Image handling**: how to handle photos and documents received from authorized users.
+
+Users can customize or replace `AGENTS.md` to change how the main agent behaves. The default is intentionally minimal and safe.
 
 `router.md` should describe event-specific handling:
 
@@ -936,7 +950,7 @@ Loop fields:
 - `args`: command arguments.
 - `cwd`: working directory.
 - `env`: environment overrides.
-- `route`: `return_to_main`, `send_to_admins`, `store_only`, or `dispatch_subagent`.
+- `route`: `return_to_main` (default), `send_to_admins`, `store_only`, or `dispatch_subagent`. The default `return_to_main` feeds the loop result back to the warm main Codex session; the behavior pack's `AGENTS.md` determines how Codex handles it.
 - `timeoutSec`: max run time.
 - `lock`: prevent overlapping runs.
 - `notifyOnFailure`: whether to notify admins on errors.
@@ -1044,8 +1058,9 @@ Example:
           "regex": "Local:\\s+(https?://\\S+)",
           "debounceSec": 10,
           "action": {
-            "type": "telegram_notify",
-            "template": "Dev server ready: {{match.1}}"
+            "type": "send_to_main",
+            "promptFile": "behavior/prompts/monitor-ready.md",
+            "includeRingBufferLines": 20
           }
         },
         {
@@ -1053,6 +1068,12 @@ Example:
           "stream": "both",
           "regex": "(Error|Exception|UnhandledPromiseRejection|EADDRINUSE)",
           "debounceSec": 30,
+          "preAction": {
+            "type": "run_command",
+            "command": "scripts/collect-diagnostics.sh",
+            "args": ["web-dev-server"],
+            "timeoutSec": 10
+          },
           "action": {
             "type": "send_to_main",
             "promptFile": "behavior/prompts/monitor-error.md",
@@ -1090,13 +1111,17 @@ Pattern fields:
 - `includeRingBufferLines`: context line count.
 - `action`: hook action.
 
-Action types:
+Action types (`action.type`):
 
-- `telegram_notify`: send templated message to admins or a configured chat.
-- `send_to_main`: enqueue a monitor event to the warm main Codex instance.
-- `dispatch_subagent`: start a subagent directly.
-- `run_command`: run a local command. Disabled by default unless explicitly allowed.
+- `send_to_main`: **default action** — enqueue a monitor event to the warm main Codex instance. Codex decides what to tell the user.
+- `dispatch_subagent`: start a subagent directly (without going through main first).
 - `restart_monitor`: restart the managed process.
+
+Optional pre-action (`preAction.type`):
+
+- `run_command`: run a local command before the main action fires (e.g. a lightweight remediation or diagnostic script). The pre-action runs first; its output is captured and included in the event context sent to Codex. Disabled by default unless `security.allowShellActionsFromDirectives` is enabled or the command is explicitly allowlisted. The main `action` still fires after the pre-action completes (or times out).
+
+Note: `telegram_notify` as a standalone action type is removed. Direct Telegram notification is now the responsibility of Codex (via directive) after it receives the `send_to_main` event, not the monitor subsystem.
 
 ### Process Supervision
 
@@ -1458,18 +1483,19 @@ Resolved (see "Confirmed Decisions" near the top):
 - Persistence is JSON files, not SQLite.
 - Telegram library is `grammY`.
 - The bot self-notifies the operator over Telegram on lifecycle events and crashes.
+- Loop default routing is `return_to_main`; behavior pack `AGENTS.md` handles loop results.
+- Monitor default action is `send_to_main`; optional `preAction.run_command` fires first.
+- Voice messages are always auto-transcribed and forwarded to Codex without any manual trigger.
+- The behavior pack ships with a default `AGENTS.md` covering loops, monitors, voice, and images.
 
 Still open / to revisit after a prototype:
 
 - Whether service directives should be replaced by an MCP tool server.
-- Whether loops should enqueue to main Codex or dispatch subagents directly by default.
-- Whether monitors should be allowed to run local remediation commands.
-- Whether voice transcription should be always automatic or require user command/caption.
 - **Transcription credentials (TBD pending research)**: whether the OpenAI default path needs its own `OPENAI_API_KEY`, or whether `codex exec` can transcribe with its existing credentials.
 
 ## Clarifying Questions
 
-The original clarifying questions have been answered — see the "Confirmed Decisions" section near the top for authoritative answers. Summary:
+All clarifying questions are resolved. See the "Confirmed Decisions" section near the top for authoritative answers. Summary:
 
 1. Personal single-user bot scope; one shared session for all authorized users.
 2. Single shared Codex conversation across users.
@@ -1478,4 +1504,7 @@ The original clarifying questions have been answered — see the "Confirmed Deci
 5. Subagents have the same access as the main agent.
 6. Durable-only replay of missed cron runs.
 7. Monitors attach if a process is already running, start it if not.
-8. Transcription provider is configurable, OpenAI by default. **TBD**: whether an explicit `OPENAI_API_KEY` is required or `codex exec` can transcribe natively.
+8. Transcription provider is configurable, OpenAI by default. **TBD**: whether an explicit `OPENAI_API_KEY` is required or `codex exec` can transcribe natively. (Pending research — sole remaining open question.)
+9. Loop default routing: `return_to_main`. The behavior pack's `AGENTS.md` determines how each loop result is handled.
+10. Monitor pattern actions: `send_to_main` is the default action type. A pattern may additionally specify a `command` pre-action that runs automatically before the event reaches Codex. Codex then decides what to tell the user.
+11. Voice transcription: always auto-transcribed and sent to Codex. No manual trigger or caption required.

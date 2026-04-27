@@ -12,7 +12,7 @@ ipcSocket = "data/run/codex-chat.sock"
 
 [codex]
 binary = "codex"
-transport = "exec-resume" # "app-server" or "exec-resume"
+transport = "app-server" # "app-server" or "exec-resume"
 appServerHost = "127.0.0.1"
 appServerPort = 49345
 model = "gpt-5.4"

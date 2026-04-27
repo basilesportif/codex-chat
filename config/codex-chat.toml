@@ -1,0 +1,91 @@
+# codex-chat production configuration.
+# Secrets are read from environment variables, not from this TOML file.
+version = 1
+
+[service]
+name = "codex-chat"
+workspace = "/home/tim/pkg/mush/codex-chat"
+stateDir = "data/state"
+logLevel = "info"
+timezone = "Etc/UTC"
+ipcSocket = "data/run/codex-chat.sock"
+
+[codex]
+binary = "codex"
+transport = "app-server" # "app-server" or "exec-resume"
+appServerHost = "127.0.0.1"
+appServerPort = 49345
+model = "gpt-5.4"
+effort = "medium"
+profile = ""
+sandbox = "danger-full-access"
+approvalPolicy = "never"
+mainSessionName = "codex-chat-main"
+startupTimeoutSec = 60
+turnTimeoutSec = 3600
+keepAliveSec = 60
+extraConfig = [
+  "model_reasoning_effort=\"medium\""
+]
+addDirs = []
+
+[telegram]
+mode = "polling"
+botTokenEnv = "TELEGRAM_BOT_TOKEN"
+parseMode = "plain"
+pairingEnabledOnEmptyAllowlist = true
+downloadMaxBytes = 52428800
+sendProgressUpdates = true
+opsChatId = 0
+
+[telegram.allowlist]
+userIds = []
+chatIds = []
+adminUserIds = []
+
+[behavior]
+dir = "behavior"
+entrypoint = "AGENTS.md"
+reloadOnSighup = true
+
+[subagents]
+enabled = true
+maxConcurrent = 2
+defaultModel = ""
+defaultEffort = "medium"
+defaultTimeoutSec = 1800
+maxTimeoutSec = 7200
+maxPromptBytes = 262144
+artifactDir = "data/subagents"
+allowedProfiles = []
+
+[loops]
+enabled = true
+path = "config/loops.json"
+namespace = "codex-chat"
+runnerCommand = "codex-chat loop run"
+
+[monitors]
+enabled = true
+path = "config/monitors.json"
+maxRestartBackoffSec = 300
+
+[files]
+dir = "data/files"
+artifactDir = "data/artifacts"
+allowedSendRoots = [
+  "data",
+  "/home/tim/pkg/mush/codex-chat"
+]
+
+[transcription]
+enabled = true
+provider = "openai"
+model = "gpt-4o-mini-transcribe"
+apiKeyEnv = "OPENAI_API_KEY"
+language = ""
+
+[security]
+redactSecretsInLogs = true
+requireLocalFileForSend = true
+allowShellActionsFromDirectives = false

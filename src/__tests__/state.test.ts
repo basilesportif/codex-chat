@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
+import { access, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -69,5 +69,21 @@ describe("state store", () => {
     expect(lastWritePath).toMatch(/settings\.json\.\d+\.\d+\.tmp$/);
     expect(lastRenameCall).toEqual([lastWritePath, join(root, "state", "settings.json")]);
     expect(stateFiles.some((file) => file.endsWith(".tmp"))).toBe(false);
+  });
+
+  test("stores pairing code under the state data directory", async () => {
+    const { StateStore } = await import("../state.js");
+    const root = await tempRoot();
+    const store = new StateStore(testConfig(root));
+
+    await store.init();
+    await store.writePairingCode("123456");
+
+    const path = join(root, "state", "data", "pairing_code.txt");
+    expect(await readFile(path, "utf8")).toBe("123456\n");
+    expect(await store.readPairingCode()).toBe("123456");
+
+    await store.deletePairingCode();
+    await expect(access(path)).rejects.toThrow();
   });
 });

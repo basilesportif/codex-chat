@@ -12,23 +12,29 @@ type GrammyContext = Context;
 export interface TelegramAllowlistInput {
   userId?: number;
   chatId?: number;
-  configUserIds: number[];
+  configUserIds: Array<number | string>;
   configChatIds: number[];
   stateUsers?: Array<{ userId: number; isAdmin?: boolean }>;
   stateChats?: Array<{ chatId: number }>;
 }
 
+function normalizeTelegramUserId(userId: number | string): string {
+  return String(userId).trim();
+}
+
 export function isTelegramUserAllowed(input: TelegramAllowlistInput): boolean {
   if (input.userId === undefined || input.chatId === undefined) return false;
-  const allowedUsers = new Set([...(input.configUserIds ?? []), ...(input.stateUsers ?? []).map((user) => user.userId)]);
+  const allowedUsers = new Set([...(input.configUserIds ?? []), ...(input.stateUsers ?? []).map((user) => user.userId)].map(normalizeTelegramUserId));
   const allowedChats = new Set([...(input.configChatIds ?? []), ...(input.stateChats ?? []).map((chat) => chat.chatId)]);
-  if (!allowedUsers.has(input.userId)) return false;
+  if (!allowedUsers.has(normalizeTelegramUserId(input.userId))) return false;
   return allowedChats.size === 0 || allowedChats.has(input.chatId);
 }
 
-export function isTelegramAdmin(input: { userId?: number; configAdminUserIds: number[]; stateUsers?: Array<{ userId: number; isAdmin?: boolean }> }): boolean {
+export function isTelegramAdmin(input: { userId?: number; configAdminUserIds: Array<number | string>; stateUsers?: Array<{ userId: number; isAdmin?: boolean }> }): boolean {
   if (input.userId === undefined) return false;
-  return input.configAdminUserIds.includes(input.userId) || Boolean(input.stateUsers?.some((user) => user.userId === input.userId && user.isAdmin));
+  const userId = normalizeTelegramUserId(input.userId);
+  const configAdminUserIds = new Set(input.configAdminUserIds.map(normalizeTelegramUserId));
+  return configAdminUserIds.has(userId) || Boolean(input.stateUsers?.some((user) => user.userId === input.userId && user.isAdmin));
 }
 
 interface TelegramCallbacks {
@@ -58,7 +64,7 @@ export class TelegramGateway {
     this.bot = new Bot(this.token);
     const emptyAllowlist = await this.isAllowlistEmpty();
     if (emptyAllowlist && this.config.telegram.pairingEnabledOnEmptyAllowlist) {
-      this.pairingCode = makePairingCode();
+      this.pairingCode = await this.loadOrCreatePairingCode();
       this.logger.warn({ component: "telegram", event: "pairing_code" }, `Telegram pairing enabled. Send /pair ${this.pairingCode} to the bot.`);
       process.stderr.write(`\nTelegram pairing code: /pair ${this.pairingCode}\n\n`);
     }
@@ -145,6 +151,7 @@ export class TelegramGateway {
       return;
     }
     await this.state.addTelegramIdentity(from.id, chat.id, true);
+    await this.state.deletePairingCode();
     this.pairingCode = undefined;
     await ctx.reply(`Paired user ${from.id} and chat ${chat.id}.`);
     this.logger.info({ component: "telegram", event: "paired", userId: from.id, chatId: chat.id }, "Telegram user paired");
@@ -290,5 +297,16 @@ export class TelegramGateway {
       username: ctx.from?.username,
       receivedAt: nowIso()
     });
+  }
+
+  private async loadOrCreatePairingCode(): Promise<string> {
+    const existing = await this.state.readPairingCode();
+    if (existing) {
+      this.logger.info({ component: "telegram", event: "pairing_code_reused" }, "Reusing persisted pairing code");
+      return existing;
+    }
+    const code = makePairingCode();
+    await this.state.writePairingCode(code);
+    return code;
   }
 }

@@ -11,6 +11,15 @@ describe("telegram allowlist", () => {
     })).toBe(true);
   });
 
+  test("allows a string config user ID when chat policy matches", () => {
+    expect(isTelegramUserAllowed({
+      userId: 1001,
+      chatId: 2002,
+      configUserIds: ["1001"],
+      configChatIds: [2002]
+    })).toBe(true);
+  });
+
   test("denies users outside the allowlist", () => {
     expect(isTelegramUserAllowed({
       userId: 9999,
@@ -31,6 +40,7 @@ describe("telegram allowlist", () => {
 
   test("detects admins from config and paired state", () => {
     expect(isTelegramAdmin({ userId: 1001, configAdminUserIds: [1001] })).toBe(true);
+    expect(isTelegramAdmin({ userId: 1001, configAdminUserIds: ["1001"] })).toBe(true);
     expect(isTelegramAdmin({
       userId: 1002,
       configAdminUserIds: [],

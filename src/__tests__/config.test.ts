@@ -19,6 +19,8 @@ const overrideEnvNames = [
   "CODEX_CHAT_LOOPS_PATH",
   "CODEX_CHAT_MONITORS_PATH",
   "CODEX_CHAT_TRANSCRIPTION_ENABLED",
+  "TELEGRAM_ALLOWED_USER_IDS",
+  "TELEGRAM_ADMIN_USER_IDS",
   "CUSTOM_TELEGRAM_TOKEN"
 ];
 
@@ -88,5 +90,22 @@ botTokenEnv = "CUSTOM_TELEGRAM_TOKEN"
 
     expect(config.codex.model).toBe("from-env");
     expect(config.telegramBotToken).toBe("token-from-custom-env");
+  });
+
+  test("adds Telegram user ID lists from environment", async () => {
+    process.env.TELEGRAM_ALLOWED_USER_IDS = " 222, 333 , external-user ";
+    process.env.TELEGRAM_ADMIN_USER_IDS = " 444,555 ";
+    const path = await tempConfig(`
+version = 1
+
+[telegram.allowlist]
+userIds = [111]
+adminUserIds = [999]
+`);
+
+    const config = await loadConfig(path);
+
+    expect(config.telegram.allowlist.userIds).toEqual([111, 222, 333, "external-user"]);
+    expect(config.telegram.allowlist.adminUserIds).toEqual([999, 444, 555]);
   });
 });

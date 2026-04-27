@@ -2,7 +2,9 @@ import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { AppConfig, resolveConfigPath } from "./config.js";
 import { LoopRun, MonitorEvent, StoredAction, SubagentJob } from "./types.js";
-import { atomicWriteJson, ensureDir, nowIso, pathExists } from "./util.js";
+import { atomicWriteJson, atomicWriteText, ensureDir, nowIso, pathExists, removeIfExists } from "./util.js";
+
+const pairingCodePath = "data/pairing_code.txt";
 
 export class StateStore {
   readonly root: string;
@@ -107,5 +109,20 @@ export class StateStore {
     if (!chats.some((chat) => chat.chatId === chatId)) chats.push({ chatId, pairedAt: nowIso() });
     await this.writeJson("telegram_users.json", users);
     await this.writeJson("telegram_chats.json", chats);
+  }
+
+  async readPairingCode(): Promise<string | undefined> {
+    const path = this.path(pairingCodePath);
+    if (!(await pathExists(path))) return undefined;
+    const code = (await readFile(path, "utf8")).trim();
+    return code || undefined;
+  }
+
+  async writePairingCode(code: string): Promise<void> {
+    await atomicWriteText(this.path(pairingCodePath), `${code}\n`, 0o600);
+  }
+
+  async deletePairingCode(): Promise<void> {
+    await removeIfExists(this.path(pairingCodePath));
   }
 }

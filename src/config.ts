@@ -7,6 +7,7 @@ import { ensureDir, pathExists, resolveFrom } from "./util.js";
 const effortSchema = z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]);
 const sandboxSchema = z.enum(["read-only", "workspace-write", "danger-full-access"]);
 const approvalSchema = z.enum(["untrusted", "on-failure", "on-request", "never"]);
+const telegramUserIdSchema = z.union([z.number().int(), z.string().min(1)]);
 
 const configSchema = z.object({
   version: z.literal(1).default(1),
@@ -44,9 +45,9 @@ const configSchema = z.object({
     sendProgressUpdates: z.boolean().default(true),
     opsChatId: z.number().int().default(0),
     allowlist: z.object({
-      userIds: z.array(z.number().int()).default([]),
+      userIds: z.array(telegramUserIdSchema).default([]),
       chatIds: z.array(z.number().int()).default([]),
-      adminUserIds: z.array(z.number().int()).default([])
+      adminUserIds: z.array(telegramUserIdSchema).default([])
     }).default({ userIds: [], chatIds: [], adminUserIds: [] })
   }),
   behavior: z.object({
@@ -215,6 +216,32 @@ function parseBooleanEnv(value: string): boolean {
   throw new Error(`Invalid boolean environment override: ${value}`);
 }
 
+function parseTelegramUserIdEnvList(value: string): Array<number | string> {
+  return value
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => {
+      if (/^\d+$/.test(part)) {
+        const numeric = Number(part);
+        if (Number.isSafeInteger(numeric)) return numeric;
+      }
+      return part;
+    });
+}
+
+function uniqueTelegramUserIds(values: Array<number | string>): Array<number | string> {
+  const seen = new Set<string>();
+  const out: Array<number | string> = [];
+  for (const value of values) {
+    const key = String(value).trim();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(value);
+  }
+  return out;
+}
+
 function collectEnvOverrides(env: NodeJS.ProcessEnv = process.env): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   const specs: Array<{ name: string; path: string[]; parse?: (value: string) => unknown }> = [
@@ -246,10 +273,20 @@ export async function loadConfig(configPath = "config/codex-chat.toml"): Promise
   }
   const merged = deepMerge(deepMerge(defaultConfig, parsed), collectEnvOverrides());
   const config = configSchema.parse(merged);
+  const envAllowedUserIds = parseTelegramUserIdEnvList(process.env.TELEGRAM_ALLOWED_USER_IDS ?? "");
+  const envAdminUserIds = parseTelegramUserIdEnvList(process.env.TELEGRAM_ADMIN_USER_IDS ?? "");
+  const telegram = {
+    ...config.telegram,
+    allowlist: {
+      ...config.telegram.allowlist,
+      userIds: uniqueTelegramUserIds([...config.telegram.allowlist.userIds, ...envAllowedUserIds]),
+      adminUserIds: uniqueTelegramUserIds([...config.telegram.allowlist.adminUserIds, ...envAdminUserIds])
+    }
+  };
   const rootDir = resolve(dirname(absoluteConfigPath), "..");
-  const telegramBotToken = process.env[config.telegram.botTokenEnv];
+  const telegramBotToken = process.env[telegram.botTokenEnv];
   const openaiApiKey = process.env[config.transcription.apiKeyEnv];
-  return { ...config, configPath: absoluteConfigPath, rootDir, telegramBotToken, openaiApiKey };
+  return { ...config, telegram, configPath: absoluteConfigPath, rootDir, telegramBotToken, openaiApiKey };
 }
 
 export function resolveConfigPath(config: AppConfig, candidate: string): string {

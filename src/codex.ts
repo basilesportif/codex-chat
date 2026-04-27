@@ -77,7 +77,7 @@ export class AppServerCodexClient implements CodexClient {
       if (!this.stopping && this.startupComplete) {
         const reason = `codex app-server exited code=${code ?? "null"} signal=${signal ?? "null"}`;
         this.logger.warn({ component: "codex", event: "app_server_exit", code, signal }, reason);
-        this.rejectAll(new Error(reason));
+        if (this.pending.size > 0) this.rejectAll(new Error(reason));
         this.onCrash?.(reason);
       }
     });
@@ -142,14 +142,7 @@ export class AppServerCodexClient implements CodexClient {
     };
     this.notificationHandlers.add(handler);
     try {
-      const response = await this.request<Record<string, unknown>>("turn/start", {
-        threadId: this.sessionId,
-        input: userInput,
-        cwd: this.config.service.workspace,
-        approvalPolicy: this.config.codex.approvalPolicy,
-        model: this.config.codex.model,
-        effort: this.config.codex.effort
-      });
+      const response = await this.startTurnRequest(userInput);
       const turn = response.turn as Record<string, unknown> | undefined;
       turnId = typeof turn?.id === "string" ? turn.id : "";
       if (!turnId) throw new Error("Codex app-server did not return a turn id");
@@ -160,9 +153,33 @@ export class AppServerCodexClient implements CodexClient {
     }
   }
 
-  private async ensureThread(): Promise<void> {
-    if (this.sessionId) return;
-    const existing = await this.state.getCodexSession(this.config.codex.mainSessionName);
+  private async startTurnRequest(userInput: unknown[]): Promise<Record<string, unknown>> {
+    if (!this.sessionId) throw new Error("No Codex app-server thread is available");
+    try {
+      return await this.request<Record<string, unknown>>("turn/start", this.turnStartParams(userInput));
+    } catch (error) {
+      if (!this.isThreadNotFound(error)) throw error;
+      await this.recoverThread("turn_start_thread_not_found", error);
+      if (!this.sessionId) throw new Error("No Codex app-server thread is available after recovery");
+      return this.request<Record<string, unknown>>("turn/start", this.turnStartParams(userInput));
+    }
+  }
+
+  private turnStartParams(userInput: unknown[]): Record<string, unknown> {
+    return {
+      threadId: this.sessionId,
+      input: userInput,
+      cwd: this.config.service.workspace,
+      approvalPolicy: this.config.codex.approvalPolicy,
+      model: this.config.codex.model,
+      effort: this.config.codex.effort
+    };
+  }
+
+  private async ensureThread(options: { forceNew?: boolean } = {}): Promise<void> {
+    if (this.sessionId && !options.forceNew) return;
+    if (options.forceNew) this.sessionId = undefined;
+    const existing = options.forceNew ? undefined : await this.state.getCodexSession(this.config.codex.mainSessionName);
     if (existing) {
       try {
         await this.resumeThread(existing);
@@ -197,6 +214,18 @@ export class AppServerCodexClient implements CodexClient {
       effort: this.config.codex.effort,
       behaviorHash: hash
     });
+  }
+
+  private async recoverThread(event: string, error: unknown): Promise<void> {
+    this.logger.warn({ component: "codex", event, error, sessionId: this.sessionId }, "Codex thread was missing; starting a new thread");
+    this.sessionId = undefined;
+    await this.state.clearCodexSession(this.config.codex.mainSessionName);
+    await this.ensureThread({ forceNew: true });
+  }
+
+  private isThreadNotFound(error: unknown): boolean {
+    const text = error instanceof Error ? error.message : JSON.stringify(error);
+    return /thread not found|failed to record rollout items/i.test(text);
   }
 
   private async resumeThread(sessionId: string): Promise<void> {
@@ -243,11 +272,18 @@ export class AppServerCodexClient implements CodexClient {
     ws.on("message", (data) => this.handleMessage(data.toString()));
     ws.on("close", () => {
       this.connected = false;
+      const hadPending = this.pending.size > 0;
       if (!this.stopping && this.startupComplete) {
         const reason = "codex app-server websocket closed";
         this.logger.warn({ component: "codex", event: "ws_closed" }, reason);
-        this.rejectAll(new Error(reason));
+        if (hadPending) this.rejectAll(new Error(reason));
         this.onCrash?.(reason);
+        return;
+      }
+      if (hadPending) {
+        const reason = "codex app-server websocket closed during startup";
+        this.logger.debug({ component: "codex", event: "ws_closed_startup", pending: this.pending.size }, reason);
+        this.rejectAll(new Error(reason));
       }
     });
     ws.on("error", (error) => {

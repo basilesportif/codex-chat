@@ -15,7 +15,7 @@ binary = "codex"
 transport = "app-server"
 appServerHost = "127.0.0.1"
 appServerPort = 49345
-model = "gpt-5.4"
+model = "gpt-5.5"
 effort = "medium"
 profile = ""
 sandbox = "danger-full-access"
@@ -36,12 +36,12 @@ parseMode = "plain"
 pairingEnabledOnEmptyAllowlist = true
 downloadMaxBytes = 52428800
 sendProgressUpdates = true
-opsChatId = 0
+opsChatId = 253768951
 
 [telegram.allowlist]
-userIds = []
+userIds = [253768951]
 chatIds = []
-adminUserIds = []
+adminUserIds = [253768951]
 
 [behavior]
 dir = "behavior"

@@ -179,4 +179,71 @@ describe("codex clients", () => {
     expect(onCrash).not.toHaveBeenCalled();
     await client.stop();
   });
+
+  test("recovers by starting a fresh thread when turn/start reports thread not found", async () => {
+    vi.resetModules();
+    const spawn = vi.fn(() => fakeChild());
+    vi.doMock("node:child_process", async () => {
+      const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+      return { ...actual, spawn };
+    });
+    vi.doMock("ws", () => {
+      class FakeWebSocket extends EventEmitter {
+        static OPEN = 1;
+        readyState = 1;
+        turnStartCalls = 0;
+
+        constructor(readonly url: string) {
+          super();
+          queueMicrotask(() => this.emit("open"));
+        }
+
+        send(raw: string): void {
+          const message = JSON.parse(raw) as { id: number; method: string };
+          if (message.method === "turn/start") {
+            this.turnStartCalls += 1;
+            if (this.turnStartCalls === 1) {
+              queueMicrotask(() => this.emit("message", JSON.stringify({ id: message.id, error: { message: "thread not found" } })));
+              return;
+            }
+            queueMicrotask(() => {
+              this.emit("message", JSON.stringify({ id: message.id, result: { turn: { id: "turn-recovered" } } }));
+              setTimeout(() => {
+                this.emit("message", JSON.stringify({ method: "item/agentMessage/delta", params: { turnId: "turn-recovered", delta: "ok" } }));
+                this.emit("message", JSON.stringify({ method: "turn/completed", params: { turn: { id: "turn-recovered" } } }));
+              }, 0);
+            });
+            return;
+          }
+          const result = message.method === "thread/start" ? { thread: { id: "fresh-thread" } } : {};
+          queueMicrotask(() => this.emit("message", JSON.stringify({ id: message.id, result })));
+        }
+
+        close(): void {
+          this.readyState = 3;
+        }
+      }
+      return { default: FakeWebSocket };
+    });
+    const { AppServerCodexClient } = await import("../codex.js");
+    const state = {
+      getCodexSession: vi.fn().mockResolvedValue("stale-thread"),
+      setCodexSession: vi.fn().mockResolvedValue(undefined),
+      clearCodexSession: vi.fn().mockResolvedValue(undefined)
+    };
+    const behavior = {
+      loadBootstrapPrompt: vi.fn().mockResolvedValue("bootstrap"),
+      hash: vi.fn().mockResolvedValue("hash")
+    };
+    const client = new AppServerCodexClient(testConfig("/tmp/codex-chat-test"), state as never, behavior as never, fakeLogger() as never);
+
+    await client.start();
+    const events = [];
+    for await (const event of client.sendTurn({ text: "hello" })) events.push(event);
+
+    expect(events).toContainEqual({ type: "final", text: "ok" });
+    expect(state.clearCodexSession).toHaveBeenCalledWith("codex-chat-main");
+    expect(state.setCodexSession).toHaveBeenCalledWith("codex-chat-main", expect.objectContaining({ sessionId: "fresh-thread" }));
+    await client.stop();
+  });
 });

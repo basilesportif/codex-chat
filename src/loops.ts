@@ -74,6 +74,10 @@ export async function syncCron(config: AppConfig, logger: Logger): Promise<{ cha
   });
   const generated = generateCronLines(config, loops);
   const next = buildManagedCronText(existing, config.loops.namespace, generated);
+  if (generated.length === 0 && next.trim() === existing.trim()) {
+    logger.debug({ component: "loops", event: "cron_sync_skipped_empty" }, "no enabled loops to sync");
+    return { changed: false, lines: generated };
+  }
   if (next.trim() === existing.trim()) return { changed: false, lines: generated };
   const temp = resolveConfigPath(config, "data/run/codex-chat.crontab");
   await atomicWriteText(temp, next, 0o600);
@@ -197,6 +201,7 @@ export function buildManagedCronText(existing: string, namespace: string, genera
   const begin = `# BEGIN ${namespace} managed loops`;
   const end = `# END ${namespace} managed loops`;
   const outside = removeManagedBlock(existing.split(/\r?\n/), begin, end);
+  if (generated.length === 0) return outside.length === 0 ? "" : `${outside.join("\n")}\n`;
   return [...outside, begin, ...generated, end, ""].join("\n");
 }
 

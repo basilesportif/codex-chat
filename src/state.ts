@@ -16,7 +16,7 @@ export class StateStore {
 
   async init(): Promise<void> {
     await ensureDir(this.root);
-    for (const dir of ["messages", "files", "turns", "jobs", "loop_runs", "monitor_events", "outbound_messages", "actions"]) {
+    for (const dir of ["messages", "files", "turns", "queued_turns", "jobs", "loop_runs", "monitor_events", "outbound_messages", "actions"]) {
       await ensureDir(join(this.root, dir));
     }
     if (!(await pathExists(join(this.root, "schema.json")))) {
@@ -91,6 +91,12 @@ export class StateStore {
   async setCodexSession(name: string, value: Record<string, unknown>): Promise<void> {
     const sessions = await this.readJson<Record<string, Record<string, unknown>>>("codex_sessions.json", {});
     sessions[name] = { ...sessions[name], ...value, updatedAt: nowIso() };
+    await this.writeJson("codex_sessions.json", sessions);
+  }
+
+  async clearCodexSession(name: string): Promise<void> {
+    const sessions = await this.readJson<Record<string, Record<string, unknown>>>("codex_sessions.json", {});
+    delete sessions[name];
     await this.writeJson("codex_sessions.json", sessions);
   }
 

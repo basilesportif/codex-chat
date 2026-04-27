@@ -86,4 +86,58 @@ describe("service supervisor", () => {
     expect(messages).toContain("ping test");
     expect(messages).toContain("\"injected\":true");
   });
+
+  test("notifies Telegram users about abandoned running turns after restart", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+    await service.state.writeJson("turns/turn_old.json", {
+      id: "turn_old",
+      status: "running",
+      startedAt: new Date(Date.now() - 60_000).toISOString(),
+      input: {
+        source: "telegram",
+        chatId: 253768951,
+        userId: 253768951,
+        messageId: 123,
+        text: "hi",
+        attachments: [],
+        receivedAt: new Date().toISOString()
+      }
+    });
+
+    await (service as unknown as { abandonStuckTurns(): Promise<void> }).abandonStuckTurns();
+
+    expect(sendText).toHaveBeenCalledWith(253768951, "⚠️ Service was restarted. Please resend your message.", 123);
+    const turn = JSON.parse(await readFile(join(config.rootDir, "state", "turns", "turn_old.json"), "utf8")) as { status: string };
+    expect(turn.status).toBe("abandoned");
+  });
+
+  test("persists queued Telegram events and notifies on restart recovery", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+    await service.state.writeJson("queued_turns/queued_old.json", {
+      id: "queued_old",
+      queuedAt: new Date().toISOString(),
+      event: {
+        source: "telegram",
+        chatId: 253768951,
+        userId: 253768951,
+        messageId: 124,
+        text: "queued",
+        attachments: [],
+        receivedAt: new Date().toISOString()
+      }
+    });
+
+    await (service as unknown as { abandonQueuedTurns(): Promise<void> }).abandonQueuedTurns();
+
+    expect(sendText).toHaveBeenCalledWith(253768951, "⚠️ Service was restarted. Please resend your message.", 124);
+    await expect(access(join(config.rootDir, "state", "queued_turns", "queued_old.json"))).rejects.toThrow();
+  });
 });

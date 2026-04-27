@@ -104,4 +104,21 @@ describe("loops config", () => {
     expect(next).toContain(lines[0] as string);
     expect(next).not.toContain("old managed line");
   });
+
+  test("does not add an empty managed cron block when no loops are enabled", () => {
+    const next = buildManagedCronText("", "testbot", []);
+
+    expect(next).toBe("");
+  });
+
+  test("removes an obsolete managed cron block when no loops are enabled", () => {
+    const next = buildManagedCronText([
+      "MAILTO=tim@example.com",
+      "# BEGIN testbot managed loops",
+      "*/5 * * * * old-command",
+      "# END testbot managed loops"
+    ].join("\n"), "testbot", []);
+
+    expect(next).toBe("MAILTO=tim@example.com\n");
+  });
 });

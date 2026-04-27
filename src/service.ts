@@ -20,6 +20,13 @@ import { makeId, nowIso } from "./util.js";
 export const INJECT_TELEGRAM_USER_ID = 253768951;
 const CODEX_UNAVAILABLE_MESSAGE = "⚠️ Codex is not available. Run 'codex login' on the server to authenticate.";
 const DISABLED_EXEC_RESUME_MESSAGE = "exec-resume transport is disabled. Only app-server (OAuth) is supported. Run 'codex login' to authenticate.";
+const RESTARTED_RESEND_MESSAGE = "⚠️ Service was restarted. Please resend your message.";
+const TURN_RESPONSE_WARN_MS = 45_000;
+
+type QueuedEvent = {
+  event: UserEvent;
+  persistedId?: string;
+};
 
 export function injectFilePath(config: AppConfig): string {
   return join(config.service.workspace, "inject.json");
@@ -36,7 +43,7 @@ export class ServiceSupervisor {
   private readonly heartbeat: CodexHeartbeat;
   private readonly ipc: LocalIpcServer;
   private readonly subagents: SubagentManager;
-  private messageQueue = new Map<string, UserEvent[]>();
+  private messageQueue = new Map<string, QueuedEvent[]>();
   private turnRunning = false;
   private watchdogInterval?: ReturnType<typeof setInterval>;
   private injectInterval?: ReturnType<typeof setInterval>;
@@ -115,14 +122,14 @@ export class ServiceSupervisor {
     await this.files.init();
     await this.behavior.loadBootstrapPrompt();
     await this.codex.start();
-    await this.abandonStuckTurns();
     await this.telegram.start();
+    await this.recoverAbandonedWork();
     await this.ipc.start();
     if (this.config.loops.enabled) await syncCron(this.config, this.logger).catch((error) => this.logger.warn({ component: "loops", event: "cron_sync_failed", error }));
     await this.loops.processSpooled().catch((error) => this.logger.warn({ component: "loops", event: "spool_process_failed", error }));
     await this.monitors.start();
     this.heartbeat.start();
-    this.watchdogInterval = setInterval(() => void this.checkTurnTimeout(), 30_000);
+    this.watchdogInterval = setInterval(() => void this.checkTurnTimeout(), 15_000);
     this.injectInterval = setInterval(() => void this.pollInjectFile(), 1_000);
     const health = await this.codex.health();
     await this.telegram.notifyOps(`codex-chat started\ntransport: ${health.transport}\nsandbox: ${this.config.codex.sandbox}\nsession: ${health.sessionId ?? "new"}`);
@@ -146,7 +153,8 @@ export class ServiceSupervisor {
     const key = event.chatId ? String(event.chatId) : "system";
     if (this.turnRunning) {
       const queue = this.messageQueue.get(key) ?? [];
-      queue.push(event);
+      const persistedId = await this.persistQueuedEvent(event);
+      queue.push({ event, persistedId });
       this.messageQueue.set(key, queue);
       this.logger.info({ component: "service", event: "message_queued", key, queueLength: queue.length }, "Turn busy - message queued");
       return;
@@ -164,7 +172,8 @@ export class ServiceSupervisor {
     };
     if (this.turnRunning) {
       const queue = this.messageQueue.get("system") ?? [];
-      queue.push(event);
+      const persistedId = await this.persistQueuedEvent(event);
+      queue.push({ event, persistedId });
       this.messageQueue.set("system", queue);
       return;
     }
@@ -209,6 +218,7 @@ export class ServiceSupervisor {
     const prompt = this.formatEventForCodex(event);
     const turnId = makeId("turn");
     await this.state.writeJson(`turns/${turnId}.json`, { id: turnId, status: "running", input: event, startedAt: nowIso() });
+    await this.removePersistedQueuedEvent(event);
     let output = "";
     let hadError = false;
     let errorMessage = "";
@@ -322,7 +332,7 @@ export class ServiceSupervisor {
       if (queue.length > 0) {
         const next = queue.shift()!;
         if (queue.length === 0) this.messageQueue.delete(key);
-        this.runTurn(next);
+        this.runTurn(next.event);
         return;
       }
     }
@@ -344,6 +354,11 @@ export class ServiceSupervisor {
     }
   }
 
+  private async recoverAbandonedWork(): Promise<void> {
+    await this.abandonStuckTurns();
+    await this.abandonQueuedTurns();
+  }
+
   private async abandonStuckTurns(): Promise<void> {
     const turnsDir = resolveConfigPath(this.config, join(this.config.service.stateDir, "turns"));
     try {
@@ -360,6 +375,7 @@ export class ServiceSupervisor {
             (turn as Record<string, unknown>).abandonedAt = nowIso();
             await writeFile(path, JSON.stringify(turn, null, 2));
             abandoned++;
+            await this.notifyRestartedUser(turn as { input?: UserEvent });
           }
         } catch {
           // ignore individual file errors
@@ -371,6 +387,59 @@ export class ServiceSupervisor {
     } catch {
       // ignore if turns dir doesn't exist yet
     }
+  }
+
+  private async abandonQueuedTurns(): Promise<void> {
+    const queuedDir = resolveConfigPath(this.config, join(this.config.service.stateDir, "queued_turns"));
+    try {
+      const files = await readdir(queuedDir).catch(() => []);
+      let abandoned = 0;
+      for (const file of files) {
+        if (!file.endsWith(".json")) continue;
+        const path = join(queuedDir, file);
+        try {
+          const queued = JSON.parse(await readFile(path, "utf8")) as { event?: UserEvent };
+          await this.notifyRestartedUser({ input: queued.event });
+          await rm(path, { force: true });
+          abandoned++;
+        } catch {
+          // ignore individual file errors
+        }
+      }
+      if (abandoned > 0) {
+        this.logger.warn({ component: "service", event: "abandoned_queued_turns", count: abandoned }, `Abandoned ${abandoned} queued turn(s) from previous session`);
+      }
+    } catch {
+      // ignore if queued dir doesn't exist yet
+    }
+  }
+
+  private async notifyRestartedUser(turn: { input?: UserEvent }): Promise<void> {
+    const chatId = turn.input?.chatId;
+    if (!chatId) return;
+    try {
+      await this.telegram.sendText(chatId, RESTARTED_RESEND_MESSAGE, turn.input?.messageId);
+    } catch (error) {
+      this.logger.error({ component: "service", event: "restart_notice_failed", chatId, error }, "Failed to send restart notice to Telegram");
+    }
+  }
+
+  private async persistQueuedEvent(event: UserEvent): Promise<string | undefined> {
+    if (!event.chatId) return undefined;
+    const id = makeId("queued");
+    const persistedEvent: UserEvent = {
+      ...event,
+      metadata: { ...event.metadata, persistedQueueId: id }
+    };
+    await this.state.writeJson(`queued_turns/${id}.json`, { id, event: persistedEvent, queuedAt: nowIso() });
+    event.metadata = persistedEvent.metadata;
+    return id;
+  }
+
+  private async removePersistedQueuedEvent(event: UserEvent): Promise<void> {
+    const persistedId = typeof event.metadata?.persistedQueueId === "string" ? event.metadata.persistedQueueId : undefined;
+    if (!persistedId) return;
+    await rm(this.state.path(`queued_turns/${persistedId}.json`), { force: true }).catch(() => undefined);
   }
 
   private async pollInjectFile(): Promise<void> {
@@ -428,21 +497,21 @@ export class ServiceSupervisor {
     const turnsDir = resolveConfigPath(this.config, join(this.config.service.stateDir, "turns"));
     try {
       const files = await readdir(turnsDir).catch(() => []);
-      const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+      const warnBefore = new Date(Date.now() - TURN_RESPONSE_WARN_MS).toISOString();
       for (const file of files) {
         if (!file.endsWith(".json")) continue;
         const path = join(turnsDir, file);
         try {
           const raw = await readFile(path, "utf8");
           const turn = JSON.parse(raw) as { status?: string; startedAt?: string; input?: { chatId?: number } };
-          if (turn.status === "running" && turn.startedAt && turn.startedAt < twoMinutesAgo) {
+          if (turn.status === "running" && turn.startedAt && turn.startedAt < warnBefore) {
             turn.status = "timeout";
             (turn as Record<string, unknown>).timedOutAt = nowIso();
             await writeFile(path, JSON.stringify(turn, null, 2));
             const chatId = turn.input?.chatId;
             if (chatId) {
               try {
-                await this.telegram.sendText(chatId, "Codex took too long to respond. Please try again.");
+                await this.telegram.sendText(chatId, "Codex is still working. Please resend your message if this does not complete shortly.");
               } catch {
                 // ignore send failures in watchdog
               }

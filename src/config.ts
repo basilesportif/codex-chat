@@ -21,7 +21,7 @@ const configSchema = z.object({
   }),
   codex: z.object({
     binary: z.string().default("codex"),
-    transport: z.enum(["app-server", "exec-resume"]).default("app-server"),
+    transport: z.string().default("app-server"),
     appServerHost: z.string().default("127.0.0.1"),
     appServerPort: z.number().int().min(1).max(65535).default(49345),
     model: z.string().default("gpt-5.4"),

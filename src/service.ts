@@ -1,9 +1,9 @@
 import type { Logger } from "pino";
-import { readdir, readFile, writeFile } from "node:fs/promises";
+import { readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { AppConfig, ensureConfiguredDirectories, resolveConfigPath } from "./config.js";
 import { BehaviorPack } from "./behavior.js";
-import { AppServerCodexClient, ExecResumeCodexClient, HybridCodexClient } from "./codex.js";
+import { AppServerCodexClient } from "./codex.js";
 import { DirectiveAction, parseDirectives } from "./directives.js";
 import { FileStore } from "./file-store.js";
 import { CodexHeartbeat } from "./heartbeat.js";
@@ -16,6 +16,14 @@ import { DisabledTranscriber, OpenAITranscriber, Transcriber } from "./transcrip
 import { TelegramGateway } from "./telegram.js";
 import { CodexClient, StoredAction, SubagentJob, UserEvent } from "./types.js";
 import { makeId, nowIso } from "./util.js";
+
+export const INJECT_TELEGRAM_USER_ID = 253768951;
+const CODEX_UNAVAILABLE_MESSAGE = "⚠️ Codex is not available. Run 'codex login' on the server to authenticate.";
+const DISABLED_EXEC_RESUME_MESSAGE = "exec-resume transport is disabled. Only app-server (OAuth) is supported. Run 'codex login' to authenticate.";
+
+export function injectFilePath(config: AppConfig): string {
+  return join(config.service.workspace, "inject.json");
+}
 
 export class ServiceSupervisor {
   readonly state: StateStore;
@@ -31,6 +39,8 @@ export class ServiceSupervisor {
   private messageQueue = new Map<string, UserEvent[]>();
   private turnRunning = false;
   private watchdogInterval?: ReturnType<typeof setInterval>;
+  private injectInterval?: ReturnType<typeof setInterval>;
+  private injectPolling = false;
   private stopping = false;
   private restartingCodex = false;
   private seenIdempotency = new Set<string>();
@@ -43,17 +53,12 @@ export class ServiceSupervisor {
     this.behavior = new BehaviorPack(config);
     this.files = new FileStore(config, this.state);
     const transcriber = this.createTranscriber();
-    const execFallback = new ExecResumeCodexClient(config, this.state, this.behavior, logger);
-    let codexClient: CodexClient;
-    if (config.codex.transport === "app-server") {
-      const appServer = new AppServerCodexClient(config, this.state, this.behavior, logger, (reason) => {
-        void this.restartCodex(reason);
-      });
-      codexClient = new HybridCodexClient(appServer, execFallback, logger);
-    } else {
-      codexClient = execFallback;
+    if (config.codex.transport !== "app-server") {
+      throw new Error(DISABLED_EXEC_RESUME_MESSAGE);
     }
-    this.codex = codexClient;
+    this.codex = new AppServerCodexClient(config, this.state, this.behavior, logger, (reason) => {
+      void this.restartCodex(reason);
+    });
     this.subagents = new SubagentManager(
       config,
       this.behavior,
@@ -116,12 +121,14 @@ export class ServiceSupervisor {
     await this.monitors.start();
     this.heartbeat.start();
     this.watchdogInterval = setInterval(() => void this.checkTurnTimeout(), 30_000);
+    this.injectInterval = setInterval(() => void this.pollInjectFile(), 1_000);
     const health = await this.codex.health();
     await this.telegram.notifyOps(`codex-chat started\ntransport: ${health.transport}\nsandbox: ${this.config.codex.sandbox}\nsession: ${health.sessionId ?? "new"}`);
   }
 
   async stop(): Promise<void> {
     if (this.watchdogInterval) clearInterval(this.watchdogInterval);
+    if (this.injectInterval) clearInterval(this.injectInterval);
     if (this.stopping) return;
     this.stopping = true;
     await this.telegram.notifyOps("codex-chat shutting down").catch(() => undefined);
@@ -203,14 +210,27 @@ export class ServiceSupervisor {
     let output = "";
     let hadError = false;
     let errorMessage = "";
-    for await (const codexEvent of this.codex.sendTurn({ text: prompt, attachments: event.attachments, source: event.source, turnId })) {
-      if (codexEvent.type === "delta") output += codexEvent.text;
-      if (codexEvent.type === "final" && codexEvent.text.trim()) output = codexEvent.text;
-      if (codexEvent.type === "error") {
-        hadError = true;
-        errorMessage = codexEvent.message ?? "unknown error";
-        this.logger.error({ component: "codex", event: "turn_event_error", turnId, detail: codexEvent.message });
+    try {
+      for await (const codexEvent of this.codex.sendTurn({ text: prompt, attachments: event.attachments, source: event.source, turnId })) {
+        if (codexEvent.type === "delta") output += codexEvent.text;
+        if (codexEvent.type === "final" && codexEvent.text.trim()) output = codexEvent.text;
+        if (codexEvent.type === "error") {
+          hadError = true;
+          errorMessage = codexEvent.message ?? "unknown error";
+          this.logger.error({ component: "codex", event: "turn_event_error", turnId, detail: codexEvent.message });
+        }
       }
+    } catch (error) {
+      this.logger.error({ component: "codex", event: "turn_unavailable", turnId, error }, "Codex turn failed");
+      await this.state.writeJson(`turns/${turnId}.json`, { id: turnId, status: "error", input: event, errorMessage: error instanceof Error ? error.message : String(error), completedAt: nowIso() });
+      if (event.chatId) {
+        try {
+          await this.telegram.sendText(event.chatId, CODEX_UNAVAILABLE_MESSAGE, event.messageId);
+        } catch (sendError) {
+          this.logger.error({ component: "service", event: "codex_unavailable_reply_failed", sendError }, "Failed to send Codex unavailable reply to Telegram");
+        }
+      }
+      return;
     }
     if (hadError && !output.trim() && event.chatId) {
       const brief = errorMessage.split("\n")[0].slice(0, 100);
@@ -348,6 +368,56 @@ export class ServiceSupervisor {
       }
     } catch {
       // ignore if turns dir doesn't exist yet
+    }
+  }
+
+  private async pollInjectFile(): Promise<void> {
+    if (this.injectPolling) return;
+    this.injectPolling = true;
+    const path = injectFilePath(this.config);
+    try {
+      const raw = await readFile(path, "utf8").catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return undefined;
+        throw error;
+      });
+      if (raw === undefined) return;
+      const payload = JSON.parse(raw) as Record<string, unknown>;
+      const text = typeof payload.text === "string" ? payload.text : "";
+      if (!text.trim()) throw new Error("inject.json is missing message text");
+      const receivedAt = typeof payload.receivedAt === "string" ? payload.receivedAt : nowIso();
+      const chatId = typeof payload.chatId === "number" ? payload.chatId : INJECT_TELEGRAM_USER_ID;
+      const userId = typeof payload.userId === "number" ? payload.userId : INJECT_TELEGRAM_USER_ID;
+      const messageId = typeof payload.messageId === "number" ? payload.messageId : undefined;
+      const username = typeof payload.username === "string" ? payload.username : "tim";
+      const event: UserEvent = {
+        source: "telegram",
+        chatId,
+        userId,
+        username,
+        messageId,
+        text,
+        attachments: [],
+        receivedAt,
+        metadata: { injected: true }
+      };
+      await this.state.recordMessage({
+        direction: "inbound",
+        chatId,
+        userId,
+        username,
+        messageId,
+        text,
+        attachments: [],
+        receivedAt,
+        injected: true
+      });
+      await this.enqueueUserEvent(event);
+      await rm(path, { force: true });
+      this.logger.info({ component: "service", event: "inject_consumed", path, userId, chatId }, "Consumed injected message");
+    } catch (error) {
+      this.logger.error({ component: "service", event: "inject_failed", path, error }, "Failed to process injected message");
+    } finally {
+      this.injectPolling = false;
     }
   }
 

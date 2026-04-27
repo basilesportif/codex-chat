@@ -7,9 +7,9 @@ import { loadConfig, ensureConfiguredDirectories, writeDefaultConfigIfMissing, r
 import { createLogger } from "./logger.js";
 import { runLoopCli, syncCron, validateLoops } from "./loops.js";
 import { validateMonitors } from "./monitors.js";
-import { ServiceSupervisor } from "./service.js";
+import { injectFilePath, INJECT_TELEGRAM_USER_ID, ServiceSupervisor } from "./service.js";
 import { installUserService, uninstallUserService } from "./systemd.js";
-import { pathExists } from "./util.js";
+import { atomicWriteJson, nowIso, pathExists } from "./util.js";
 
 const program = new Command();
 
@@ -76,6 +76,32 @@ program.command("health")
     if (options.json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     else process.stdout.write(`ok\ncodex: ${result.codex}\nstate: ${result.stateDir}\n`);
     if (options.strict && (!result.telegramConfigured || (config.transcription.enabled && !result.openaiConfigured) || !behaviorOk)) process.exit(1);
+  });
+
+program.command("inject")
+  .argument("<message...>", "message text")
+  .description("inject a synthetic Telegram message into the running service")
+  .action(async (messageParts: string[]) => {
+    const config = await loadConfig(program.opts().config);
+    const path = injectFilePath(config);
+    await atomicWriteJson(path, {
+      text: messageParts.join(" "),
+      userId: INJECT_TELEGRAM_USER_ID,
+      chatId: INJECT_TELEGRAM_USER_ID,
+      username: "tim",
+      receivedAt: nowIso(),
+      metadata: { injected: true }
+    });
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      if (!(await pathExists(path))) {
+        process.stdout.write("injected\n");
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    process.stdout.write("timeout\n");
+    process.exit(1);
   });
 
 const loop = program.command("loop").description("loop management");
@@ -164,7 +190,8 @@ program.parseAsync(process.argv).catch((error) => {
 
 function runCapture(command: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+    const { OPENAI_API_KEY: _omit, ...safeEnv } = process.env;
+    const child = spawn(command, args, { env: safeEnv, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => {

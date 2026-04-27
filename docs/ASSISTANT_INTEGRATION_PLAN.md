@@ -31,8 +31,17 @@ ssh tim@178.104.208.141 "git clone git@github.com:basilesportif/tim-data-assista
 
 ### Copy secrets
 
+Relay via dev server (this assistant session → dev → prod):
+
 ```bash
-rsync -avz /home/tim/.assistant-claude/workspace/.env tim@178.104.208.141:/home/tim/.assistant-claude/workspace/.env
+# Step 1: copy .env from local to dev (temp)
+rsync -avz /home/tim/.assistant-claude/workspace/.env tim@89.167.72.52:/tmp/assistant-secrets.env
+
+# Step 2: copy from dev to prod
+ssh tim@89.167.72.52 "scp /tmp/assistant-secrets.env tim@178.104.208.141:/home/tim/.assistant-claude/workspace/.env"
+
+# Step 3: delete from dev
+ssh tim@89.167.72.52 "rm /tmp/assistant-secrets.env"
 ```
 
 ### Verify Node is available on prod

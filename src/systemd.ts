@@ -18,7 +18,7 @@ export async function installUserService(config: AppConfig, enableNow = false): 
       ""
     ].join("\n"), { mode: 0o600 });
   }
-  const node = process.execPath;
+  const runtime = await resolveBunRuntime();
   const main = resolve(process.argv[1] ?? "dist/main.js");
   const unitPath = join(unitDir, "codex-chat.service");
   const unit = `[Unit]
@@ -30,7 +30,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=${config.rootDir}
 EnvironmentFile=${envPath}
-ExecStart=${node} ${main} --config ${config.configPath} start
+ExecStart=${runtime} ${main} --config ${config.configPath} start
 Restart=always
 RestartSec=5
 StartLimitIntervalSec=0
@@ -67,4 +67,12 @@ function runSystemctl(args: string[]): Promise<void> {
     const child = spawn("systemctl", args, { stdio: "ignore" });
     child.on("exit", (code) => code === 0 ? resolve() : reject(new Error(`systemctl exited with ${code}`)));
   });
+}
+
+async function resolveBunRuntime(): Promise<string> {
+  const bun = (process.versions as typeof process.versions & { bun?: string }).bun;
+  if (bun && process.execPath) return process.execPath;
+  const homeBun = join(homedir(), ".bun/bin/bun");
+  if (await pathExists(homeBun)) return homeBun;
+  return "bun";
 }

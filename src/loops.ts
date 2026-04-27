@@ -201,7 +201,7 @@ export function buildManagedCronText(existing: string, namespace: string, genera
 }
 
 export function generateCronLines(config: AppConfig, loops: LoopsConfig): string[] {
-  const binary = process.argv[1] && process.argv[1].endsWith("main.js") ? `node ${process.argv[1]}` : config.loops.runnerCommand.replace(/\s+loop run$/, "");
+  const binary = process.argv[1] && process.argv[1].endsWith("main.js") ? `bun ${process.argv[1]}` : config.loops.runnerCommand.replace(/\s+loop run$/, "");
   return loops.loops
     .filter((loop) => loop.enabled)
     .map((loop) => {

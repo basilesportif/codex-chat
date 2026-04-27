@@ -47,7 +47,7 @@ Non-goals for the first implementation:
 
 ### Runtime and Language
 
-Use Node.js 24 LTS with TypeScript.
+Use Bun with TypeScript.
 
 Rationale:
 
@@ -61,7 +61,7 @@ Rationale:
 - Package manager: `pnpm` or `npm`. Prefer `pnpm` if starting from scratch.
 - Module format: ESM.
 - Compiler: `tsc`.
-- Dev runner: `tsx` for local development.
+- Dev runner: `bun run src/main.ts` for local development.
 - Production entrypoint: compiled `dist/main.js`.
 - Validation: `zod`.
 - Logging: `pino`.
@@ -77,7 +77,7 @@ Rationale:
 
 ### Process Model
 
-Run one main `codex-chat` Node.js process under systemd. That process supervises:
+Run one main `codex-chat` Bun process under systemd. That process supervises:
 
 - One persistent main Codex process.
 - Zero or more short-lived Codex subagent processes.
@@ -1192,7 +1192,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/home/tim/pkg/mush/codex-chat
 EnvironmentFile=%h/.config/codex-chat/env
-ExecStart=/usr/bin/node /home/tim/pkg/mush/codex-chat/dist/main.js --config /home/tim/pkg/mush/codex-chat/config/codex-chat.toml
+ExecStart=/home/tim/.bun/bin/bun /home/tim/pkg/mush/codex-chat/dist/main.js --config /home/tim/pkg/mush/codex-chat/config/codex-chat.toml
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGTERM

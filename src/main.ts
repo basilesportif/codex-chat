@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 import { spawn } from "node:child_process";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -66,7 +66,7 @@ program.command("health")
     const result = {
       ok: true,
       config: config.configPath,
-      node: process.version,
+      runtime: runtimeVersion(),
       codex: codexVersion.trim(),
       behaviorOk,
       telegramConfigured: Boolean(config.telegramBotToken),
@@ -202,4 +202,9 @@ function runCapture(command: string, args: string[]): Promise<string> {
     });
     child.on("exit", (code) => code === 0 ? resolve(stdout) : reject(new Error(stderr || stdout || `${command} exited with ${code}`)));
   });
+}
+
+function runtimeVersion(): string {
+  const bun = (process.versions as typeof process.versions & { bun?: string }).bun;
+  return bun ? `bun ${bun}` : `node ${process.version}`;
 }

@@ -10,8 +10,8 @@ pnpm run build
 cp .env.example .env
 export TELEGRAM_BOT_TOKEN=your-bot-token-here
 export OPENAI_API_KEY=your-openai-api-key-here
-node dist/main.js setup
-node dist/main.js start
+bun dist/main.js setup
+bun dist/main.js start
 ```
 
 If `telegram.allowlist` is empty, `start` prints a one-time `/pair <code>` command. Send that command to the bot from Telegram to authorize your numeric Telegram user ID and chat ID.

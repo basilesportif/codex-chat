@@ -4,7 +4,7 @@ version = 1
 
 [service]
 name = "codex-chat"
-workspace = "/home/tim/pkg/mush/codex-chat"
+workspace = "/home/tim/pkg/tim/codex-chat"
 stateDir = "data/state"
 logLevel = "info"
 timezone = "Etc/UTC"
@@ -75,7 +75,7 @@ dir = "data/files"
 artifactDir = "data/artifacts"
 allowedSendRoots = [
   "data",
-  "/home/tim/pkg/mush/codex-chat"
+  "/home/tim/pkg/tim/codex-chat"
 ]
 
 [transcription]

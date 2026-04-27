@@ -33,6 +33,7 @@ EnvironmentFile=${envPath}
 ExecStart=${node} ${main} --config ${config.configPath} start
 Restart=always
 RestartSec=5
+StartLimitIntervalSec=0
 KillSignal=SIGTERM
 TimeoutStopSec=30
 StandardOutput=journal

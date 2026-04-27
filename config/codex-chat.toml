@@ -81,7 +81,7 @@ allowedSendRoots = [
 [transcription]
 enabled = true
 provider = "openai"
-model = "gpt-4o-mini-transcribe"
+model = "gpt-4o-transcribe"
 apiKeyEnv = "OPENAI_API_KEY"
 language = ""
 

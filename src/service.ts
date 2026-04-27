@@ -4,6 +4,7 @@ import { BehaviorPack } from "./behavior.js";
 import { AppServerCodexClient, ExecResumeCodexClient, HybridCodexClient } from "./codex.js";
 import { DirectiveAction, parseDirectives } from "./directives.js";
 import { FileStore } from "./file-store.js";
+import { CodexHeartbeat } from "./heartbeat.js";
 import { LocalIpcServer } from "./ipc.js";
 import { LoopManager, syncCron } from "./loops.js";
 import { MonitorManager } from "./monitors.js";
@@ -22,6 +23,7 @@ export class ServiceSupervisor {
   readonly codex: CodexClient;
   readonly loops: LoopManager;
   readonly monitors: MonitorManager;
+  private readonly heartbeat: CodexHeartbeat;
   private readonly ipc: LocalIpcServer;
   private readonly subagents: SubagentManager;
   private turnChain: Promise<void> = Promise.resolve();
@@ -82,6 +84,11 @@ export class ServiceSupervisor {
       },
       notifyAdmins: (text) => this.telegram.notifyOps(text)
     });
+    this.heartbeat = new CodexHeartbeat(
+      this.codex,
+      (text) => this.telegram.notifyOps(text),
+      logger
+    );
     this.ipc = new LocalIpcServer(resolveConfigPath(config, config.service.ipcSocket), logger, async (message) => {
       if (message.type === "loop_run") await this.loops.handleRun(message.loopId, message.scheduledAt);
     });
@@ -98,6 +105,7 @@ export class ServiceSupervisor {
     if (this.config.loops.enabled) await syncCron(this.config, this.logger).catch((error) => this.logger.warn({ component: "loops", event: "cron_sync_failed", error }));
     await this.loops.processSpooled().catch((error) => this.logger.warn({ component: "loops", event: "spool_process_failed", error }));
     await this.monitors.start();
+    this.heartbeat.start();
     const health = await this.codex.health();
     await this.telegram.notifyOps(`codex-chat started\ntransport: ${health.transport}\nsandbox: ${this.config.codex.sandbox}\nsession: ${health.sessionId ?? "new"}`);
   }
@@ -109,6 +117,7 @@ export class ServiceSupervisor {
     await this.ipc.stop().catch(() => undefined);
     await this.telegram.stop().catch(() => undefined);
     await this.monitors.stop().catch(() => undefined);
+    this.heartbeat.stop();
     await this.subagents.shutdown().catch(() => undefined);
     await this.codex.stop().catch(() => undefined);
   }

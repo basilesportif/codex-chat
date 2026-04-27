@@ -57,7 +57,9 @@ export class ServiceSupervisor {
       throw new Error(DISABLED_EXEC_RESUME_MESSAGE);
     }
     this.codex = new AppServerCodexClient(config, this.state, this.behavior, logger, (reason) => {
-      void this.restartCodex(reason);
+      void this.restartCodex(reason).catch((error) => {
+        this.logger.error({ component: "service", event: "restart_failed", error }, "Codex restart failed");
+      });
     });
     this.subagents = new SubagentManager(
       config,

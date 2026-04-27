@@ -47,6 +47,7 @@ export class AppServerCodexClient implements CodexClient {
   private stopping = false;
   private sessionId?: string;
   private connected = false;
+  private startupComplete = false;
 
   constructor(
     private readonly config: AppConfig,
@@ -58,6 +59,7 @@ export class AppServerCodexClient implements CodexClient {
 
   async start(): Promise<void> {
     this.stopping = false;
+    this.startupComplete = false;
     const listenUrl = `ws://${this.config.codex.appServerHost}:${this.config.codex.appServerPort}`;
     const args = ["app-server", "--listen", listenUrl];
     for (const item of this.config.codex.extraConfig) args.push("-c", item);
@@ -72,7 +74,7 @@ export class AppServerCodexClient implements CodexClient {
     this.child.stderr?.on("data", (chunk) => this.logger.info({ component: "codex", stream: "stderr", data: chunk.toString() }));
     this.child.on("exit", (code, signal) => {
       this.connected = false;
-      if (!this.stopping) {
+      if (!this.stopping && this.startupComplete) {
         const reason = `codex app-server exited code=${code ?? "null"} signal=${signal ?? "null"}`;
         this.logger.warn({ component: "codex", event: "app_server_exit", code, signal }, reason);
         this.rejectAll(new Error(reason));
@@ -80,6 +82,7 @@ export class AppServerCodexClient implements CodexClient {
       }
     });
     await this.connectWithRetry(listenUrl);
+    this.startupComplete = true;
     await this.request("initialize", {
       clientInfo: { name: "codex-chat", title: "codex-chat", version: "0.1.0" },
       capabilities: { experimentalApi: true }
@@ -240,7 +243,7 @@ export class AppServerCodexClient implements CodexClient {
     ws.on("message", (data) => this.handleMessage(data.toString()));
     ws.on("close", () => {
       this.connected = false;
-      if (!this.stopping) {
+      if (!this.stopping && this.startupComplete) {
         const reason = "codex app-server websocket closed";
         this.logger.warn({ component: "codex", event: "ws_closed" }, reason);
         this.rejectAll(new Error(reason));

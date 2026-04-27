@@ -131,4 +131,52 @@ describe("codex clients", () => {
     expect(options.env?.OTHER_VAR).toBe("keep-me");
     await client.stop();
   });
+
+  test("does not report a crash while app-server websocket startup is still retrying", async () => {
+    vi.resetModules();
+    const spawn = vi.fn(() => fakeChild());
+    vi.doMock("node:child_process", async () => {
+      const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+      return { ...actual, spawn };
+    });
+    vi.doMock("ws", () => {
+      class FakeWebSocket extends EventEmitter {
+        static OPEN = 1;
+        readyState = 0;
+
+        constructor(readonly url: string) {
+          super();
+          queueMicrotask(() => {
+            const error = new Error("ECONNREFUSED");
+            this.emit("error", error);
+            this.emit("close");
+          });
+        }
+
+        send(): void {}
+
+        close(): void {
+          this.readyState = 3;
+          this.emit("close");
+        }
+      }
+      return { default: FakeWebSocket };
+    });
+    const { AppServerCodexClient } = await import("../codex.js");
+    const state = {
+      getCodexSession: vi.fn().mockResolvedValue(undefined),
+      setCodexSession: vi.fn().mockResolvedValue(undefined)
+    };
+    const behavior = {
+      loadBootstrapPrompt: vi.fn().mockResolvedValue("bootstrap"),
+      hash: vi.fn().mockResolvedValue("hash")
+    };
+    const onCrash = vi.fn();
+    const client = new AppServerCodexClient(testConfig("/tmp/codex-chat-test"), state as never, behavior as never, fakeLogger() as never, onCrash);
+
+    await expect(client.start()).rejects.toThrow("ECONNREFUSED");
+
+    expect(onCrash).not.toHaveBeenCalled();
+    await client.stop();
+  });
 });

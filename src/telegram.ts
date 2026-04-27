@@ -9,6 +9,28 @@ import { chunkText, makePairingCode, nowIso } from "./util.js";
 
 type GrammyContext = Context;
 
+export interface TelegramAllowlistInput {
+  userId?: number;
+  chatId?: number;
+  configUserIds: number[];
+  configChatIds: number[];
+  stateUsers?: Array<{ userId: number; isAdmin?: boolean }>;
+  stateChats?: Array<{ chatId: number }>;
+}
+
+export function isTelegramUserAllowed(input: TelegramAllowlistInput): boolean {
+  if (input.userId === undefined || input.chatId === undefined) return false;
+  const allowedUsers = new Set([...(input.configUserIds ?? []), ...(input.stateUsers ?? []).map((user) => user.userId)]);
+  const allowedChats = new Set([...(input.configChatIds ?? []), ...(input.stateChats ?? []).map((chat) => chat.chatId)]);
+  if (!allowedUsers.has(input.userId)) return false;
+  return allowedChats.size === 0 || allowedChats.has(input.chatId);
+}
+
+export function isTelegramAdmin(input: { userId?: number; configAdminUserIds: number[]; stateUsers?: Array<{ userId: number; isAdmin?: boolean }> }): boolean {
+  if (input.userId === undefined) return false;
+  return input.configAdminUserIds.includes(input.userId) || Boolean(input.stateUsers?.some((user) => user.userId === input.userId && user.isAdmin));
+}
+
 interface TelegramCallbacks {
   onUserEvent(event: UserEvent): Promise<void>;
   onJobsCommand?(chatId: number): Promise<string>;
@@ -230,10 +252,14 @@ export class TelegramGateway {
     if (!from || !chat) return false;
     const stateUsers = await this.state.listTelegramUsers();
     const stateChats = await this.state.listTelegramChats();
-    const allowedUsers = new Set([...this.config.telegram.allowlist.userIds, ...stateUsers.map((user) => user.userId)]);
-    const allowedChats = new Set([...this.config.telegram.allowlist.chatIds, ...stateChats.map((item) => item.chatId)]);
-    if (!allowedUsers.has(from.id)) return false;
-    return allowedChats.size === 0 || allowedChats.has(chat.id);
+    return isTelegramUserAllowed({
+      userId: from.id,
+      chatId: chat.id,
+      configUserIds: this.config.telegram.allowlist.userIds,
+      configChatIds: this.config.telegram.allowlist.chatIds,
+      stateUsers,
+      stateChats
+    });
   }
 
   private async isAllowlistEmpty(): Promise<boolean> {

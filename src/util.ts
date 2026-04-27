@@ -63,8 +63,60 @@ export function isInsidePath(child: string, parent: string): boolean {
 
 export function chunkText(text: string, maxLength = 3900): string[] {
   if (text.length <= maxLength) return [text];
+  const units = markdownSplitUnits(text);
   const chunks: string[] = [];
-  let rest = text;
+  let current = "";
+  for (const unit of units) {
+    if (unit.length > maxLength) {
+      if (current.trim()) {
+        chunks.push(current.trimEnd());
+        current = "";
+      }
+      chunks.push(...splitLargeUnit(unit, maxLength));
+      continue;
+    }
+    if (current && current.length + unit.length > maxLength) {
+      chunks.push(current.trimEnd());
+      current = unit.trimStart();
+    } else {
+      current += unit;
+    }
+  }
+  if (current.trim()) chunks.push(current.trimEnd());
+  return chunks.filter((chunk) => chunk.length > 0);
+}
+
+function markdownSplitUnits(text: string): string[] {
+  const lines = text.match(/.*(?:\r?\n|$)/g)?.filter((line) => line.length > 0) ?? [];
+  const units: string[] = [];
+  let buffer = "";
+  let inFence = false;
+  for (const line of lines) {
+    const isFence = line.trimStart().startsWith("```");
+    if (!inFence && isFence) {
+      if (buffer) units.push(buffer);
+      buffer = line;
+      inFence = true;
+      continue;
+    }
+    buffer += line;
+    if (inFence && isFence) {
+      units.push(buffer);
+      buffer = "";
+      inFence = false;
+    } else if (!inFence && line.trim() === "") {
+      units.push(buffer);
+      buffer = "";
+    }
+  }
+  if (buffer) units.push(buffer);
+  return units;
+}
+
+function splitLargeUnit(unit: string, maxLength: number): string[] {
+  if (unit.trimStart().startsWith("```")) return splitLargeFence(unit, maxLength);
+  const chunks: string[] = [];
+  let rest = unit;
   while (rest.length > maxLength) {
     let split = rest.lastIndexOf("\n\n", maxLength);
     if (split < maxLength * 0.5) split = rest.lastIndexOf("\n", maxLength);
@@ -72,7 +124,42 @@ export function chunkText(text: string, maxLength = 3900): string[] {
     chunks.push(rest.slice(0, split).trimEnd());
     rest = rest.slice(split).trimStart();
   }
-  if (rest.length > 0) chunks.push(rest);
+  if (rest.trim()) chunks.push(rest.trimEnd());
+  return chunks;
+}
+
+function splitLargeFence(unit: string, maxLength: number): string[] {
+  const lines = unit.match(/.*(?:\r?\n|$)/g)?.filter((line) => line.length > 0) ?? [];
+  const opener = lines[0]?.trimEnd() || "```";
+  const hasClosing = lines.length > 1 && lines[lines.length - 1]?.trimStart().startsWith("```");
+  const body = hasClosing ? lines.slice(1, -1) : lines.slice(1);
+  const chunks: string[] = [];
+  const reopen = `${opener}\n`;
+  const close = "\n```";
+  let current = reopen;
+
+  for (const line of body) {
+    if (current.length + line.length + close.length > maxLength && current !== reopen) {
+      chunks.push(`${current.trimEnd()}${close}`);
+      current = reopen;
+    }
+    if (line.length + reopen.length + close.length > maxLength) {
+      let rest = line;
+      while (rest.length > 0) {
+        const available = Math.max(1, maxLength - current.length - close.length);
+        current += rest.slice(0, available);
+        rest = rest.slice(available);
+        if (rest.length > 0) {
+          chunks.push(`${current.trimEnd()}${close}`);
+          current = reopen;
+        }
+      }
+    } else {
+      current += line;
+    }
+  }
+
+  if (current !== reopen) chunks.push(`${current.trimEnd()}${close}`);
   return chunks;
 }
 

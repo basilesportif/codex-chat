@@ -67,16 +67,13 @@ export async function loadLoopsConfig(config: AppConfig): Promise<LoopsConfig> {
 
 export async function syncCron(config: AppConfig, logger: Logger): Promise<{ changed: boolean; lines: string[] }> {
   const loops = await loadLoopsConfig(config);
-  const begin = `# BEGIN ${config.loops.namespace} managed loops`;
-  const end = `# END ${config.loops.namespace} managed loops`;
   const existing = await runCommandCapture("crontab", ["-l"]).catch((error) => {
     const text = String(error);
     if (text.includes("no crontab")) return "";
     return "";
   });
-  const outside = removeManagedBlock(existing.split(/\r?\n/), begin, end);
   const generated = generateCronLines(config, loops);
-  const next = [...outside, begin, ...generated, end, ""].join("\n");
+  const next = buildManagedCronText(existing, config.loops.namespace, generated);
   if (next.trim() === existing.trim()) return { changed: false, lines: generated };
   const temp = resolveConfigPath(config, "data/run/codex-chat.crontab");
   await atomicWriteText(temp, next, 0o600);
@@ -196,7 +193,14 @@ function removeManagedBlock(lines: string[], begin: string, end: string): string
   return out;
 }
 
-function generateCronLines(config: AppConfig, loops: LoopsConfig): string[] {
+export function buildManagedCronText(existing: string, namespace: string, generated: string[]): string {
+  const begin = `# BEGIN ${namespace} managed loops`;
+  const end = `# END ${namespace} managed loops`;
+  const outside = removeManagedBlock(existing.split(/\r?\n/), begin, end);
+  return [...outside, begin, ...generated, end, ""].join("\n");
+}
+
+export function generateCronLines(config: AppConfig, loops: LoopsConfig): string[] {
   const binary = process.argv[1] && process.argv[1].endsWith("main.js") ? `node ${process.argv[1]}` : config.loops.runnerCommand.replace(/\s+loop run$/, "");
   return loops.loops
     .filter((loop) => loop.enabled)

@@ -199,13 +199,52 @@ function deepMerge<T>(base: T, override: unknown): T {
   return out as T;
 }
 
+function setDeep(target: Record<string, unknown>, path: string[], value: unknown): void {
+  let cursor = target;
+  for (const key of path.slice(0, -1)) {
+    const next = cursor[key];
+    if (!next || typeof next !== "object" || Array.isArray(next)) cursor[key] = {};
+    cursor = cursor[key] as Record<string, unknown>;
+  }
+  cursor[path[path.length - 1] as string] = value;
+}
+
+function parseBooleanEnv(value: string): boolean {
+  if (["1", "true", "yes", "on"].includes(value.toLowerCase())) return true;
+  if (["0", "false", "no", "off"].includes(value.toLowerCase())) return false;
+  throw new Error(`Invalid boolean environment override: ${value}`);
+}
+
+function collectEnvOverrides(env: NodeJS.ProcessEnv = process.env): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  const specs: Array<{ name: string; path: string[]; parse?: (value: string) => unknown }> = [
+    { name: "CODEX_CHAT_WORKSPACE", path: ["service", "workspace"] },
+    { name: "CODEX_CHAT_STATE_DIR", path: ["service", "stateDir"] },
+    { name: "CODEX_CHAT_LOG_LEVEL", path: ["service", "logLevel"] },
+    { name: "CODEX_CHAT_CODEX_BINARY", path: ["codex", "binary"] },
+    { name: "CODEX_CHAT_CODEX_MODEL", path: ["codex", "model"] },
+    { name: "CODEX_CHAT_CODEX_EFFORT", path: ["codex", "effort"] },
+    { name: "CODEX_CHAT_CODEX_SANDBOX", path: ["codex", "sandbox"] },
+    { name: "CODEX_CHAT_CODEX_APPROVAL_POLICY", path: ["codex", "approvalPolicy"] },
+    { name: "CODEX_CHAT_TELEGRAM_MODE", path: ["telegram", "mode"] },
+    { name: "CODEX_CHAT_LOOPS_PATH", path: ["loops", "path"] },
+    { name: "CODEX_CHAT_MONITORS_PATH", path: ["monitors", "path"] },
+    { name: "CODEX_CHAT_TRANSCRIPTION_ENABLED", path: ["transcription", "enabled"], parse: parseBooleanEnv }
+  ];
+  for (const spec of specs) {
+    const value = env[spec.name];
+    if (value !== undefined) setDeep(out, spec.path, spec.parse ? spec.parse(value) : value);
+  }
+  return out;
+}
+
 export async function loadConfig(configPath = "config/codex-chat.toml"): Promise<AppConfig> {
   const absoluteConfigPath = resolve(configPath);
   let parsed: unknown = {};
   if (await pathExists(absoluteConfigPath)) {
     parsed = parseToml(await readFile(absoluteConfigPath, "utf8"));
   }
-  const merged = deepMerge(defaultConfig, parsed);
+  const merged = deepMerge(deepMerge(defaultConfig, parsed), collectEnvOverrides());
   const config = configSchema.parse(merged);
   const rootDir = resolve(dirname(absoluteConfigPath), "..");
   const telegramBotToken = process.env[config.telegram.botTokenEnv];

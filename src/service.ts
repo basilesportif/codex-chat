@@ -1,4 +1,6 @@
 import type { Logger } from "pino";
+import { readdir, readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { AppConfig, ensureConfiguredDirectories, resolveConfigPath } from "./config.js";
 import { BehaviorPack } from "./behavior.js";
 import { AppServerCodexClient, ExecResumeCodexClient, HybridCodexClient } from "./codex.js";
@@ -26,7 +28,9 @@ export class ServiceSupervisor {
   private readonly heartbeat: CodexHeartbeat;
   private readonly ipc: LocalIpcServer;
   private readonly subagents: SubagentManager;
-  private turnChain: Promise<void> = Promise.resolve();
+  private messageQueue = new Map<string, UserEvent[]>();
+  private turnRunning = false;
+  private watchdogInterval?: ReturnType<typeof setInterval>;
   private stopping = false;
   private restartingCodex = false;
   private seenIdempotency = new Set<string>();
@@ -39,13 +43,17 @@ export class ServiceSupervisor {
     this.behavior = new BehaviorPack(config);
     this.files = new FileStore(config, this.state);
     const transcriber = this.createTranscriber();
-    const appServer = new AppServerCodexClient(config, this.state, this.behavior, logger, (reason) => {
-      void this.restartCodex(reason);
-    });
     const execFallback = new ExecResumeCodexClient(config, this.state, this.behavior, logger);
-    this.codex = config.codex.transport === "app-server"
-      ? new HybridCodexClient(appServer, execFallback, logger)
-      : execFallback;
+    let codexClient: CodexClient;
+    if (config.codex.transport === "app-server") {
+      const appServer = new AppServerCodexClient(config, this.state, this.behavior, logger, (reason) => {
+        void this.restartCodex(reason);
+      });
+      codexClient = new HybridCodexClient(appServer, execFallback, logger);
+    } else {
+      codexClient = execFallback;
+    }
+    this.codex = codexClient;
     this.subagents = new SubagentManager(
       config,
       this.behavior,
@@ -100,17 +108,20 @@ export class ServiceSupervisor {
     await this.files.init();
     await this.behavior.loadBootstrapPrompt();
     await this.codex.start();
+    await this.abandonStuckTurns();
     await this.telegram.start();
     await this.ipc.start();
     if (this.config.loops.enabled) await syncCron(this.config, this.logger).catch((error) => this.logger.warn({ component: "loops", event: "cron_sync_failed", error }));
     await this.loops.processSpooled().catch((error) => this.logger.warn({ component: "loops", event: "spool_process_failed", error }));
     await this.monitors.start();
     this.heartbeat.start();
+    this.watchdogInterval = setInterval(() => void this.checkTurnTimeout(), 30_000);
     const health = await this.codex.health();
     await this.telegram.notifyOps(`codex-chat started\ntransport: ${health.transport}\nsandbox: ${this.config.codex.sandbox}\nsession: ${health.sessionId ?? "new"}`);
   }
 
   async stop(): Promise<void> {
+    if (this.watchdogInterval) clearInterval(this.watchdogInterval);
     if (this.stopping) return;
     this.stopping = true;
     await this.telegram.notifyOps("codex-chat shutting down").catch(() => undefined);
@@ -123,11 +134,15 @@ export class ServiceSupervisor {
   }
 
   async enqueueUserEvent(event: UserEvent): Promise<void> {
-    this.turnChain = this.turnChain.then(() => this.processEvent(event)).catch((error) => {
-      this.logger.error({ component: "service", event: "turn_failed", error }, "turn failed");
-      if (event.chatId) void this.telegram.sendText(event.chatId, `Codex turn failed: ${error instanceof Error ? error.message : String(error)}`);
-    });
-    await this.turnChain;
+    const key = event.chatId ? String(event.chatId) : "system";
+    if (this.turnRunning) {
+      const queue = this.messageQueue.get(key) ?? [];
+      queue.push(event);
+      this.messageQueue.set(key, queue);
+      this.logger.info({ component: "service", event: "message_queued", key, queueLength: queue.length }, "Turn busy - message queued");
+      return;
+    }
+    this.runTurn(event);
   }
 
   async enqueueSynthetic(text: string, metadata?: Record<string, unknown>): Promise<void> {
@@ -138,10 +153,13 @@ export class ServiceSupervisor {
       metadata,
       receivedAt: nowIso()
     };
-    this.turnChain = this.turnChain.then(() => this.processEvent(event)).catch((error) => {
-      this.logger.error({ component: "service", event: "synthetic_turn_failed", error }, "synthetic turn failed");
-    });
-    await this.turnChain;
+    if (this.turnRunning) {
+      const queue = this.messageQueue.get("system") ?? [];
+      queue.push(event);
+      this.messageQueue.set("system", queue);
+      return;
+    }
+    this.runTurn(event);
   }
 
   async health(): Promise<Record<string, unknown>> {
@@ -183,10 +201,22 @@ export class ServiceSupervisor {
     const turnId = makeId("turn");
     await this.state.writeJson(`turns/${turnId}.json`, { id: turnId, status: "running", input: event, startedAt: nowIso() });
     let output = "";
+    let hadError = false;
+    let errorMessage = "";
     for await (const codexEvent of this.codex.sendTurn({ text: prompt, attachments: event.attachments, source: event.source, turnId })) {
       if (codexEvent.type === "delta") output += codexEvent.text;
       if (codexEvent.type === "final" && codexEvent.text.trim()) output = codexEvent.text;
-      if (codexEvent.type === "error") this.logger.error({ component: "codex", event: "turn_event_error", turnId, detail: codexEvent.message });
+      if (codexEvent.type === "error") {
+        hadError = true;
+        errorMessage = codexEvent.message ?? "unknown error";
+        this.logger.error({ component: "codex", event: "turn_event_error", turnId, detail: codexEvent.message });
+      }
+    }
+    if (hadError && !output.trim() && event.chatId) {
+      const brief = errorMessage.split("\n")[0].slice(0, 100);
+      await this.telegram.sendText(event.chatId, `Codex encountered an error: ${brief}. Please try again.`);
+      await this.state.writeJson(`turns/${turnId}.json`, { id: turnId, status: "error", input: event, errorMessage, completedAt: nowIso() });
+      return;
     }
     const parsed = parseDirectives(output);
     await this.state.writeJson(`turns/${turnId}.json`, { id: turnId, status: "completed", input: event, outputText: output, completedAt: nowIso() });
@@ -254,6 +284,104 @@ export class ServiceSupervisor {
       this.logger.error({ component: "codex", event: "restart_failed", error }, "Codex restart failed");
     } finally {
       this.restartingCodex = false;
+    }
+  }
+
+  private runTurn(event: UserEvent): void {
+    this.turnRunning = true;
+    void this.processEventSafe(event).finally(() => {
+      this.turnRunning = false;
+      this.drainQueue();
+    });
+  }
+
+  private drainQueue(): void {
+    for (const [key, queue] of this.messageQueue) {
+      if (queue.length > 0) {
+        const next = queue.shift()!;
+        if (queue.length === 0) this.messageQueue.delete(key);
+        this.runTurn(next);
+        return;
+      }
+    }
+  }
+
+  private async processEventSafe(event: UserEvent): Promise<void> {
+    try {
+      await this.processEvent(event);
+    } catch (error) {
+      const brief = error instanceof Error ? error.message.split("\n")[0].slice(0, 100) : String(error).slice(0, 100);
+      this.logger.error({ component: "service", event: "turn_error", error }, "Turn processing failed");
+      if (event.chatId) {
+        try {
+          await this.telegram.sendText(event.chatId, `Codex encountered an error: ${brief}. Please try again.`);
+        } catch (sendError) {
+          this.logger.error({ component: "service", event: "error_reply_failed", sendError }, "Failed to send error reply to Telegram");
+        }
+      }
+    }
+  }
+
+  private async abandonStuckTurns(): Promise<void> {
+    const turnsDir = resolveConfigPath(this.config, join(this.config.service.stateDir, "turns"));
+    try {
+      const files = await readdir(turnsDir).catch(() => []);
+      let abandoned = 0;
+      for (const file of files) {
+        if (!file.endsWith(".json")) continue;
+        const path = join(turnsDir, file);
+        try {
+          const raw = await readFile(path, "utf8");
+          const turn = JSON.parse(raw) as { status?: string };
+          if (turn.status === "running") {
+            turn.status = "abandoned";
+            (turn as Record<string, unknown>).abandonedAt = nowIso();
+            await writeFile(path, JSON.stringify(turn, null, 2));
+            abandoned++;
+          }
+        } catch {
+          // ignore individual file errors
+        }
+      }
+      if (abandoned > 0) {
+        this.logger.warn({ component: "service", event: "abandoned_turns", count: abandoned }, `Abandoned ${abandoned} stuck turn(s) from previous session`);
+      }
+    } catch {
+      // ignore if turns dir doesn't exist yet
+    }
+  }
+
+  private async checkTurnTimeout(): Promise<void> {
+    if (!this.turnRunning) return;
+    const turnsDir = resolveConfigPath(this.config, join(this.config.service.stateDir, "turns"));
+    try {
+      const files = await readdir(turnsDir).catch(() => []);
+      const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+      for (const file of files) {
+        if (!file.endsWith(".json")) continue;
+        const path = join(turnsDir, file);
+        try {
+          const raw = await readFile(path, "utf8");
+          const turn = JSON.parse(raw) as { status?: string; startedAt?: string; input?: { chatId?: number } };
+          if (turn.status === "running" && turn.startedAt && turn.startedAt < twoMinutesAgo) {
+            turn.status = "timeout";
+            (turn as Record<string, unknown>).timedOutAt = nowIso();
+            await writeFile(path, JSON.stringify(turn, null, 2));
+            const chatId = turn.input?.chatId;
+            if (chatId) {
+              try {
+                await this.telegram.sendText(chatId, "Codex took too long to respond. Please try again.");
+              } catch {
+                // ignore send failures in watchdog
+              }
+            }
+          }
+        } catch {
+          // ignore individual file errors
+        }
+      }
+    } catch {
+      // ignore watchdog errors entirely
     }
   }
 

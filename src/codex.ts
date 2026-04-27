@@ -65,9 +65,10 @@ export class AppServerCodexClient implements CodexClient {
     const args = ["app-server", "--listen", listenUrl];
     for (const item of this.config.codex.extraConfig) args.push("-c", item);
     this.logger.info({ component: "codex", event: "spawn_app_server", args }, "starting codex app-server");
+    const { OPENAI_API_KEY: _omit, ...safeEnv } = process.env;
     this.child = spawn(this.config.codex.binary, args, {
       cwd: this.config.service.workspace,
-      env: process.env,
+      env: safeEnv,
       stdio: ["ignore", "pipe", "pipe"]
     });
     this.child.stdout?.on("data", (chunk) => this.logger.debug({ component: "codex", stream: "stdout", data: chunk.toString() }));
@@ -76,7 +77,7 @@ export class AppServerCodexClient implements CodexClient {
       this.connected = false;
       if (!this.stopping) {
         const reason = `codex app-server exited code=${code ?? "null"} signal=${signal ?? "null"}`;
-        this.logger.error({ component: "codex", event: "app_server_exit", code, signal }, reason);
+        this.logger.warn({ component: "codex", event: "app_server_exit", code, signal }, reason);
         this.rejectAll(new Error(reason));
         this.onCrash?.(reason);
       }
@@ -244,6 +245,7 @@ export class AppServerCodexClient implements CodexClient {
       this.connected = false;
       if (!this.stopping) {
         const reason = "codex app-server websocket closed";
+        this.logger.warn({ component: "codex", event: "ws_closed" }, reason);
         this.rejectAll(new Error(reason));
         this.onCrash?.(reason);
       }
@@ -339,6 +341,7 @@ export class ExecResumeCodexClient implements CodexClient {
   }
 
   async *sendTurn(input: CodexTurnInput): AsyncIterable<CodexEvent> {
+    this.logger.warn({ component: "codex", event: "exec_resume_fallback" }, "WARNING: using exec-resume fallback — OAuth/app-server auth not available");
     const artifactDir = resolveConfigPath(this.config, join("data", "exec-fallback", makeId("turn")));
     await mkdir(artifactDir, { recursive: true });
     const lastMessage = join(artifactDir, "last-message.md");
@@ -347,9 +350,10 @@ export class ExecResumeCodexClient implements CodexClient {
       ? this.resumeArgs(this.sessionId, lastMessage, input.attachments ?? [])
       : this.execArgs(lastMessage, input.attachments ?? []);
     this.logger.info({ component: "codex", event: "exec_fallback_start", args: args.filter((arg) => arg !== prompt) });
+    const { OPENAI_API_KEY: _omit, ...safeEnv } = process.env;
     const child = spawn(this.config.codex.binary, args, {
       cwd: this.config.service.workspace,
-      env: process.env,
+      env: safeEnv,
       stdio: ["pipe", "pipe", "pipe"],
       detached: true
     });
@@ -448,6 +452,7 @@ export class HybridCodexClient implements CodexClient {
       this.active = this.primary;
     } catch (error) {
       this.logger.error({ component: "codex", event: "app_server_start_failed", error }, "app-server start failed; using exec fallback");
+      this.logger.warn({ component: "codex", event: "exec_resume_fallback" }, "WARNING: using exec-resume fallback — OAuth/app-server auth not available");
       await this.fallback.start();
       this.active = this.fallback;
     }
@@ -471,6 +476,7 @@ export class HybridCodexClient implements CodexClient {
     } catch (error) {
       if (this.active === this.primary) {
         this.logger.error({ component: "codex", event: "primary_turn_failed", error }, "primary Codex turn failed; retrying through exec fallback");
+        this.logger.warn({ component: "codex", event: "exec_resume_fallback" }, "WARNING: using exec-resume fallback — OAuth/app-server auth not available");
         await this.fallback.start();
         this.active = this.fallback;
         for await (const event of this.active.sendTurn(input)) yield event;

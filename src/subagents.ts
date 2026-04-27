@@ -171,9 +171,10 @@ export class SubagentManager {
 
     const args = this.buildArgs(lastMessagePath, input.model, input.effort, input.images ?? []);
     this.logger.info({ component: "subagents", event: "start", jobId: id, profile: input.profile, args }, "starting subagent");
+    const { OPENAI_API_KEY: _omit, ...safeEnv } = process.env;
     const child = spawn(this.config.codex.binary, args, {
       cwd: this.config.service.workspace,
-      env: process.env,
+      env: safeEnv,
       stdio: ["pipe", "pipe", "pipe"],
       detached: true
     });

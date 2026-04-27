@@ -19,30 +19,26 @@ The integration approach: clone assistant-claude on prod, clone the workspace da
 
 Run these from Tim's local machine via SSH relay.
 
-### Clone the repos on prod
+### Copy repos to prod
+
+Prod has no GitHub SSH key, so we rsync directly from the assistant machine (see below).
+
+### Copy secrets and repos
+
+The assistant machine can SSH directly to prod. Run from the assistant machine:
 
 ```bash
-# Clone assistant-claude
-ssh tim@178.104.208.141 "mkdir -p /home/tim/pkg/tim && git clone git@github.com:basilesportif/tim-assistant-claude.git /home/tim/pkg/tim/assistant-claude"
+# Create directories
+ssh tim@178.104.208.141 "mkdir -p /home/tim/pkg/tim/assistant-claude /home/tim/.assistant-claude/workspace"
 
-# Clone workspace data
-ssh tim@178.104.208.141 "git clone git@github.com:basilesportif/tim-data-assistant-claude.git /home/tim/.assistant-claude/workspace"
+# Rsync assistant-claude scripts (no git history needed)
+rsync -avz --exclude='.git' --exclude='node_modules' /home/tim/pkg/tim/assistant-claude/ tim@178.104.208.141:/home/tim/pkg/tim/assistant-claude/
+
+# Rsync workspace data including .git (preserves git remote for future syncs)
+rsync -avz /home/tim/.assistant-claude/workspace/ tim@178.104.208.141:/home/tim/.assistant-claude/workspace/
 ```
 
-### Copy secrets
-
-Relay via dev server (this assistant session → dev → prod):
-
-```bash
-# Step 1: copy .env from local to dev (temp)
-rsync -avz /home/tim/.assistant-claude/workspace/.env tim@89.167.72.52:/tmp/assistant-secrets.env
-
-# Step 2: copy from dev to prod
-ssh tim@89.167.72.52 "scp /tmp/assistant-secrets.env tim@178.104.208.141:/home/tim/.assistant-claude/workspace/.env"
-
-# Step 3: delete from dev
-ssh tim@89.167.72.52 "rm /tmp/assistant-secrets.env"
-```
+> **Status: Done.** All files are already on prod as of 2026-04-27.
 
 ### Verify Node is available on prod
 

@@ -1,8 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { constants, createWriteStream } from "node:fs";
-import { access, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { access, mkdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
-import { pipeline } from "node:stream/promises";
 
 export function nowIso(): string {
   return new Date().toISOString();
@@ -20,10 +19,6 @@ export function sha256Buffer(buffer: Buffer): string {
   return createHash("sha256").update(buffer).digest("hex");
 }
 
-export async function sha256File(path: string): Promise<string> {
-  const data = await readFile(path);
-  return sha256Buffer(data);
-}
 
 export async function pathExists(path: string): Promise<boolean> {
   try {
@@ -163,10 +158,6 @@ function splitLargeFence(unit: string, maxLength: number): string[] {
   return chunks;
 }
 
-export async function writeStreamToFile(stream: NodeJS.ReadableStream, destination: string): Promise<void> {
-  await ensureDir(dirname(destination));
-  await pipeline(stream, createWriteStream(destination));
-}
 
 export async function removeIfExists(path: string): Promise<void> {
   await rm(path, { force: true, recursive: true });
@@ -177,17 +168,4 @@ export async function fileSize(path: string): Promise<number> {
   return info.size;
 }
 
-export function redact(value: string, secrets: Array<string | undefined>): string {
-  let out = value;
-  for (const secret of secrets) {
-    if (secret && secret.length > 3) out = out.split(secret).join("[REDACTED]");
-  }
-  return out;
-}
 
-export function parseNumberList(values: unknown): number[] {
-  if (!Array.isArray(values)) return [];
-  return values
-    .map((value) => (typeof value === "number" ? value : Number(value)))
-    .filter((value) => Number.isSafeInteger(value));
-}

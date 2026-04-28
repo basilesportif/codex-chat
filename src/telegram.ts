@@ -7,7 +7,6 @@ import { Transcriber } from "./transcription.js";
 import { Attachment, UserEvent } from "./types.js";
 import { chunkText, makePairingCode, nowIso } from "./util.js";
 
-type GrammyContext = Context;
 
 export interface TelegramAllowlistInput {
   userId?: number;
@@ -125,21 +124,21 @@ export class TelegramGateway {
   }
 
   private registerHandlers(bot: Bot): void {
-    bot.command("pair", async (ctx) => this.handlePair(ctx as GrammyContext));
+    bot.command("pair", async (ctx) => this.handlePair(ctx));
     bot.command("health", async (ctx) => {
-      if (!(await this.isAuthorized(ctx as GrammyContext))) return;
+      if (!(await this.isAuthorized(ctx))) return;
       await ctx.reply(this.callbacks.onHealthCommand ? await this.callbacks.onHealthCommand() : "ok");
     });
     bot.command("jobs", async (ctx) => {
-      if (!(await this.isAuthorized(ctx as GrammyContext))) return;
+      if (!(await this.isAuthorized(ctx))) return;
       await ctx.reply(this.callbacks.onJobsCommand ? await this.callbacks.onJobsCommand(ctx.chat.id) : "No job manager is configured.");
     });
     bot.command("cancel", async (ctx) => {
-      if (!(await this.isAuthorized(ctx as GrammyContext))) return;
+      if (!(await this.isAuthorized(ctx))) return;
       const jobId = (ctx.message?.text ?? "").split(/\s+/)[1];
       await ctx.reply(jobId && this.callbacks.onCancelCommand ? await this.callbacks.onCancelCommand(ctx.chat.id, jobId) : "Usage: /cancel <jobId>");
     });
-    bot.on("message", async (ctx) => this.handleMessage(ctx as GrammyContext));
+    bot.on("message", async (ctx) => this.handleMessage(ctx));
     bot.catch((error) => this.logger.error({ component: "telegram", event: "handler_error", error }, "Telegram handler failed"));
   }
 
@@ -157,7 +156,7 @@ export class TelegramGateway {
     }
   }
 
-  private async handlePair(ctx: GrammyContext): Promise<void> {
+  private async handlePair(ctx: Context): Promise<void> {
     const from = ctx.from;
     const chat = ctx.chat;
     const text = ctx.message?.text ?? "";
@@ -174,7 +173,7 @@ export class TelegramGateway {
     this.logger.info({ component: "telegram", event: "paired", userId: from.id, chatId: chat.id }, "Telegram user paired");
   }
 
-  private async handleMessage(ctx: GrammyContext): Promise<void> {
+  private async handleMessage(ctx: Context): Promise<void> {
     if (ctx.message?.text?.startsWith("/pair")) return;
     if (!(await this.isAuthorized(ctx))) {
       await this.logDenied(ctx);
@@ -270,7 +269,7 @@ export class TelegramGateway {
     });
   }
 
-  private async isAuthorized(ctx: GrammyContext): Promise<boolean> {
+  private async isAuthorized(ctx: Context): Promise<boolean> {
     const from = ctx.from;
     const chat = ctx.chat;
     if (!from || !chat) return false;
@@ -299,7 +298,7 @@ export class TelegramGateway {
     return undefined;
   }
 
-  private async logDenied(ctx: GrammyContext): Promise<void> {
+  private async logDenied(ctx: Context): Promise<void> {
     this.logger.warn({
       component: "telegram",
       event: "denied",

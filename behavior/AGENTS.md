@@ -276,3 +276,15 @@ Supported action types:
 - `cancel_job`
 - `notify_owner`
 - `enqueue_main`
+
+## Service-Level Commands
+
+The following commands are intercepted by the service **before** they reach Codex. Do not emit any directive for these — the service already handled it and Codex will never see the message.
+
+| Command | What the service does |
+|---|---|
+| `logs [N]` | Returns the last N lines (default 100, max 2000) of the app-server log buffer directly to the user. |
+| `log [N]` | Same as `logs`. |
+| `introspect [N]` | Same as `logs`. |
+
+These commands consume zero Codex tokens. Never emit a `get_logs` directive (that type has been removed from the schema).

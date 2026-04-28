@@ -60,14 +60,6 @@ const enqueueMainAction = baseAction.extend({
   metadata: z.record(z.string(), z.unknown()).optional()
 });
 
-const getLogsAction = baseAction.extend({
-  type: z.literal("get_logs"),
-  // Number of most-recent lines to return. Default 100, hard-capped server-side.
-  lines: z.number().int().positive().max(2000).optional(),
-  chatId: z.number().int().optional(),
-  replyToMessageId: z.number().int().optional()
-});
-
 export const directiveActionSchema = z.discriminatedUnion("type", [
   sendTextAction,
   sendImageAction,
@@ -75,8 +67,7 @@ export const directiveActionSchema = z.discriminatedUnion("type", [
   dispatchSubagentAction,
   cancelJobAction,
   notifyOwnerAction,
-  enqueueMainAction,
-  getLogsAction
+  enqueueMainAction
 ]);
 
 export const directiveBlockSchema = z.object({

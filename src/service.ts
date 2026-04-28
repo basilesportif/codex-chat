@@ -54,6 +54,17 @@ export function injectFilePath(config: AppConfig): string {
   return join(config.service.workspace, "inject.json");
 }
 
+/**
+ * Returns true when the message text is a "logs" or "introspect" command,
+ * along with the requested number of lines to return.
+ * Handled entirely at the service level — Codex is never involved.
+ */
+function parseLogCommand(text: string): { isLog: boolean; lines: number } {
+  const match = text.trim().match(/^(logs?|introspect)\s*(\d+)?$/i);
+  if (!match) return { isLog: false, lines: 0 };
+  return { isLog: true, lines: match[2] ? Math.min(parseInt(match[2], 10), 2000) : 100 };
+}
+
 export class ServiceSupervisor {
   readonly state: StateStore;
   readonly behavior: BehaviorPack;
@@ -184,6 +195,15 @@ export class ServiceSupervisor {
   }
 
   async enqueueUserEvent(event: UserEvent): Promise<void> {
+    // Intercept "logs [N]" and "introspect [N]" commands before they reach Codex.
+    // Reply directly from the service — no turn, no tokens consumed.
+    if (event.source === "telegram" && event.chatId && event.text) {
+      const { isLog, lines } = parseLogCommand(event.text);
+      if (isLog) {
+        await this.handleLogCommandEvent(event, lines);
+        return;
+      }
+    }
     const key = event.chatId ? String(event.chatId) : "system";
     if (this.shouldQueueTurn()) {
       await this.queueEvent(key, event);
@@ -331,7 +351,6 @@ export class ServiceSupervisor {
       if (action.type === "cancel_job") await this.subagents.cancel(action.jobId);
       if (action.type === "notify_owner") await this.telegram.notifyOps(action.text);
       if (action.type === "enqueue_main") void this.enqueueSynthetic(action.text, action.metadata);
-      if (action.type === "get_logs") await this.handleGetLogs(action, origin);
       stored.status = "completed";
     } catch (error) {
       stored.status = "failed";
@@ -800,33 +819,28 @@ export class ServiceSupervisor {
   }
 
   /**
-   * Fetch recent Codex app-server output and send it back to the user as a
-   * formatted code block. Output is split across multiple Telegram messages
-   * automatically by `chunkText`. Secrets are scrubbed at insertion time in
-   * the LogBuffer, but we re-scrub here as a defense-in-depth measure.
+   * Service-level handler for "logs [N]" / "introspect [N]" Telegram commands.
+   * Called BEFORE the event is enqueued for Codex — Codex is never involved.
    */
-  private async handleGetLogs(
-    action: Extract<DirectiveAction, { type: "get_logs" }>,
-    origin: UserEvent
-  ): Promise<void> {
-    const chatId = action.chatId ?? this.requireChat(origin.chatId);
-    const requested = action.lines ?? 100;
-    const lines = Math.max(1, Math.min(requested, 2000));
+  private async handleLogCommandEvent(event: UserEvent, lines: number): Promise<void> {
+    const chatId = event.chatId!;
+    const count = Math.max(1, Math.min(lines, 2000));
     const getRecentLogs = this.codex.getRecentLogs?.bind(this.codex);
     if (!getRecentLogs) {
-      await this.telegram.sendText(chatId, "Log buffer is not available for this transport.", action.replyToMessageId ?? origin.messageId);
+      await this.telegram.sendText(chatId, "Log buffer is not available for this transport.", event.messageId);
       return;
     }
-    const recent = getRecentLogs(lines);
+    const recent = getRecentLogs(count);
     if (recent.length === 0) {
-      await this.telegram.sendText(chatId, "Codex app-server log buffer is empty.", action.replyToMessageId ?? origin.messageId);
+      await this.telegram.sendText(chatId, "Codex app-server log buffer is empty.", event.messageId);
       return;
     }
     const header = `Codex app-server logs — last ${recent.length} line(s):`;
     const body = recent.join("\n");
     const formatted = `${header}\n\`\`\`\n${body}\n\`\`\``;
-    await this.telegram.sendText(chatId, formatted, action.replyToMessageId ?? origin.messageId);
+    await this.telegram.sendText(chatId, formatted, event.messageId);
   }
+
 
   private createTranscriber(): Transcriber {
     if (!this.config.transcription.enabled) return new DisabledTranscriber();

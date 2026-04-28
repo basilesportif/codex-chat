@@ -307,3 +307,130 @@ describe("service supervisor", () => {
     expect(turn.errorMessage).toContain("telegram send failed");
   });
 });
+
+describe("incremental directive execution", () => {
+  test("react directive fires during streaming (before turn/completed)", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+
+    const reactFenceChunk = `\`\`\`codex-chat\n{"version":1,"actions":[{"type":"react","idempotencyKey":"react-stream-1","messageId":42,"emoji":"👀"}]}\n\`\`\``;
+
+    // Deferred that resolves when we want the stream to continue after the react fence
+    const afterReactDeferred = deferred();
+    const reactFired: string[] = [];
+
+    vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
+      // Emit the react fence as a delta
+      yield { type: "delta", text: reactFenceChunk };
+      // Pause: let the pre-execution fire before continuing
+      await afterReactDeferred.promise;
+      // Emit a reply message after the react fence
+      yield { type: "delta", text: "\nOK I see your message." };
+    });
+
+    vi.spyOn(service.telegram, "sendReaction").mockImplementation(async (_chatId, _messageId, emoji) => {
+      reactFired.push(emoji);
+    });
+    vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+
+    const turnPromise = service.enqueueUserEvent(userEvent(42));
+    // Flush microtasks so the streaming loop reaches our deferred pause point
+    for (let i = 0; i < 10; i++) await flush();
+
+    // At this point the stream is paused after the react fence delta.
+    // The pre-execution should have already fired the react.
+    expect(reactFired).toEqual(["👀"]);
+
+    // Allow the stream to finish
+    afterReactDeferred.resolve();
+    await turnPromise;
+    // Wait for turn to finish
+    for (let i = 0; i < 20; i++) {
+      const running = (service as unknown as { turnRunning: boolean }).turnRunning;
+      if (!running) break;
+      await flush();
+    }
+
+    // React should have been called exactly once (idempotency prevents double-fire)
+    expect(reactFired).toHaveLength(1);
+    expect(reactFired[0]).toBe("👀");
+  });
+
+  test("react is not double-fired by idempotency key when pre-executed and final pass runs", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+
+    const reactFence = `\`\`\`codex-chat\n{"version":1,"actions":[{"type":"react","idempotencyKey":"react-idem-1","messageId":99,"emoji":"👀"}]}\n\`\`\``;
+    let reactCallCount = 0;
+
+    vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
+      yield { type: "delta", text: reactFence };
+    });
+
+    vi.spyOn(service.telegram, "sendReaction").mockImplementation(async () => {
+      reactCallCount++;
+    });
+    vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+
+    await service.enqueueUserEvent(userEvent(99));
+    for (let i = 0; i < 20; i++) {
+      const running = (service as unknown as { turnRunning: boolean }).turnRunning;
+      if (!running) break;
+      await flush();
+    }
+    // Give fire-and-forget directive writes time to settle
+    for (let i = 0; i < 10; i++) await flush();
+
+    // The react directive should fire exactly once despite being in both the
+    // pre-execution pass (delta) and visible to the final pass (which skips it
+    // via preExecutedCount).
+    expect(reactCallCount).toBe(1);
+  });
+
+  test("multiple fences in stream: each fires as soon as its fence closes", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+
+    const fence1 = `\`\`\`codex-chat\n{"version":1,"actions":[{"type":"react","idempotencyKey":"react-multi-1","messageId":10,"emoji":"👀"}]}\n\`\`\``;
+    const fence2 = `\`\`\`codex-chat\n{"version":1,"actions":[{"type":"react","idempotencyKey":"react-multi-2","messageId":10,"emoji":"✅"}]}\n\`\`\``;
+
+    const afterFence1 = deferred();
+    const reactionOrder: string[] = [];
+
+    vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
+      yield { type: "delta", text: fence1 };
+      await afterFence1.promise;
+      yield { type: "delta", text: fence2 };
+    });
+
+    vi.spyOn(service.telegram, "sendReaction").mockImplementation(async (_chatId, _messageId, emoji) => {
+      reactionOrder.push(emoji);
+    });
+    vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+
+    await service.enqueueUserEvent(userEvent(10));
+    for (let i = 0; i < 10; i++) await flush();
+
+    // After fence1 delta, only the first reaction should have fired
+    expect(reactionOrder).toEqual(["👀"]);
+
+    afterFence1.resolve();
+    // Wait for turn to fully complete
+    for (let i = 0; i < 30; i++) {
+      const running = (service as unknown as { turnRunning: boolean }).turnRunning;
+      if (!running) break;
+      await flush();
+    }
+    // Give fire-and-forget directive writes time to settle
+    for (let i = 0; i < 10; i++) await flush();
+
+    // Both reactions fire in order, each exactly once
+    expect(reactionOrder).toEqual(["👀", "✅"]);
+  });
+});

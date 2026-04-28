@@ -310,9 +310,28 @@ export class ServiceSupervisor {
       let output = "";
       let hadError = false;
       let errorMessage = "";
+      // Track how many directive blocks have already been pre-executed
+      // during streaming so the final pass can skip them.
+      let preExecutedCount = 0;
       try {
         for await (const codexEvent of this.codex.sendTurn({ text: prompt, attachments: event.attachments, source: event.source, turnId })) {
-          if (codexEvent.type === "delta") output += codexEvent.text;
+          if (codexEvent.type === "delta") {
+            output += codexEvent.text;
+            // Incremental directive execution: scan for newly-complete fences
+            // and fire them immediately (fire-and-forget) so actions like
+            // react(👀) fire the moment the fence closes rather than waiting
+            // for the full turn to complete.
+            const parsed = parseDirectives(output);
+            if (parsed.blocks.length > preExecutedCount) {
+              const newBlocks = parsed.blocks.slice(preExecutedCount);
+              preExecutedCount = parsed.blocks.length;
+              for (const block of newBlocks) {
+                for (const action of block.actions) {
+                  void this.executeDirective(action, event);
+                }
+              }
+            }
+          }
           if (codexEvent.type === "final" && codexEvent.text.trim()) output = codexEvent.text;
           if (codexEvent.type === "error") {
             hadError = true;
@@ -343,7 +362,11 @@ export class ServiceSupervisor {
       for (const error of parsed.errors) {
         void this.enqueueSynthetic(`The previous assistant output contained an invalid codex-chat directive: ${error}`, { source: "system", turnId });
       }
-      for (const block of parsed.blocks) {
+      // Final pass: execute any directive blocks that were NOT already
+      // pre-executed during streaming. The idempotency key system is an
+      // additional safety net against double-fires.
+      const blocksToExecute = parsed.blocks.slice(preExecutedCount);
+      for (const block of blocksToExecute) {
         for (const action of block.actions) await this.executeDirective(action, event);
       }
       await closeTurn({ id: turnId, status: "completed", input: event, outputText: output, completedAt: nowIso() });

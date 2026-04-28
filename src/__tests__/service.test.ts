@@ -340,7 +340,13 @@ describe("service supervisor", () => {
     ["debug", "debug the failing service test"],
     ["review", "review the current diff"],
     ["edit", "edit the routing docs"],
-    ["architecture", "architecture check for subagent routing"]
+    ["architecture", "architecture check for subagent routing"],
+    ["readme", "update README with the stricter routing policy"],
+    ["docs", "write docs for main-loop routing"],
+    ["repo inspection", "inspect the repo and explain how routing works"],
+    ["calendar lookup", "what is on my calendar today?"],
+    ["email lookup", "check my Gmail inbox for Derek"],
+    ["external data", "look up the latest model pricing online"]
   ])("blocks %s prompts from silently completing as main-loop clean text", async (_label, text) => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
@@ -362,7 +368,38 @@ describe("service supervisor", () => {
     expect(sendText.mock.calls.some((call) => call[1] === "Main-loop plain answer.")).toBe(false);
   });
 
-  test("allows clean text for simple Telegram prompts that do not require subagent routing", async () => {
+  test("blocks send_text directives for prompts that require subagent routing", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
+      yield {
+        type: "final",
+        text: `\`\`\`codex-chat
+{"version":1,"actions":[{"type":"send_text","idempotencyKey":"bad-main-loop-1","chatId":253768951,"text":"I checked your calendar."}]}
+\`\`\``
+      };
+    });
+    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+
+    await service.enqueueUserEvent(userEvent(503, "check my calendar today"));
+    await waitForIdle(service);
+
+    expect(sendText).toHaveBeenCalledWith(
+      253768951,
+      expect.stringContaining("Routing guardrail blocked"),
+      503
+    );
+    expect(sendText.mock.calls.some((call) => call[1] === "I checked your calendar.")).toBe(false);
+  });
+
+  test.each([
+    ["ping"],
+    ["list todos"],
+    ["add todo buy milk"],
+    ["list projects"]
+  ])("allows clean text for simple Telegram prompt %s", async (text) => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
     const service = new ServiceSupervisor(config, logger);
@@ -372,7 +409,7 @@ describe("service supervisor", () => {
     });
     const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
 
-    await service.enqueueUserEvent(userEvent(501, "ping"));
+    await service.enqueueUserEvent(userEvent(501, text));
     await waitForIdle(service);
 
     expect(sendText).toHaveBeenCalledWith(253768951, "Pong.", 501);

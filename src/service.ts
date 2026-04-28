@@ -60,7 +60,7 @@ const DEPLOY_DENIED_MESSAGE =
   "Deploy is admin-only. Ask Tim to add you to telegram.allowlist.adminUserIds.";
 const DEPLOY_DRAIN_MS = 30_000;
 const ROUTING_GUARDRAIL_MESSAGE =
-  "⚠️ Routing guardrail blocked a main-loop plain-text reply for a task that should be dispatched to a subagent. Please resend the request.";
+  "⚠️ Routing guardrail blocked a main-loop reply for a task that should be dispatched to a subagent. Please resend the request.";
 const SUBAGENT_ROUTING_PATTERNS = [
   /\bresearch(?:es|ing)?\b/i,
   /\binvestigat(?:e|es|ing|ion)\b/i,
@@ -74,7 +74,14 @@ const SUBAGENT_ROUTING_PATTERNS = [
   /\bmodif(?:y|ies|ying)\b/i,
   /\bpatch(?:es|ing)?\b/i,
   /\brefactor(?:s|ing)?\b/i,
-  /\barchitect(?:ure|ural|ing)?\b/i
+  /\barchitect(?:ure|ural|ing)?\b/i,
+  /\banaly[sz](?:e|es|ing)\b/i,
+  /\banalysis\b/i,
+  /\b(?:repo|repository|codebase|working tree|source tree|diff)\b/i,
+  /\b(?:readme|docs?|documentation|markdown|agents\.md)\b/i,
+  /\b(?:calendar|gmail|email|inbox)\b/i,
+  /\b(?:web|internet|online|latest|news|weather|stock|price|external[- ]data)\b/i,
+  /\b(?:look\s*up|lookup|search|google|browse|find)\b.*\b(?:calendar|gmail|email|inbox|web|internet|online|latest|news|weather|stock|price|external[- ]data)\b/i
 ];
 
 type QueuedEvent = {
@@ -451,27 +458,29 @@ export class ServiceSupervisor {
       let output = "";
       let hadError = false;
       let errorMessage = "";
-      // Track how many directive blocks have already been pre-executed
-      // during streaming so the final pass can skip them.
-      let preExecutedCount = 0;
+      // Track which directive actions have already been pre-executed during
+      // streaming so the final pass can skip only those actions.
+      const preExecutedActions = new Set<string>();
       try {
         for await (const codexEvent of this.codex.sendTurn({ text: prompt, attachments: event.attachments, source: event.source, turnId })) {
           if (codexEvent.type === "delta") {
             output += codexEvent.text;
             // Incremental directive execution: scan for newly-complete fences
-            // and fire them immediately (fire-and-forget) so actions like
-            // react(👀) fire the moment the fence closes rather than waiting
-            // for the full turn to complete.
+            // and fire streaming-safe actions immediately (fire-and-forget)
+            // so react(👀) fires the moment the fence closes rather than
+            // waiting for the full turn to complete. User-facing actions wait
+            // for the final routing guardrail because some prompts must
+            // dispatch a subagent instead of completing in the main loop.
             const parsed = parseDirectives(output);
-            if (parsed.blocks.length > preExecutedCount) {
-              const newBlocks = parsed.blocks.slice(preExecutedCount);
-              preExecutedCount = parsed.blocks.length;
-              for (const block of newBlocks) {
-                for (const action of block.actions) {
+            parsed.blocks.forEach((block, blockIndex) => {
+              block.actions.forEach((action, actionIndex) => {
+                const actionKey = this.directiveActionKey(action, blockIndex, actionIndex);
+                if (!preExecutedActions.has(actionKey) && this.shouldPreExecuteDirective(action)) {
+                  preExecutedActions.add(actionKey);
                   void this.executeDirective(action, event);
                 }
-              }
-            }
+              });
+            });
           }
           if (codexEvent.type === "final" && codexEvent.text.trim()) output = codexEvent.text;
           if (codexEvent.type === "error") {
@@ -499,30 +508,35 @@ export class ServiceSupervisor {
         return;
       }
       const parsed = parseDirectives(output);
-      if (parsed.cleanText && event.chatId) {
-        if (this.shouldBlockMainLoopCleanText(event, parsed.blocks)) {
-          await this.telegram.sendText(event.chatId, ROUTING_GUARDRAIL_MESSAGE, event.messageId);
-          this.logger.warn({
-            component: "service",
-            event: "routing_guardrail_blocked_clean_text",
-            turnId,
-            chatId: event.chatId,
-            messageId: event.messageId,
-            prompt: event.text.slice(0, 200)
-          }, "blocked main-loop clean text for subagent-routed prompt");
-        } else {
+      const blockedMainLoopResponse = this.shouldBlockMainLoopResponse(event, parsed.blocks);
+      if (blockedMainLoopResponse && event.chatId) {
+        await this.telegram.sendText(event.chatId, ROUTING_GUARDRAIL_MESSAGE, event.messageId);
+        this.logger.warn({
+          component: "service",
+          event: "routing_guardrail_blocked_main_loop_response",
+          turnId,
+          chatId: event.chatId,
+          messageId: event.messageId,
+          prompt: event.text.slice(0, 200)
+        }, "blocked main-loop response for subagent-routed prompt");
+      } else {
+        if (parsed.cleanText && event.chatId) {
           await this.telegram.sendText(event.chatId, parsed.cleanText, event.messageId);
+        }
+        // Final pass: execute any directive actions that were NOT already
+        // pre-executed during streaming. The idempotency key system is an
+        // additional safety net against double-fires.
+        for (let blockIndex = 0; blockIndex < parsed.blocks.length; blockIndex++) {
+          const block = parsed.blocks[blockIndex]!;
+          for (let actionIndex = 0; actionIndex < block.actions.length; actionIndex++) {
+            const action = block.actions[actionIndex]!;
+            const actionKey = this.directiveActionKey(action, blockIndex, actionIndex);
+            if (!preExecutedActions.has(actionKey)) await this.executeDirective(action, event);
+          }
         }
       }
       for (const error of parsed.errors) {
         void this.enqueueSynthetic(`The previous assistant output contained an invalid codex-chat directive: ${error}`, { source: "system", turnId });
-      }
-      // Final pass: execute any directive blocks that were NOT already
-      // pre-executed during streaming. The idempotency key system is an
-      // additional safety net against double-fires.
-      const blocksToExecute = parsed.blocks.slice(preExecutedCount);
-      for (const block of blocksToExecute) {
-        for (const action of block.actions) await this.executeDirective(action, event);
       }
       await closeTurn({ id: turnId, status: "completed", input: event, outputText: output, completedAt: nowIso() });
     } catch (error) {
@@ -580,7 +594,15 @@ export class ServiceSupervisor {
     }
   }
 
-  private shouldBlockMainLoopCleanText(event: UserEvent, blocks: ReturnType<typeof parseDirectives>["blocks"]): boolean {
+  private shouldPreExecuteDirective(action: DirectiveAction): boolean {
+    return action.type === "react";
+  }
+
+  private directiveActionKey(action: DirectiveAction, blockIndex: number, actionIndex: number): string {
+    return action.idempotencyKey ? `${action.type}:${action.idempotencyKey}` : `${blockIndex}:${actionIndex}:${action.type}`;
+  }
+
+  private shouldBlockMainLoopResponse(event: UserEvent, blocks: ReturnType<typeof parseDirectives>["blocks"]): boolean {
     if (event.source !== "telegram") return false;
     if (!event.text || !telegramPromptRequiresSubagent(event.text)) return false;
     return !blocks.some((block) => block.actions.some((action) => action.type === "dispatch_subagent"));

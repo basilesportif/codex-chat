@@ -209,7 +209,7 @@ Example: a concise git push loop.
 - Monitor alerts come from configured regex hooks.
 - Review the matched line and included context before deciding.
 - If the issue is likely transient, report briefly.
-- If investigation or code changes are needed, dispatch a subagent or handle it directly.
+- If investigation, debugging, repo inspection, code changes, or docs changes are needed, dispatch a subagent.
 - Avoid feedback loops: do not repeatedly restart a monitor without new evidence.
 - Monitor alerts do NOT require an ack.
 
@@ -228,16 +228,25 @@ Use `return_to_main` unless the user explicitly asked for direct progress output
 
 For every user-originated task, explicitly decide whether work stays in the main loop or is dispatched to a subagent.
 
-Use the main loop only for the fastest deterministic tasks: direct acknowledgements, very small state mutations, or a single mechanical command whose output can be returned without analysis. For main-loop work, the user-facing reply must include a short line identifying it as main-loop work and stating the model/effort actually being used, for example:
+Use the main loop only for extremely direct deterministic operations:
+
+- Simple acknowledgements.
+- Service-level commands already handled by this service, such as `help`, `logs`, `agents`, `agent kill`, and deploy/update commands.
+- Direct todo/project state mutations or listing through the existing assistant-agent-logic scripts, when the requested operation is explicit and requires no interpretation beyond running the documented script.
+- Other trivial deterministic local lookups with no repo inspection, external account/data lookup, research, or multi-step workflow.
+
+Do not use the main loop for README changes, documentation edits, code edits, repo/file inspection, calendar lookup, email/Gmail lookup, research, external-data lookup, debugging, architecture, multi-step work, or ambiguous work. Even a read-only calendar or email lookup must dispatch a subagent.
+
+For main-loop work, the user-facing reply must include a short line identifying it as main-loop work and stating the model/effort actually being used, for example:
 
 `main_loop: model=gpt-5.5 effort=medium`
 
-For any reasoning, investigation, code editing, code review, debugging, architecture, ambiguous, multi-step, or potentially slow task, dispatch a subagent. The top-level Codex loop must choose `model` and `effort` explicitly for the task; do not rely on subagent defaults as the routing decision. Before or with every `dispatch_subagent`, provide a concise task summary via `summary`, and set explicit `model` and `effort` fields. The service will send a visible dispatch status containing the task, profile, model, and effort, and the job will be visible in `agents` / `subagents`.
+For any reasoning, investigation, repo inspection, code or docs editing, code review, debugging, architecture, calendar/email lookup, external-data lookup, ambiguous, multi-step, or potentially slow task, dispatch a subagent. The top-level Codex loop must choose `model` and `effort` explicitly for the task; do not rely on subagent defaults as the routing decision. Before or with every `dispatch_subagent`, provide a concise task summary via `summary`, and set explicit `model` and `effort` fields. The service will send a visible dispatch status containing the task, profile, model, and effort, and the job will be visible in `agents` / `subagents`.
 
 Default routing rubric:
 
-- Code edits, code review, debugging, architecture, multi-step repo work, or ambiguous/high-stakes tasks: `model: "gpt-5.5"`, `effort: "xhigh"`.
-- Normal research, repo inspection, and non-trivial analysis: `model: "gpt-5.5"`, `effort: "high"`.
+- Code/docs edits, code review, debugging, architecture, multi-step repo work, or ambiguous/high-stakes tasks: `model: "gpt-5.5"`, `effort: "xhigh"`.
+- Normal research, repo inspection, calendar/email lookup, external-data lookup, and non-trivial analysis: `model: "gpt-5.5"`, `effort: "high"`.
 - Simple deterministic main-loop work: use the current top-level model/effort and disclose it as `main_loop`.
 
 Subagent directive shape:
@@ -257,9 +266,11 @@ Subagent directive shape:
 
 ## Assistant Workspace
 
-Before handling ANY request that touches todos, bets/betting, CRM/contacts, reminders, calendar, email, finance, or health (Whoop), you MUST read the relevant skill file. This is mandatory — not optional. Skipping this step will cause you to use the wrong workflow, wrong file paths, wrong script flags, or miss required confirmation steps.
+Before handling ANY request that touches todos, bets/betting, CRM/contacts, reminders, calendar, email, finance, or health (Whoop), the actor doing the work MUST read the relevant skill file. This is mandatory — not optional. Skipping this step will cause the wrong workflow, wrong file paths, wrong script flags, or missed confirmation steps.
 
-Reminder: the service already emitted the user-message 👀 reaction before Codex saw the request. Read the skill file first, do the work, then emit the final reply.
+Only direct todo/project state mutations or listing may stay in the main loop, and only when they are explicit deterministic script calls. Calendar/email lookups, finance/health/betting lookups, CRM investigation, messaging reads, and other external account/data access must dispatch a subagent; include the required skill-doc read in the subagent prompt.
+
+Reminder: the service already emitted the user-message 👀 reaction before Codex saw the request. If the task is allowed to stay in the main loop, read the skill file first, do the work, then emit the final reply. If it must dispatch, the subagent reads the skill file before doing the work.
 
 ### Step 1 — ALWAYS read the skill doc first
 

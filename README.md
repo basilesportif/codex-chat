@@ -39,6 +39,18 @@ codex-chat jobs list
 - Telegram downloads: `data/files/`
 - Subagent artifacts: `data/subagents/`
 
+## Main-loop routing policy
+
+The warm main Codex loop is intentionally narrow. It should only handle
+extremely direct deterministic operations: simple acknowledgements,
+service-level commands, direct todo/project state mutations or listing through
+existing scripts, and trivial local lookups that require no interpretation.
+
+README edits, documentation edits, code changes, repo inspection, calendar or
+email lookup, research, debugging, architecture, multi-step work, ambiguous
+work, and external-data lookup must dispatch a subagent with explicit
+`summary`, `model`, and `effort`.
+
 ## Voice Transcription Prompt and Dictionary
 
 Voice and audio transcription can use an OpenAI transcription prompt file for

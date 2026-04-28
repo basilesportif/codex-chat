@@ -1,0 +1,67 @@
+import { describe, expect, test } from "vitest";
+import { LogBuffer, formatLogEntries, scrubSecrets } from "../log-buffer.js";
+
+describe("LogBuffer", () => {
+  test("stores newline-separated chunks as individual entries", () => {
+    const buf = new LogBuffer(10);
+    buf.append("stdout", "line one\nline two\nline three\n");
+    expect(buf.size()).toBe(3);
+    expect(buf.recent(10).map((e) => e.line)).toEqual(["line one", "line two", "line three"]);
+  });
+
+  test("respects capacity and drops oldest entries", () => {
+    const buf = new LogBuffer(3);
+    buf.append("stdout", "1\n2\n3\n4\n5\n");
+    expect(buf.size()).toBe(3);
+    expect(buf.recent(10).map((e) => e.line)).toEqual(["3", "4", "5"]);
+  });
+
+  test("returns at most n recent entries", () => {
+    const buf = new LogBuffer(100);
+    for (let i = 1; i <= 50; i++) buf.append("stderr", `line ${i}\n`);
+    const last5 = buf.recent(5).map((e) => e.line);
+    expect(last5).toEqual(["line 46", "line 47", "line 48", "line 49", "line 50"]);
+  });
+
+  test("scrubs OpenAI keys, GitHub tokens, and Telegram bot tokens", () => {
+    const buf = new LogBuffer(10);
+    buf.append(
+      "stderr",
+      "key=sk-proj-AAAAAAAAAAAAAAAAAAAAAA gh=ghp_BBBBBBBBBBBBBBBBBBBBBBBBBBBB tg=123456789:AABBccDDeeFFggHHiiJJkkLLmm\n"
+    );
+    const line = buf.recent(1)[0]!.line;
+    expect(line).not.toMatch(/sk-proj-A/);
+    expect(line).not.toMatch(/ghp_B/);
+    expect(line).not.toMatch(/123456789:AABB/);
+    expect(line).toContain("[REDACTED:openai]");
+    expect(line).toContain("[REDACTED:github]");
+    expect(line).toContain("[REDACTED:telegram]");
+  });
+
+  test("scrubs authorization-bearer and api_key headers", () => {
+    expect(scrubSecrets("Authorization: Bearer abcdefghijklmnopqrstuvwxyz")).toContain("[REDACTED]");
+    expect(scrubSecrets('api_key: "abcdefghijklmnopqrstuvwxyz123"')).toContain("[REDACTED]");
+  });
+
+  test("ignores empty input", () => {
+    const buf = new LogBuffer(5);
+    buf.append("stdout", "");
+    buf.append("stdout", "\n\n");
+    expect(buf.size()).toBe(0);
+  });
+
+  test("formatLogEntries renders ts, stream, and line", () => {
+    const buf = new LogBuffer(5);
+    buf.append("stdout", "hello\n");
+    const formatted = formatLogEntries(buf.recent(1));
+    expect(formatted).toMatch(/\[\d{4}-\d{2}-\d{2}T.*\] stdout hello/);
+  });
+
+  test("clear empties the buffer", () => {
+    const buf = new LogBuffer(5);
+    buf.append("stdout", "a\nb\n");
+    expect(buf.size()).toBe(2);
+    buf.clear();
+    expect(buf.size()).toBe(0);
+  });
+});

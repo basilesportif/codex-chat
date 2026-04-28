@@ -53,6 +53,32 @@ Two
     expect(parsed.blocks.flatMap((block) => block.actions.map((action) => action.type))).toEqual(["notify_owner", "send_text"]);
   });
 
+  test("accepts get_logs directives with default and explicit line counts", () => {
+    const parsed = parseDirectives(`\`\`\`codex-chat
+{
+  "version": 1,
+  "actions": [
+    { "type": "get_logs", "idempotencyKey": "logs-1" },
+    { "type": "get_logs", "idempotencyKey": "logs-2", "lines": 200 }
+  ]
+}
+\`\`\``);
+    expect(parsed.errors).toEqual([]);
+    expect(parsed.blocks).toHaveLength(1);
+    const actions = parsed.blocks[0]!.actions;
+    expect(actions[0]?.type).toBe("get_logs");
+    expect((actions[0] as { lines?: number }).lines).toBeUndefined();
+    expect((actions[1] as { lines?: number }).lines).toBe(200);
+  });
+
+  test("rejects get_logs with excessive line counts", () => {
+    const parsed = parseDirectives(`\`\`\`codex-chat
+{ "version": 1, "actions": [ { "type": "get_logs", "idempotencyKey": "logs-3", "lines": 999999 } ] }
+\`\`\``);
+    expect(parsed.blocks).toHaveLength(0);
+    expect(parsed.errors).toHaveLength(1);
+  });
+
   test("strips directive fences from user-facing text", () => {
     const parsed = parseDirectives(`Keep this
 \`\`\`codex-chat

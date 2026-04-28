@@ -4,6 +4,7 @@ import WebSocket from "ws";
 import type { Logger } from "pino";
 import { AppConfig } from "./config.js";
 import { BehaviorPack } from "./behavior.js";
+import { LogBuffer } from "./log-buffer.js";
 import { StateStore } from "./state.js";
 import { CodexClient, CodexEvent, CodexHealth, CodexTurnInput } from "./types.js";
 
@@ -80,6 +81,12 @@ export class AppServerCodexClient implements CodexClient {
   private sessionId?: string;
   private connected = false;
   private startupComplete = false;
+  /**
+   * In-memory ring buffer of recent app-server stdout/stderr lines. Exposed
+   * via getRecentLogs() so the `get_logs` directive can show Tim what the
+   * Codex app-server has been emitting without him having to SSH in.
+   */
+  private readonly logBuffer = new LogBuffer(500);
 
   constructor(
     private readonly config: AppConfig,
@@ -88,6 +95,11 @@ export class AppServerCodexClient implements CodexClient {
     private readonly logger: Logger,
     private readonly onCrash?: CodexCrashHandler
   ) {}
+
+  /** Returns up to `n` most-recent app-server output lines (oldest first). */
+  getRecentLogs(n = 100): string[] {
+    return this.logBuffer.recent(n).map((entry) => `[${entry.ts}] ${entry.stream.padEnd(6)} ${entry.line}`);
+  }
 
   async start(): Promise<void> {
     this.stopping = false;
@@ -103,8 +115,16 @@ export class AppServerCodexClient implements CodexClient {
       stdio: ["ignore", "pipe", "pipe"]
     });
     this.child = child;
-    child.stdout?.on("data", (chunk) => this.logger.debug({ component: "codex", stream: "stdout", data: chunk.toString() }));
-    child.stderr?.on("data", (chunk) => this.logger.info({ component: "codex", stream: "stderr", data: chunk.toString() }));
+    child.stdout?.on("data", (chunk) => {
+      const text = chunk.toString();
+      this.logBuffer.append("stdout", text);
+      this.logger.debug({ component: "codex", stream: "stdout", data: text });
+    });
+    child.stderr?.on("data", (chunk) => {
+      const text = chunk.toString();
+      this.logBuffer.append("stderr", text);
+      this.logger.info({ component: "codex", stream: "stderr", data: text });
+    });
     child.on("exit", (code, signal) => {
       if (this.child !== child) return;
       this.connected = false;

@@ -250,24 +250,6 @@ export class ServiceSupervisor {
       turnClosed = true;
     };
     await this.state.writeJson(`turns/${turnId}.json`, { id: turnId, status: "running", input: event, startedAt: nowIso() });
-    // Keep a "typing..." indicator visible to the user for the entire duration
-    // of the Codex turn so they always know we received the message and are
-    // working on it. Telegram clears the typing action after ~5s, so we refresh
-    // it on a short interval. The first call happens synchronously below so
-    // even queued and synthetic-with-chat events get an instant indicator.
-    let typingInterval: ReturnType<typeof setInterval> | undefined;
-    if (event.chatId) {
-      void this.telegram.sendChatAction(event.chatId, "typing");
-      typingInterval = setInterval(() => {
-        if (event.chatId) void this.telegram.sendChatAction(event.chatId, "typing");
-      }, 4_000);
-    }
-    const stopTyping = (): void => {
-      if (typingInterval) {
-        clearInterval(typingInterval);
-        typingInterval = undefined;
-      }
-    };
     try {
       await this.removePersistedQueuedEvent(event);
       let output = "";
@@ -316,7 +298,6 @@ export class ServiceSupervisor {
       }
       throw error;
     } finally {
-      stopTyping();
       await this.removePersistedQueuedEvent(event);
     }
   }
@@ -350,6 +331,7 @@ export class ServiceSupervisor {
       if (action.type === "cancel_job") await this.subagents.cancel(action.jobId);
       if (action.type === "notify_owner") await this.telegram.notifyOps(action.text);
       if (action.type === "enqueue_main") void this.enqueueSynthetic(action.text, action.metadata);
+      if (action.type === "get_logs") await this.handleGetLogs(action, origin);
       stored.status = "completed";
     } catch (error) {
       stored.status = "failed";
@@ -815,6 +797,35 @@ export class ServiceSupervisor {
   private requireChat(chatId?: number): number {
     if (!chatId) throw new Error("Directive did not include chatId and the origin event has no Telegram chat");
     return chatId;
+  }
+
+  /**
+   * Fetch recent Codex app-server output and send it back to the user as a
+   * formatted code block. Output is split across multiple Telegram messages
+   * automatically by `chunkText`. Secrets are scrubbed at insertion time in
+   * the LogBuffer, but we re-scrub here as a defense-in-depth measure.
+   */
+  private async handleGetLogs(
+    action: Extract<DirectiveAction, { type: "get_logs" }>,
+    origin: UserEvent
+  ): Promise<void> {
+    const chatId = action.chatId ?? this.requireChat(origin.chatId);
+    const requested = action.lines ?? 100;
+    const lines = Math.max(1, Math.min(requested, 2000));
+    const getRecentLogs = this.codex.getRecentLogs?.bind(this.codex);
+    if (!getRecentLogs) {
+      await this.telegram.sendText(chatId, "Log buffer is not available for this transport.", action.replyToMessageId ?? origin.messageId);
+      return;
+    }
+    const recent = getRecentLogs(lines);
+    if (recent.length === 0) {
+      await this.telegram.sendText(chatId, "Codex app-server log buffer is empty.", action.replyToMessageId ?? origin.messageId);
+      return;
+    }
+    const header = `Codex app-server logs — last ${recent.length} line(s):`;
+    const body = recent.join("\n");
+    const formatted = `${header}\n\`\`\`\n${body}\n\`\`\``;
+    await this.telegram.sendText(chatId, formatted, action.replyToMessageId ?? origin.messageId);
   }
 
   private createTranscriber(): Transcriber {

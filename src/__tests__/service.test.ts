@@ -358,35 +358,6 @@ describe("service supervisor", () => {
     expect(sendText).toHaveBeenCalledWith(253768951, "Pong.", 501);
   });
 
-  test("does not leak invalid sentinel directive text to Telegram", async () => {
-    const config = await loadTestConfig();
-    const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
-    await service.state.init();
-    let turns = 0;
-    vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
-      turns += 1;
-      if (turns === 1) {
-        yield {
-          type: "final",
-          text: `Visible
-BEGIN CODEXCHAT DIRECTIVE V1
-{ "version": 1, "actions": [] }
-END CODEXCHAT DIRECTIVE`
-        };
-      }
-    });
-    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
-
-    await service.enqueueUserEvent(userEvent(503, "ping"));
-    await waitForIdle(service);
-
-    expect(sendText).toHaveBeenCalledWith(253768951, "Visible", 503);
-    const messages = sendText.mock.calls.map((call) => call[1] as string);
-    expect(messages.some((message) => message.includes("BEGIN CODEXCHAT"))).toBe(false);
-    expect(messages.some((message) => message.includes("\"actions\""))).toBe(false);
-  });
-
   test("does not guardrail a subagent-routed response for a research prompt", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
@@ -463,46 +434,6 @@ describe("incremental directive execution", () => {
     expect(reactFired[0]).toBe("👀");
   });
 
-  test("sentinel react directive fires during streaming", async () => {
-    const config = await loadTestConfig();
-    const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
-    await service.state.init();
-
-    const reactSentinelChunk = `BEGIN CODEXCHAT DIRECTIVE V1
-{"version":1,"actions":[{"type":"react","idempotencyKey":"react-sentinel-stream-1","messageId":43,"emoji":"👀"}]}
-END CODEXCHAT DIRECTIVE`;
-
-    const afterReactDeferred = deferred();
-    const reactFired: string[] = [];
-
-    vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
-      yield { type: "delta", text: reactSentinelChunk };
-      await afterReactDeferred.promise;
-      yield { type: "delta", text: "\nOK I see your message." };
-    });
-
-    vi.spyOn(service.telegram, "sendReaction").mockImplementation(async (_chatId, _messageId, emoji) => {
-      reactFired.push(emoji);
-    });
-    vi.spyOn(service.telegram, "sendText").mockResolvedValue();
-
-    const turnPromise = service.enqueueUserEvent(userEvent(43));
-    for (let i = 0; i < 10; i++) await flush();
-
-    expect(reactFired).toEqual(["👀"]);
-
-    afterReactDeferred.resolve();
-    await turnPromise;
-    for (let i = 0; i < 20; i++) {
-      const running = (service as unknown as { turnRunning: boolean }).turnRunning;
-      if (!running) break;
-      await flush();
-    }
-
-    expect(reactFired).toHaveLength(1);
-  });
-
   test("react is not double-fired by idempotency key when pre-executed and final pass runs", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
@@ -551,7 +482,7 @@ END CODEXCHAT DIRECTIVE`;
     vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
       yield { type: "delta", text: fence1 };
       await afterFence1.promise;
-      yield { type: "delta", text: fence2 };
+      yield { type: "delta", text: `\n${fence2}` };
     });
 
     vi.spyOn(service.telegram, "sendReaction").mockImplementation(async (_chatId, _messageId, emoji) => {

@@ -19,7 +19,7 @@ User message: `list my todos` (telegram message_id: 234, chatId 253768951)
 Correct response:
 
 ~~~
-BEGIN CODEXCHAT DIRECTIVE V1
+```codex-chat
 {
   "version": 1,
   "actions": [
@@ -31,7 +31,7 @@ BEGIN CODEXCHAT DIRECTIVE V1
     }
   ]
 }
-END CODEXCHAT DIRECTIVE
+```
 ~~~
 
 ### Events that need no special handling
@@ -46,7 +46,7 @@ The shared workflow doc at `/home/tim/pkg/tim/assistant-agent-logic/config/TELEG
 - "React with an emoji" → emit a `react` directive only when explicitly asked to change a reaction after receipt; never use it as the normal user-message ack.
 - "Acknowledge first" → do nothing in Codex. The service already sent the 👀 reaction before the message reached you.
 - Attachments are pre-downloaded by the service — you receive the local path directly.
-- MarkdownV2: use `"format": "markdownv2"` in `send_text` directives for rich formatting.
+- Markdown: normal assistant Markdown/code fences in Telegram replies are rendered by the service. Use `"format": "text"` only for literal unformatted text; `"format": "markdownv2"` is reserved for already-escaped Telegram MarkdownV2.
 
 ## Response Style
 
@@ -300,10 +300,10 @@ Every user-facing response MUST be emitted as a `send_text` directive (see ## Di
 
 ## Directives
 
-When codex-chat must perform an external action, emit a sentinel JSON block using exactly these marker lines:
+When codex-chat must perform an external action, emit a fenced JSON block:
 
 ~~~
-BEGIN CODEXCHAT DIRECTIVE V1
+```codex-chat
 {
   "version": 1,
   "actions": [
@@ -315,19 +315,17 @@ BEGIN CODEXCHAT DIRECTIVE V1
     }
   ]
 }
-END CODEXCHAT DIRECTIVE
+```
 ~~~
 
 Rules:
 
-- The begin and end markers must be on their own lines exactly as shown.
 - The block must be valid JSON.
 - Every side-effecting action needs an `idempotencyKey`.
 - `dispatch_subagent` actions must include `summary`, `model`, and `effort`.
 - Keep normal user-facing text outside directive blocks.
 - Do not include secrets in directives.
 - Use local paths for `send_image` and `send_document`.
-- The deployed parser also accepts legacy triple-backtick `codex-chat` fences for old sessions, but new responses should use only the sentinel markers above. Do not invent or emit other directive markers.
 
 Supported action types:
 
@@ -380,7 +378,7 @@ The fan-out goes through Codex — you decide how many and which files. Do NOT u
 ### Example stress test response (5 subagents)
 
 ~~~
-BEGIN CODEXCHAT DIRECTIVE V1
+```codex-chat
 {
   "version": 1,
   "actions": [
@@ -392,5 +390,5 @@ BEGIN CODEXCHAT DIRECTIVE V1
     { "type": "send_text", "idempotencyKey": "stress-ack-<msgId>", "chatId": 253768951, "text": "Dispatched 5 subagents. Use 'agents' to monitor progress." }
   ]
 }
-END CODEXCHAT DIRECTIVE
+```
 ~~~

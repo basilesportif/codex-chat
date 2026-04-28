@@ -6,6 +6,7 @@ import { StateStore } from "./state.js";
 import { Transcriber } from "./transcription.js";
 import { Attachment, UserEvent } from "./types.js";
 import { chunkText, makePairingCode, nowIso } from "./util.js";
+import { renderTelegramMarkdown } from "./telegram-format.js";
 
 
 export interface TelegramAllowlistInput {
@@ -80,23 +81,23 @@ export class TelegramGateway {
     await this.pollingTask?.catch(() => undefined);
   }
 
-  async sendText(chatId: number, text: string, replyToMessageId?: number, format?: "text" | "markdownv2"): Promise<void> {
+  async sendText(chatId: number, text: string, replyToMessageId?: number, format?: "text" | "markdown" | "markdownv2"): Promise<void> {
     if (!this.bot) throw new Error("Telegram bot is not started");
-    let parseMode: string | undefined;
-    if (format === "markdownv2") {
-      parseMode = "MarkdownV2";
-    } else if (format === "text") {
-      parseMode = undefined;
-    } else {
-      parseMode = this.config.telegram.parseMode === "plain" ? undefined : this.config.telegram.parseMode;
-    }
-    for (const chunk of chunkText(text || "(empty response)")) {
-      await this.bot.api.sendMessage(chatId, chunk, {
-        parse_mode: parseMode,
+    for (const rawChunk of chunkText(text || "(empty response)", 3200)) {
+      const rendered = this.renderOutgoingText(rawChunk, format);
+      await this.bot.api.sendMessage(chatId, rendered.text, {
+        parse_mode: rendered.parseMode,
         reply_parameters: replyToMessageId ? { message_id: replyToMessageId } : undefined
       } as never);
-      await this.state.recordMessage({ direction: "outbound", chatId, text: chunk, sentAt: nowIso() });
+      await this.state.recordMessage({ direction: "outbound", chatId, text: rawChunk, sentAt: nowIso() });
     }
+  }
+
+  private renderOutgoingText(text: string, format?: "text" | "markdown" | "markdownv2"): { text: string; parseMode?: string } {
+    if (format === "text") return { text };
+    if (format === "markdownv2") return { text, parseMode: "MarkdownV2" };
+    if (format === "markdown" || !format) return renderTelegramMarkdown(text);
+    return { text, parseMode: this.config.telegram.parseMode === "plain" ? undefined : this.config.telegram.parseMode };
   }
 
   async sendReaction(chatId: number, messageId: number, emoji: string): Promise<void> {

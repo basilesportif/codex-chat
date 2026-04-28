@@ -48,6 +48,8 @@ export class TelegramGateway {
   private bot?: Bot;
   private pairingCode?: string;
   private token?: string;
+  private pollingTask?: Promise<void>;
+  private stopping = false;
 
   constructor(
     private readonly config: AppConfig,
@@ -61,6 +63,7 @@ export class TelegramGateway {
   async start(): Promise<void> {
     this.token = this.config.telegramBotToken;
     if (!this.token) throw new Error(`${this.config.telegram.botTokenEnv} is required to start Telegram`);
+    this.stopping = false;
     this.bot = new Bot(this.token);
     const emptyAllowlist = await this.isAllowlistEmpty();
     if (emptyAllowlist && this.config.telegram.pairingEnabledOnEmptyAllowlist) {
@@ -69,13 +72,13 @@ export class TelegramGateway {
       process.stderr.write(`\nTelegram pairing code: /pair ${this.pairingCode}\n\n`);
     }
     this.registerHandlers(this.bot);
-    void this.bot.start({
-      onStart: (info) => this.logger.info({ component: "telegram", event: "started", username: info.username }, "Telegram polling started")
-    }).catch((error) => this.logger.error({ component: "telegram", event: "polling_failed", error }, "Telegram polling failed"));
+    this.pollingTask = this.runPollingLoop(this.bot);
   }
 
   async stop(): Promise<void> {
+    this.stopping = true;
     await this.bot?.stop();
+    await this.pollingTask?.catch(() => undefined);
   }
 
   async sendText(chatId: number, text: string, replyToMessageId?: number): Promise<void> {
@@ -138,6 +141,20 @@ export class TelegramGateway {
     });
     bot.on("message", async (ctx) => this.handleMessage(ctx as GrammyContext));
     bot.catch((error) => this.logger.error({ component: "telegram", event: "handler_error", error }, "Telegram handler failed"));
+  }
+
+  private async runPollingLoop(bot: Bot): Promise<void> {
+    while (!this.stopping) {
+      try {
+        await bot.start({
+          onStart: (info) => this.logger.info({ component: "telegram", event: "started", username: info.username }, "Telegram polling started")
+        });
+        if (!this.stopping) this.logger.error({ component: "telegram", event: "polling_stopped" }, "Telegram polling stopped unexpectedly; restarting");
+      } catch (error) {
+        if (!this.stopping) this.logger.error({ component: "telegram", event: "polling_failed", error }, "Telegram polling failed; restarting");
+      }
+      if (!this.stopping) await new Promise((resolve) => setTimeout(resolve, 5_000));
+    }
   }
 
   private async handlePair(ctx: GrammyContext): Promise<void> {

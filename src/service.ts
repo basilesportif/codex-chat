@@ -19,8 +19,12 @@ import { makeId, nowIso } from "./util.js";
 
 export const INJECT_TELEGRAM_USER_ID = 253768951;
 const CODEX_UNAVAILABLE_MESSAGE = "⚠️ Codex is not available. Run 'codex login' on the server to authenticate.";
+const CODEX_TEMPORARILY_UNAVAILABLE_MESSAGE = "⚠️ Codex is currently unavailable. Please try again shortly.";
+const CODEX_RESTARTING_MESSAGE = "⚠️ Codex is restarting. Your message was not processed; please resend it after the restart notice.";
 const DISABLED_EXEC_RESUME_MESSAGE = "exec-resume transport is disabled. Only app-server (OAuth) is supported. Run 'codex login' to authenticate.";
 const RESTARTED_RESEND_MESSAGE = "⚠️ Service was restarted. Please resend your message.";
+const QUEUE_OVERFLOW_MESSAGE = "⚠️ I dropped an older queued message because this chat already has 50 pending messages. Please resend it if still needed.";
+const MAX_QUEUE_PER_KEY = 50;
 const TURN_RESPONSE_WARN_MS = 45_000;
 /**
  * Hard cap on how long a single turn may keep `turnRunning = true`. If we
@@ -38,6 +42,8 @@ const CONTEXT_RESET_USER_MESSAGE =
   "⚠️ Codex crashed mid-turn and was restarted. The conversation context was reset — please resend your last message and re-establish any context you need.";
 const CONTEXT_RESET_OPS_NOTE =
   "Note: conversation context was reset due to the crash. Active users have been notified.";
+const IDEMPOTENCY_TTL_MS = 24 * 60 * 60_000;
+const MAX_SEEN_IDEMPOTENCY = 5_000;
 
 type QueuedEvent = {
   event: UserEvent;
@@ -65,12 +71,14 @@ export class ServiceSupervisor {
   private turnStartedAt?: Date;
   /** The event currently being processed; used for chat-level crash/timeout notifications. */
   private activeTurnEvent?: UserEvent;
+  private activeTurnToken = 0;
+  private drainingQueue = false;
   private watchdogInterval?: ReturnType<typeof setInterval>;
   private injectInterval?: ReturnType<typeof setInterval>;
   private injectPolling = false;
   private stopping = false;
   private restartingCodex = false;
-  private seenIdempotency = new Set<string>();
+  private seenIdempotency = new Map<string, number>();
 
   constructor(
     private readonly config: AppConfig,
@@ -177,12 +185,8 @@ export class ServiceSupervisor {
 
   async enqueueUserEvent(event: UserEvent): Promise<void> {
     const key = event.chatId ? String(event.chatId) : "system";
-    if (this.turnRunning) {
-      const queue = this.messageQueue.get(key) ?? [];
-      const persistedId = await this.persistQueuedEvent(event);
-      queue.push({ event, persistedId });
-      this.messageQueue.set(key, queue);
-      this.logger.info({ component: "service", event: "message_queued", key, queueLength: queue.length }, "Turn busy - message queued");
+    if (this.shouldQueueTurn()) {
+      await this.queueEvent(key, event);
       return;
     }
     this.runTurn(event);
@@ -196,11 +200,8 @@ export class ServiceSupervisor {
       metadata,
       receivedAt: nowIso()
     };
-    if (this.turnRunning) {
-      const queue = this.messageQueue.get("system") ?? [];
-      const persistedId = await this.persistQueuedEvent(event);
-      queue.push({ event, persistedId });
-      this.messageQueue.set("system", queue);
+    if (this.shouldQueueTurn()) {
+      await this.queueEvent("system", event);
       return;
     }
     this.runTurn(event);
@@ -243,47 +244,61 @@ export class ServiceSupervisor {
   private async processEvent(event: UserEvent): Promise<void> {
     const prompt = this.formatEventForCodex(event);
     const turnId = makeId("turn");
+    let turnClosed = false;
+    const closeTurn = async (value: Record<string, unknown>): Promise<void> => {
+      await this.state.writeJson(`turns/${turnId}.json`, value);
+      turnClosed = true;
+    };
     await this.state.writeJson(`turns/${turnId}.json`, { id: turnId, status: "running", input: event, startedAt: nowIso() });
-    await this.removePersistedQueuedEvent(event);
-    let output = "";
-    let hadError = false;
-    let errorMessage = "";
     try {
-      for await (const codexEvent of this.codex.sendTurn({ text: prompt, attachments: event.attachments, source: event.source, turnId })) {
-        if (codexEvent.type === "delta") output += codexEvent.text;
-        if (codexEvent.type === "final" && codexEvent.text.trim()) output = codexEvent.text;
-        if (codexEvent.type === "error") {
-          hadError = true;
-          errorMessage = codexEvent.message ?? "unknown error";
-          this.logger.error({ component: "codex", event: "turn_event_error", turnId, detail: codexEvent.message });
+      await this.removePersistedQueuedEvent(event);
+      let output = "";
+      let hadError = false;
+      let errorMessage = "";
+      try {
+        for await (const codexEvent of this.codex.sendTurn({ text: prompt, attachments: event.attachments, source: event.source, turnId })) {
+          if (codexEvent.type === "delta") output += codexEvent.text;
+          if (codexEvent.type === "final" && codexEvent.text.trim()) output = codexEvent.text;
+          if (codexEvent.type === "error") {
+            hadError = true;
+            errorMessage = codexEvent.message ?? "unknown error";
+            this.logger.error({ component: "codex", event: "turn_event_error", turnId, detail: codexEvent.message });
+          }
         }
+      } catch (error) {
+        this.logger.error({ component: "codex", event: "turn_unavailable", turnId, error }, "Codex turn failed");
+        await closeTurn({ id: turnId, status: "error", input: event, errorMessage: error instanceof Error ? error.message : String(error), completedAt: nowIso() });
+        if (event.chatId) {
+          try {
+            await this.telegram.sendText(event.chatId, this.codexUnavailableMessage(error), event.messageId);
+          } catch (sendError) {
+            this.logger.error({ component: "service", event: "codex_unavailable_reply_failed", sendError }, "Failed to send Codex unavailable reply to Telegram");
+          }
+        }
+        return;
       }
+      if (hadError && !output.trim() && event.chatId) {
+        const brief = errorMessage.split("\n")[0].slice(0, 100);
+        await closeTurn({ id: turnId, status: "error", input: event, errorMessage, completedAt: nowIso() });
+        await this.telegram.sendText(event.chatId, `Codex encountered an error: ${brief}. Please try again.`);
+        return;
+      }
+      const parsed = parseDirectives(output);
+      if (parsed.cleanText && event.chatId) await this.telegram.sendText(event.chatId, parsed.cleanText, event.messageId);
+      for (const error of parsed.errors) {
+        void this.enqueueSynthetic(`The previous assistant output contained an invalid codex-chat directive: ${error}`, { source: "system", turnId });
+      }
+      for (const block of parsed.blocks) {
+        for (const action of block.actions) await this.executeDirective(action, event);
+      }
+      await closeTurn({ id: turnId, status: "completed", input: event, outputText: output, completedAt: nowIso() });
     } catch (error) {
-      this.logger.error({ component: "codex", event: "turn_unavailable", turnId, error }, "Codex turn failed");
-      await this.state.writeJson(`turns/${turnId}.json`, { id: turnId, status: "error", input: event, errorMessage: error instanceof Error ? error.message : String(error), completedAt: nowIso() });
-      if (event.chatId) {
-        try {
-          await this.telegram.sendText(event.chatId, CODEX_UNAVAILABLE_MESSAGE, event.messageId);
-        } catch (sendError) {
-          this.logger.error({ component: "service", event: "codex_unavailable_reply_failed", sendError }, "Failed to send Codex unavailable reply to Telegram");
-        }
+      if (!turnClosed) {
+        await closeTurn({ id: turnId, status: "error", input: event, errorMessage: error instanceof Error ? error.message : String(error), completedAt: nowIso() });
       }
-      return;
-    }
-    if (hadError && !output.trim() && event.chatId) {
-      const brief = errorMessage.split("\n")[0].slice(0, 100);
-      await this.telegram.sendText(event.chatId, `Codex encountered an error: ${brief}. Please try again.`);
-      await this.state.writeJson(`turns/${turnId}.json`, { id: turnId, status: "error", input: event, errorMessage, completedAt: nowIso() });
-      return;
-    }
-    const parsed = parseDirectives(output);
-    await this.state.writeJson(`turns/${turnId}.json`, { id: turnId, status: "completed", input: event, outputText: output, completedAt: nowIso() });
-    if (parsed.cleanText && event.chatId) await this.telegram.sendText(event.chatId, parsed.cleanText, event.messageId);
-    for (const error of parsed.errors) {
-      void this.enqueueSynthetic(`The previous assistant output contained an invalid codex-chat directive: ${error}`, { source: "system", turnId });
-    }
-    for (const block of parsed.blocks) {
-      for (const action of block.actions) await this.executeDirective(action, event);
+      throw error;
+    } finally {
+      await this.removePersistedQueuedEvent(event);
     }
   }
 
@@ -296,12 +311,12 @@ export class ServiceSupervisor {
       createdAt: nowIso(),
       payload: action
     };
-    if (action.idempotencyKey && this.seenIdempotency.has(action.idempotencyKey)) {
+    if (action.idempotencyKey && this.hasSeenIdempotency(action.idempotencyKey)) {
       stored.status = "skipped";
       await this.state.saveAction(stored);
       return;
     }
-    if (action.idempotencyKey) this.seenIdempotency.add(action.idempotencyKey);
+    if (action.idempotencyKey) this.rememberIdempotency(action.idempotencyKey);
     await this.state.saveAction(stored);
     stored.status = "running";
     await this.state.saveAction(stored);
@@ -370,14 +385,21 @@ export class ServiceSupervisor {
       this.logger.error({ component: "codex", event: "restart_failed", error }, "Codex restart failed");
     } finally {
       this.restartingCodex = false;
+      this.drainQueue();
     }
   }
 
   private runTurn(event: UserEvent): void {
+    if (this.turnRunning) {
+      void this.queueEvent(event.chatId ? String(event.chatId) : "system", event);
+      return;
+    }
     this.turnRunning = true;
+    const token = ++this.activeTurnToken;
     this.turnStartedAt = new Date();
     this.activeTurnEvent = event;
     void this.processEventSafe(event).finally(() => {
+      if (this.activeTurnToken !== token) return;
       this.turnRunning = false;
       this.turnStartedAt = undefined;
       this.activeTurnEvent = undefined;
@@ -386,20 +408,25 @@ export class ServiceSupervisor {
   }
 
   private drainQueue(): void {
+    if (this.turnRunning || this.restartingCodex || this.drainingQueue) return;
+    this.drainingQueue = true;
     for (const [key, queue] of this.messageQueue) {
       if (queue.length > 0) {
         const next = queue.shift()!;
         if (queue.length === 0) this.messageQueue.delete(key);
         this.runTurn(next.event);
+        this.drainingQueue = false;
         return;
       }
     }
+    this.drainingQueue = false;
   }
 
   private async processEventSafe(event: UserEvent): Promise<void> {
     try {
       await this.processEvent(event);
     } catch (error) {
+      await this.removePersistedQueuedEvent(event);
       const brief = error instanceof Error ? error.message.split("\n")[0].slice(0, 100) : String(error).slice(0, 100);
       this.logger.error({ component: "service", event: "turn_error", error }, "Turn processing failed");
       if (event.chatId) {
@@ -498,6 +525,67 @@ export class ServiceSupervisor {
     const persistedId = typeof event.metadata?.persistedQueueId === "string" ? event.metadata.persistedQueueId : undefined;
     if (!persistedId) return;
     await rm(this.state.path(`queued_turns/${persistedId}.json`), { force: true }).catch(() => undefined);
+  }
+
+  private shouldQueueTurn(): boolean {
+    return this.turnRunning || this.restartingCodex;
+  }
+
+  private async queueEvent(key: string, event: UserEvent): Promise<void> {
+    const persistedId = await this.persistQueuedEvent(event);
+    const queue = this.messageQueue.get(key) ?? [];
+    if (!this.messageQueue.has(key)) this.messageQueue.set(key, queue);
+    queue.push({ event, persistedId });
+    const dropped: QueuedEvent[] = [];
+    while (queue.length > MAX_QUEUE_PER_KEY) {
+      const next = queue.shift();
+      if (next) dropped.push(next);
+    }
+    this.logger.info({ component: "service", event: "message_queued", key, queueLength: queue.length, restartingCodex: this.restartingCodex }, "Turn busy - message queued");
+    for (const item of dropped) await this.dropQueuedEvent(item);
+    if (!this.shouldQueueTurn()) this.drainQueue();
+  }
+
+  private async dropQueuedEvent(queued: QueuedEvent): Promise<void> {
+    if (queued.persistedId) await rm(this.state.path(`queued_turns/${queued.persistedId}.json`), { force: true }).catch(() => undefined);
+    else await this.removePersistedQueuedEvent(queued.event);
+    this.logger.warn({ component: "service", event: "queue_overflow_drop", chatId: queued.event.chatId, messageId: queued.event.messageId }, "Dropped queued message due to queue overflow");
+    if (!queued.event.chatId) return;
+    try {
+      await this.telegram.sendText(queued.event.chatId, QUEUE_OVERFLOW_MESSAGE, queued.event.messageId);
+    } catch (error) {
+      this.logger.error({ component: "service", event: "queue_overflow_notice_failed", chatId: queued.event.chatId, error }, "Failed to notify user about queue overflow");
+    }
+  }
+
+  private codexUnavailableMessage(error: unknown): string {
+    if (this.restartingCodex) return CODEX_RESTARTING_MESSAGE;
+    const text = error instanceof Error ? error.message : String(error);
+    if (/websocket|not connected|reconnecting|closed|timed out/i.test(text)) return CODEX_TEMPORARILY_UNAVAILABLE_MESSAGE;
+    return CODEX_UNAVAILABLE_MESSAGE;
+  }
+
+  private hasSeenIdempotency(key: string): boolean {
+    this.pruneSeenIdempotency();
+    return this.seenIdempotency.has(key);
+  }
+
+  private rememberIdempotency(key: string): void {
+    this.pruneSeenIdempotency();
+    this.seenIdempotency.set(key, Date.now());
+    while (this.seenIdempotency.size > MAX_SEEN_IDEMPOTENCY) {
+      const oldest = this.seenIdempotency.keys().next().value;
+      if (!oldest) break;
+      this.seenIdempotency.delete(oldest);
+    }
+  }
+
+  private pruneSeenIdempotency(): void {
+    const cutoff = Date.now() - IDEMPOTENCY_TTL_MS;
+    for (const [key, seenAt] of this.seenIdempotency) {
+      if (seenAt >= cutoff) break;
+      this.seenIdempotency.delete(key);
+    }
   }
 
   private async pollInjectFile(): Promise<void> {
@@ -606,8 +694,10 @@ export class ServiceSupervisor {
     // Clear watchdog state synchronously so concurrent enqueues do not
     // observe turnRunning=true and silently re-queue.
     this.turnRunning = false;
+    this.activeTurnToken++;
     this.turnStartedAt = undefined;
     this.activeTurnEvent = undefined;
+    await this.markActiveTurnAborted(event);
     if (event?.chatId) {
       try {
         await this.telegram.sendText(event.chatId, TURN_ABORTED_MESSAGE, event.messageId);
@@ -622,6 +712,28 @@ export class ServiceSupervisor {
       `Watchdog: aborted a turn that had been running for ${ageMs ?? "?"}ms (chat=${event?.chatId ?? "n/a"}, source=${event?.source ?? "n/a"}).`
     ).catch(() => undefined);
     this.drainQueue();
+  }
+
+  private async markActiveTurnAborted(event?: UserEvent): Promise<void> {
+    if (!event) return;
+    const turnsDir = resolveConfigPath(this.config, join(this.config.service.stateDir, "turns"));
+    const files = await readdir(turnsDir).catch(() => []);
+    for (const file of files) {
+      if (!file.endsWith(".json")) continue;
+      const path = join(turnsDir, file);
+      try {
+        const turn = JSON.parse(await readFile(path, "utf8")) as { status?: string; input?: UserEvent } & Record<string, unknown>;
+        if (turn.status !== "running" && turn.status !== "timeout") continue;
+        const input = turn.input;
+        if (!input || input.source !== event.source || input.chatId !== event.chatId || input.messageId !== event.messageId || input.receivedAt !== event.receivedAt) continue;
+        turn.status = "aborted";
+        turn.abortedAt = nowIso();
+        await writeFile(path, JSON.stringify(turn, null, 2));
+        return;
+      } catch {
+        // ignore individual file errors in watchdog cleanup
+      }
+    }
   }
 
   private formatEventForCodex(event: UserEvent): string {

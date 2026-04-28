@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { once } from "node:events";
 import WebSocket from "ws";
 import type { Logger } from "pino";
 import { AppConfig } from "./config.js";
@@ -96,14 +97,16 @@ export class AppServerCodexClient implements CodexClient {
     for (const item of this.config.codex.extraConfig) args.push("-c", item);
     this.logger.info({ component: "codex", event: "spawn_app_server", args }, "starting codex app-server");
     const { OPENAI_API_KEY: _omit, ...safeEnv } = process.env;
-    this.child = spawn(this.config.codex.binary, args, {
+    const child = spawn(this.config.codex.binary, args, {
       cwd: this.config.service.workspace,
       env: safeEnv,
       stdio: ["ignore", "pipe", "pipe"]
     });
-    this.child.stdout?.on("data", (chunk) => this.logger.debug({ component: "codex", stream: "stdout", data: chunk.toString() }));
-    this.child.stderr?.on("data", (chunk) => this.logger.info({ component: "codex", stream: "stderr", data: chunk.toString() }));
-    this.child.on("exit", (code, signal) => {
+    this.child = child;
+    child.stdout?.on("data", (chunk) => this.logger.debug({ component: "codex", stream: "stdout", data: chunk.toString() }));
+    child.stderr?.on("data", (chunk) => this.logger.info({ component: "codex", stream: "stderr", data: chunk.toString() }));
+    child.on("exit", (code, signal) => {
+      if (this.child !== child) return;
       this.connected = false;
       if (!this.stopping && this.startupComplete) {
         const wasKilled = signal === "SIGKILL";
@@ -123,14 +126,22 @@ export class AppServerCodexClient implements CodexClient {
       clientInfo: { name: "codex-chat", title: "codex-chat", version: "0.1.0" },
       capabilities: { experimentalApi: true }
     });
-    await this.ensureThread();
+    await this.ensureThread({ verifyExisting: true });
   }
 
   async stop(): Promise<void> {
     this.stopping = true;
     this.connected = false;
+    const error = new Error("Codex app-server stopped");
+    this.rejectAll(error);
+    this.failActiveQueues(error);
+    const child = this.child;
     this.ws?.close();
-    if (this.child && !this.child.killed) this.child.kill("SIGTERM");
+    if (child && child.exitCode === null && !child.killed) {
+      const exited = once(child, "exit").then(() => undefined);
+      child.kill("SIGTERM");
+      await Promise.race([exited, new Promise<void>((resolve) => setTimeout(resolve, 2_000))]);
+    }
   }
 
   async health(): Promise<CodexHealth> {
@@ -148,6 +159,7 @@ export class AppServerCodexClient implements CodexClient {
   }
 
   async *sendTurn(input: CodexTurnInput): AsyncIterable<CodexEvent> {
+    this.assertConnected();
     await this.ensureThread();
     if (!this.sessionId) throw new Error("No Codex app-server thread is available");
     const queue = new AsyncQueue<CodexEvent>();
@@ -214,8 +226,18 @@ export class AppServerCodexClient implements CodexClient {
     };
   }
 
-  private async ensureThread(options: { forceNew?: boolean } = {}): Promise<void> {
-    if (this.sessionId && !options.forceNew) return;
+  private async ensureThread(options: { forceNew?: boolean; verifyExisting?: boolean } = {}): Promise<void> {
+    this.assertConnected();
+    if (this.sessionId && !options.forceNew) {
+      if (!options.verifyExisting) return;
+      try {
+        await this.resumeThread(this.sessionId);
+        return;
+      } catch (error) {
+        this.logger.warn({ component: "codex", event: "resume_failed", error }, "in-memory Codex thread resume failed; starting a new thread");
+        this.sessionId = undefined;
+      }
+    }
     if (options.forceNew) this.sessionId = undefined;
     const existing = options.forceNew ? undefined : await this.state.getCodexSession(this.config.codex.mainSessionName);
     if (existing) {
@@ -307,8 +329,12 @@ export class AppServerCodexClient implements CodexClient {
   private async connect(url: string): Promise<void> {
     const ws = new WebSocket(url);
     this.ws = ws;
-    ws.on("message", (data) => this.handleMessage(data.toString()));
+    ws.on("message", (data) => {
+      if (this.ws !== ws) return;
+      this.handleMessage(data.toString());
+    });
     ws.on("close", () => {
+      if (this.ws !== ws) return;
       this.connected = false;
       const hadPending = this.pending.size > 0;
       const hadActiveQueues = this.activeQueues.size > 0;
@@ -332,6 +358,7 @@ export class AppServerCodexClient implements CodexClient {
       if (hadActiveQueues) this.failActiveQueues(new Error("codex app-server websocket closed"));
     });
     ws.on("error", (error) => {
+      if (this.ws !== ws) return;
       this.connected = false;
       this.logger.debug({ component: "codex", event: "ws_error", error });
     });
@@ -368,10 +395,11 @@ export class AppServerCodexClient implements CodexClient {
   }
 
   private request<T = unknown>(method: string, params: unknown): Promise<T> {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) throw new Error("Codex app-server websocket is not open");
+    this.assertConnected();
+    const ws = this.ws as WebSocket;
     const id = this.requestId++;
     const message = { id, method, params };
-    this.ws.send(JSON.stringify(message));
+    ws.send(JSON.stringify(message));
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
@@ -399,5 +427,11 @@ export class AppServerCodexClient implements CodexClient {
     if (this.activeQueues.size === 0) return;
     for (const queue of this.activeQueues) queue.fail(error);
     this.activeQueues.clear();
+  }
+
+  private assertConnected(): void {
+    if (!this.connected || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new Error("Codex app-server is not connected; reconnect is still in progress or failed");
+    }
   }
 }

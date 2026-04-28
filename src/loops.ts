@@ -144,8 +144,13 @@ export class LoopManager {
     if (!(await pathExists(spoolDir))) return;
     for (const file of await readdir(spoolDir)) {
       if (!file.endsWith(".json")) continue;
-      const body = JSON.parse(await readFile(join(spoolDir, file), "utf8")) as { loopId: string; scheduledAt?: string };
-      await this.handleRun(body.loopId, body.scheduledAt ?? nowIso());
+      const path = join(spoolDir, file);
+      try {
+        const body = JSON.parse(await readFile(path, "utf8")) as { loopId: string; scheduledAt?: string };
+        await this.handleRun(body.loopId, body.scheduledAt ?? nowIso());
+      } catch (error) {
+        this.logger.error({ component: "loops", event: "spool_run_failed", file, error }, "spooled loop run failed");
+      }
     }
   }
 

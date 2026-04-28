@@ -34,7 +34,10 @@ const configSchema = z.object({
     turnTimeoutSec: z.number().int().positive().default(3600),
     keepAliveSec: z.number().int().positive().default(60),
     extraConfig: z.array(z.string()).default(['model_reasoning_effort="medium"']),
-    addDirs: z.array(z.string()).default([])
+    addDirs: z.array(z.string()).default([]),
+    maxRestartAttempts: z.number().int().positive().default(8),
+    restartBackoffBaseMs: z.number().int().positive().default(2000),
+    restartBackoffMaxMs: z.number().int().positive().default(60000)
   }),
   telegram: z.object({
     mode: z.enum(["polling", "webhook"]).default("polling"),
@@ -64,7 +67,8 @@ const configSchema = z.object({
     maxTimeoutSec: z.number().int().positive().default(7200),
     maxPromptBytes: z.number().int().positive().default(262_144),
     artifactDir: z.string().default("data/subagents"),
-    allowedProfiles: z.array(z.string()).default([])
+    allowedProfiles: z.array(z.string()).default([]),
+    cleanupArtifacts: z.boolean().default(true)
   }),
   loops: z.object({
     enabled: z.boolean().default(true),
@@ -128,7 +132,10 @@ const defaultConfig = configSchema.parse({
     turnTimeoutSec: 3600,
     keepAliveSec: 60,
     extraConfig: ['model_reasoning_effort="medium"'],
-    addDirs: []
+    addDirs: [],
+    maxRestartAttempts: 8,
+    restartBackoffBaseMs: 2000,
+    restartBackoffMaxMs: 60000
   },
   telegram: {
     mode: "polling",
@@ -154,7 +161,8 @@ const defaultConfig = configSchema.parse({
     maxTimeoutSec: 7200,
     maxPromptBytes: 262_144,
     artifactDir: "data/subagents",
-    allowedProfiles: []
+    allowedProfiles: [],
+    cleanupArtifacts: true
   },
   loops: {
     enabled: true,

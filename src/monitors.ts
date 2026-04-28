@@ -74,6 +74,10 @@ interface RunningMonitor {
   ring: string[];
   lastTrigger: Map<string, number>;
   restartCount: number;
+  /** Pending restart timer so we can cancel it on stop()/restart(). */
+  restartTimer?: ReturnType<typeof setTimeout>;
+  /** True once stop() ran — suppresses any in-flight restart timeouts. */
+  stopped?: boolean;
 }
 
 export async function loadMonitorsConfig(config: AppConfig): Promise<MonitorsConfig> {
@@ -106,12 +110,19 @@ export class MonitorManager {
 
   async stop(): Promise<void> {
     for (const running of this.monitors.values()) {
-      if (running.child?.pid) {
+      running.stopped = true;
+      if (running.restartTimer) {
+        clearTimeout(running.restartTimer);
+        running.restartTimer = undefined;
+      }
+      if (running.child?.pid && running.child.pid > 0) {
         try {
           process.kill(-running.child.pid, "SIGTERM");
         } catch {
-          running.child.kill("SIGTERM");
+          try { running.child.kill("SIGTERM"); } catch { /* already dead */ }
         }
+      } else if (running.child) {
+        try { running.child.kill("SIGTERM"); } catch { /* already dead */ }
       }
     }
     this.monitors.clear();
@@ -258,6 +269,7 @@ export class MonitorManager {
   }
 
   private async maybeRestart(running: RunningMonitor, code: number | null): Promise<void> {
+    if (running.stopped) return;
     const policy = running.definition.restart.policy;
     const shouldRestart = policy === "always" || (policy === "on_failure" && code !== 0);
     if (!shouldRestart) return;
@@ -267,16 +279,28 @@ export class MonitorManager {
     }
     running.restartCount += 1;
     const backoff = Math.min(running.definition.restart.backoffSec * running.restartCount, running.definition.restart.maxBackoffSec, this.config.monitors.maxRestartBackoffSec);
-    setTimeout(() => void this.restartMonitor(running), backoff * 1000);
+    if (running.restartTimer) clearTimeout(running.restartTimer);
+    running.restartTimer = setTimeout(() => {
+      running.restartTimer = undefined;
+      if (running.stopped) return;
+      void this.restartMonitor(running);
+    }, backoff * 1000);
   }
 
   private async restartMonitor(running: RunningMonitor): Promise<void> {
-    if (running.child?.pid) {
+    if (running.stopped) return;
+    if (running.restartTimer) {
+      clearTimeout(running.restartTimer);
+      running.restartTimer = undefined;
+    }
+    if (running.child?.pid && running.child.pid > 0) {
       try {
         process.kill(-running.child.pid, "SIGTERM");
       } catch {
-        running.child.kill("SIGTERM");
+        try { running.child.kill("SIGTERM"); } catch { /* already dead */ }
       }
+    } else if (running.child) {
+      try { running.child.kill("SIGTERM"); } catch { /* already dead */ }
     }
     await this.startManagedProcess(running);
   }

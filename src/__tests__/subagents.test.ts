@@ -1,0 +1,141 @@
+import { EventEmitter } from "node:events";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import type { AppConfig } from "../config.js";
+
+const tempDirs: string[] = [];
+
+function fakeLogger() {
+  return { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+}
+
+function fakeChild() {
+  const child = new EventEmitter() as EventEmitter & {
+    stdout: EventEmitter;
+    stderr: EventEmitter;
+    stdin: { end: ReturnType<typeof vi.fn> };
+    pid: number;
+    exitCode: number | null;
+    killed: boolean;
+    kill: ReturnType<typeof vi.fn>;
+  };
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.stdin = { end: vi.fn() };
+  child.pid = Math.floor(Math.random() * 100000) + 1000;
+  child.exitCode = null;
+  child.killed = false;
+  child.kill = vi.fn(() => {
+    child.killed = true;
+    return true;
+  });
+  return child;
+}
+
+function makeConfig(rootDir: string, maxConcurrent = 2): AppConfig {
+  return {
+    rootDir,
+    configPath: join(rootDir, "config", "codex-chat.toml"),
+    service: { workspace: rootDir, stateDir: "state" },
+    codex: {
+      binary: "/bin/true",
+      sandbox: "danger-full-access",
+      approvalPolicy: "never",
+      profile: "",
+      model: "gpt-test",
+      extraConfig: []
+    },
+    subagents: {
+      enabled: true,
+      maxConcurrent,
+      defaultModel: "",
+      defaultEffort: "medium",
+      defaultTimeoutSec: 60,
+      maxTimeoutSec: 60,
+      maxPromptBytes: 1_000_000,
+      artifactDir: "data/subagents",
+      allowedProfiles: [],
+      cleanupArtifacts: false
+    }
+  } as AppConfig;
+}
+
+afterEach(async () => {
+  vi.restoreAllMocks();
+  vi.resetModules();
+  vi.doUnmock("node:child_process");
+  await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+});
+
+describe("subagents", () => {
+  test("does not exceed maxConcurrent under bursty parallel dispatch", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
+    tempDirs.push(root);
+    const children: ReturnType<typeof fakeChild>[] = [];
+    const spawn = vi.fn(() => {
+      const child = fakeChild();
+      children.push(child);
+      return child;
+    });
+    vi.doMock("node:child_process", async () => {
+      const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+      return { ...actual, spawn };
+    });
+    const { SubagentManager } = await import("../subagents.js");
+    const config = makeConfig(root, 2);
+    const behavior = { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") };
+    const state = { saveJob: vi.fn().mockResolvedValue(undefined) };
+    const manager = new SubagentManager(
+      config,
+      behavior as never,
+      state as never,
+      fakeLogger() as never,
+      { onReturnToMain: vi.fn(), onSendToUser: vi.fn() }
+    );
+
+    // Fire 5 dispatches in parallel — only 2 should be running concurrently.
+    await Promise.all([
+      manager.dispatch({ profile: "x", prompt: "a", route: "return_to_main" }),
+      manager.dispatch({ profile: "x", prompt: "b", route: "return_to_main" }),
+      manager.dispatch({ profile: "x", prompt: "c", route: "return_to_main" }),
+      manager.dispatch({ profile: "x", prompt: "d", route: "return_to_main" }),
+      manager.dispatch({ profile: "x", prompt: "e", route: "return_to_main" })
+    ]);
+
+    // Wait for any pending microtasks/drains.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(spawn.mock.calls.length).toBeLessThanOrEqual(2);
+  });
+
+  test("rejects new dispatch when queue depth is exhausted", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
+    tempDirs.push(root);
+    const spawn = vi.fn(() => fakeChild());
+    vi.doMock("node:child_process", async () => {
+      const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+      return { ...actual, spawn };
+    });
+    const { SubagentManager } = await import("../subagents.js");
+    const config = makeConfig(root, 1);
+    const behavior = { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") };
+    const state = { saveJob: vi.fn().mockResolvedValue(undefined) };
+    const manager = new SubagentManager(
+      config,
+      behavior as never,
+      state as never,
+      fakeLogger() as never,
+      { onReturnToMain: vi.fn(), onSendToUser: vi.fn() }
+    );
+
+    // Stuff the internal queue past MAX_QUEUE_DEPTH (200) directly so we
+    // don't have to await 200 dispatch starts that all spawn.
+    const internalQueue = (manager as unknown as { queue: unknown[] }).queue;
+    for (let i = 0; i < 200; i++) internalQueue.push({ id: `x_${i}`, profile: "x", prompt: "p", route: "return_to_main" });
+
+    await expect(manager.dispatch({ profile: "x", prompt: "overflow", route: "return_to_main" }))
+      .rejects.toThrow(/Subagent dispatch queue is full/);
+  });
+});

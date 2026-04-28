@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { appendFile, readFile, writeFile } from "node:fs/promises";
+import { appendFile, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Logger } from "pino";
 import { AppConfig, resolveConfigPath } from "./config.js";
@@ -8,6 +8,9 @@ import { DirectiveAction } from "./directives.js";
 import { StateStore } from "./state.js";
 import { Route, SubagentJob } from "./types.js";
 import { ensureDir, makeId, nowIso, pathExists } from "./util.js";
+
+const SIGKILL_GRACE_MS = 5_000;
+const MAX_QUEUE_DEPTH = 200;
 
 interface DispatchInput {
   id?: string;
@@ -37,6 +40,13 @@ export class SubagentManager {
   private queue: DispatchInput[] = [];
   private running = new Map<string, RunningJob>();
   private jobs = new Map<string, SubagentJob>();
+  /**
+   * Serializes drain() so two concurrent dispatch() calls cannot both
+   * observe `running.size < maxConcurrent` and start jobs in parallel,
+   * blowing past the configured concurrency cap. Without this guard the
+   * subagent pool can balloon under bursty load.
+   */
+  private draining = false;
 
   constructor(
     private readonly config: AppConfig,
@@ -68,6 +78,12 @@ export class SubagentManager {
     if (Buffer.byteLength(input.prompt, "utf8") > this.config.subagents.maxPromptBytes) {
       throw new Error("Subagent prompt exceeds maxPromptBytes");
     }
+    // Bound the dispatch queue. Without this, an upstream loop firing on a
+    // fast cron with a slow subagent profile could grow this list without
+    // limit until we run out of memory.
+    if (this.queue.length >= MAX_QUEUE_DEPTH) {
+      throw new Error(`Subagent dispatch queue is full (depth=${this.queue.length}); refusing new job for profile=${input.profile}`);
+    }
     input.id = makeId("job");
     const artifactDir = resolveConfigPath(this.config, join(this.config.subagents.artifactDir, input.id));
     const queuedJob: SubagentJob = {
@@ -98,11 +114,27 @@ export class SubagentManager {
     running.job.completedAt = nowIso();
     await this.state.saveJob(running.job);
     clearTimeout(running.timeout);
+    const child = running.child;
+    const pid = child.pid;
     try {
-      if (running.child.pid) process.kill(-running.child.pid, "SIGTERM");
+      if (pid && pid > 0) process.kill(-pid, "SIGTERM");
+      else child.kill("SIGTERM");
     } catch {
-      running.child.kill("SIGTERM");
+      try { child.kill("SIGTERM"); } catch { /* already dead */ }
     }
+    // Escalate to SIGKILL if the process ignores SIGTERM. Without this a
+    // misbehaving subagent can cling to its slot indefinitely, starving the
+    // dispatch queue.
+    setTimeout(() => {
+      if (child.exitCode !== null || child.killed) return;
+      this.logger.warn({ component: "subagents", event: "sigkill_after_grace", jobId, pid }, "subagent ignored SIGTERM; sending SIGKILL");
+      try {
+        if (pid && pid > 0) process.kill(-pid, "SIGKILL");
+        else child.kill("SIGKILL");
+      } catch {
+        try { child.kill("SIGKILL"); } catch { /* already dead */ }
+      }
+    }, SIGKILL_GRACE_MS).unref?.();
     this.running.delete(jobId);
     return true;
   }
@@ -112,21 +144,27 @@ export class SubagentManager {
   }
 
   private async drain(): Promise<void> {
-    while (this.running.size < this.config.subagents.maxConcurrent && this.queue.length > 0) {
-      const input = this.queue.shift() as DispatchInput;
-      try {
-        await this.startJob(input);
-      } catch (error) {
-        const id = input.id ?? makeId("job");
-        const failed = this.jobs.get(id);
-        if (failed) {
-          failed.status = "failed";
-          failed.error = error instanceof Error ? error.message : String(error);
-          failed.completedAt = nowIso();
-          await this.state.saveJob(failed);
+    if (this.draining) return;
+    this.draining = true;
+    try {
+      while (this.running.size < this.config.subagents.maxConcurrent && this.queue.length > 0) {
+        const input = this.queue.shift() as DispatchInput;
+        try {
+          await this.startJob(input);
+        } catch (error) {
+          const id = input.id ?? makeId("job");
+          const failed = this.jobs.get(id);
+          if (failed) {
+            failed.status = "failed";
+            failed.error = error instanceof Error ? error.message : String(error);
+            failed.completedAt = nowIso();
+            await this.state.saveJob(failed);
+          }
+          this.logger.error({ component: "subagents", event: "start_failed", jobId: id, error }, "subagent start failed");
         }
-        this.logger.error({ component: "subagents", event: "start_failed", jobId: id, error }, "subagent start failed");
       }
+    } finally {
+      this.draining = false;
     }
   }
 
@@ -205,8 +243,19 @@ export class SubagentManager {
     if (job.lastMessagePath && await pathExists(job.lastMessagePath)) result = await readFile(job.lastMessagePath, "utf8");
     if (!result && job.status === "failed") result = `Subagent ${job.id} failed with exit code ${code ?? "null"} signal ${signal ?? "null"}.`;
     await this.state.saveJob(job);
-    if (job.status === "completed" && job.route === "return_to_main") await this.callbacks.onReturnToMain(job, result);
-    if (job.status === "completed" && job.route === "send_to_user") await this.callbacks.onSendToUser(job, result);
+    try {
+      if (job.status === "completed" && job.route === "return_to_main") await this.callbacks.onReturnToMain(job, result);
+      if (job.status === "completed" && job.route === "send_to_user") await this.callbacks.onSendToUser(job, result);
+    } catch (error) {
+      this.logger.error({ component: "subagents", event: "callback_failed", jobId, route: job.route, error }, "subagent result delivery failed");
+    }
+    // Clean up artifact directory for completed/cancelled jobs that
+    // delivered successfully. We keep failed-job artifacts for postmortem.
+    if (this.config.subagents.cleanupArtifacts && (job.status === "completed" || job.status === "cancelled")) {
+      void rm(job.artifactDir ?? "", { recursive: true, force: true }).catch((error) => {
+        this.logger.warn({ component: "subagents", event: "artifact_cleanup_failed", jobId, error }, "subagent artifact cleanup failed");
+      });
+    }
     void this.drain();
   }
 

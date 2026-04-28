@@ -231,6 +231,58 @@ describe("service supervisor", () => {
     expect(calls).toEqual([1, 2, 3]);
   });
 
+  test("restartCodex retries with backoff and notifies ops on exhaustion without draining queue", async () => {
+    const config = await loadTestConfig();
+    // Tighten retry knobs so the test runs fast.
+    (config.codex as unknown as { maxRestartAttempts: number; restartBackoffBaseMs: number; restartBackoffMaxMs: number }).maxRestartAttempts = 3;
+    (config.codex as unknown as { maxRestartAttempts: number; restartBackoffBaseMs: number; restartBackoffMaxMs: number }).restartBackoffBaseMs = 1;
+    (config.codex as unknown as { maxRestartAttempts: number; restartBackoffBaseMs: number; restartBackoffMaxMs: number }).restartBackoffMaxMs = 5;
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+
+    vi.spyOn(service.codex, "stop").mockResolvedValue(undefined);
+    vi.spyOn(service.codex, "start").mockRejectedValue(new Error("port busy"));
+    const notifyOps = vi.spyOn(service.telegram, "notifyOps").mockResolvedValue(undefined);
+    const drainSpy = vi.spyOn(service as unknown as { drainQueue(): void }, "drainQueue");
+
+    await (service as unknown as { restartCodex(reason: string): Promise<void> }).restartCodex("test crash");
+
+    // Should not drain when restart never recovered.
+    expect(drainSpy).not.toHaveBeenCalled();
+    // Should have notified ops at least once with the final exhaustion message.
+    const messages = notifyOps.mock.calls.map((call) => call[0] as string);
+    expect(messages.some((message) => message.includes("failed to restart after"))).toBe(true);
+    expect(messages.some((message) => message.includes("Service is DOWN"))).toBe(true);
+  });
+
+  test("restartCodex notifies and drains queue on successful recovery", async () => {
+    const config = await loadTestConfig();
+    (config.codex as unknown as { maxRestartAttempts: number; restartBackoffBaseMs: number; restartBackoffMaxMs: number }).maxRestartAttempts = 3;
+    (config.codex as unknown as { maxRestartAttempts: number; restartBackoffBaseMs: number; restartBackoffMaxMs: number }).restartBackoffBaseMs = 1;
+    (config.codex as unknown as { maxRestartAttempts: number; restartBackoffBaseMs: number; restartBackoffMaxMs: number }).restartBackoffMaxMs = 5;
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+
+    vi.spyOn(service.codex, "stop").mockResolvedValue(undefined);
+    let attempts = 0;
+    vi.spyOn(service.codex, "start").mockImplementation(async () => {
+      attempts += 1;
+      if (attempts < 2) throw new Error("transient");
+    });
+    vi.spyOn(service.codex, "health").mockResolvedValue({ ok: true, transport: "app-server", sessionId: "thread-x" });
+    const notifyOps = vi.spyOn(service.telegram, "notifyOps").mockResolvedValue(undefined);
+    const drainSpy = vi.spyOn(service as unknown as { drainQueue(): void }, "drainQueue");
+
+    await (service as unknown as { restartCodex(reason: string): Promise<void> }).restartCodex("test crash");
+
+    expect(attempts).toBe(2);
+    expect(drainSpy).toHaveBeenCalled();
+    const messages = notifyOps.mock.calls.map((call) => call[0] as string);
+    expect(messages.some((message) => message.includes("Codex restarted cleanly"))).toBe(true);
+  });
+
   test("marks turn files as error when processing fails after writing running state", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");

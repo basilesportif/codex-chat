@@ -355,9 +355,49 @@ export class ServiceSupervisor {
       ? `⚠️ Codex was SIGKILL'd (likely OOM kill) — signal=${info?.signal ?? "SIGKILL"} code=${info?.code ?? "null"}`
       : `Codex process crash detected: ${reason}`;
     await this.telegram.notifyOps(`${crashHeader}\n${reason}\nRestarting...`).catch(() => undefined);
+    let recovered = false;
     try {
-      await this.codex.stop().catch(() => undefined);
-      await this.codex.start();
+      // Retry codex.start() with exponential backoff. Without this, a single
+      // failed start (e.g. transient port bind error) leaves the service
+      // permanently degraded — every subsequent turn fails with "not
+      // connected" and the user gets no clear signal that the underlying
+      // engine never recovered.
+      const attempts = this.config.codex.maxRestartAttempts;
+      const baseDelayMs = this.config.codex.restartBackoffBaseMs;
+      const maxDelayMs = this.config.codex.restartBackoffMaxMs;
+      let lastError: unknown;
+      for (let attempt = 1; attempt <= attempts; attempt++) {
+        if (this.stopping) return;
+        try {
+          await this.codex.stop().catch(() => undefined);
+          await this.codex.start();
+          recovered = true;
+          break;
+        } catch (error) {
+          lastError = error;
+          this.logger.error(
+            { component: "codex", event: "restart_attempt_failed", attempt, attempts, error },
+            `Codex restart attempt ${attempt}/${attempts} failed`
+          );
+          // Re-alert on every 3rd failed attempt so Tim sees the loop, not
+          // just the first failure.
+          if (attempt === 1 || attempt === attempts || attempt % 3 === 0) {
+            await this.telegram.notifyOps(
+              `⚠️ Codex restart attempt ${attempt}/${attempts} failed: ${error instanceof Error ? error.message : String(error)}`
+            ).catch(() => undefined);
+          }
+          if (attempt === attempts) break;
+          const delay = Math.min(maxDelayMs, baseDelayMs * 2 ** (attempt - 1));
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+      }
+      if (!recovered) {
+        await this.telegram.notifyOps(
+          `🚨 codex-chat: Codex failed to restart after ${attempts} attempts. Service is DOWN. Last error: ${lastError instanceof Error ? lastError.message : String(lastError)}\nManual intervention required (check 'codex login', port ${this.config.codex.appServerPort}, systemctl --user status codex-chat).`
+        ).catch(() => undefined);
+        this.logger.error({ component: "codex", event: "restart_exhausted", attempts, lastError }, "Codex restart exhausted; service is down");
+        return;
+      }
       const health = await this.codex.health();
       // After a crash the in-memory thread on the app-server is gone, so the
       // restarted codex has either resumed our stored thread or started a
@@ -365,7 +405,7 @@ export class ServiceSupervisor {
       // that explicit on the ops channel and tell the affected user directly.
       await this.telegram.notifyOps(
         `Codex restarted cleanly.\ntransport: ${health.transport}\nsession: ${health.sessionId ?? "unknown"}\n${CONTEXT_RESET_OPS_NOTE}`
-      );
+      ).catch(() => undefined);
       if (activeTurn?.activeChatId) {
         try {
           await this.telegram.sendText(
@@ -385,7 +425,10 @@ export class ServiceSupervisor {
       this.logger.error({ component: "codex", event: "restart_failed", error }, "Codex restart failed");
     } finally {
       this.restartingCodex = false;
-      this.drainQueue();
+      // Only drain if we recovered. If codex is still dead, draining the
+      // queue would burn through every queued message with "Codex is not
+      // available" replies, making the outage worse.
+      if (recovered) this.drainQueue();
     }
   }
 

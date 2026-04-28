@@ -2,23 +2,12 @@ import { createReadStream } from "node:fs";
 import OpenAI from "openai";
 import { AppConfig } from "./config.js";
 
-export interface TranscriptionInput {
-  path: string;
-  mimeType?: string;
-  language?: string;
-  prompt?: string;
-}
-
 export interface TranscriptionResult {
   text: string;
-  durationSec?: number;
-  provider: string;
-  model: string;
-  raw?: unknown;
 }
 
 export interface Transcriber {
-  transcribe(input: TranscriptionInput): Promise<TranscriptionResult>;
+  transcribe(input: { path: string }): Promise<TranscriptionResult>;
 }
 
 export class OpenAITranscriber implements Transcriber {
@@ -29,19 +18,13 @@ export class OpenAITranscriber implements Transcriber {
     this.client = new OpenAI({ apiKey: config.openaiApiKey });
   }
 
-  async transcribe(input: TranscriptionInput): Promise<TranscriptionResult> {
+  async transcribe(input: { path: string }): Promise<TranscriptionResult> {
     const response = await this.client.audio.transcriptions.create({
       file: createReadStream(input.path) as never,
       model: this.config.transcription.model,
-      language: input.language || this.config.transcription.language || undefined,
-      prompt: input.prompt
+      language: this.config.transcription.language || undefined
     } as never) as { text?: string };
-    return {
-      text: response.text ?? "",
-      provider: "openai",
-      model: this.config.transcription.model,
-      raw: response
-    };
+    return { text: response.text ?? "" };
   }
 }
 

@@ -195,7 +195,7 @@ export class TelegramGateway {
       const attachment = await this.downloadTelegramFile("voice", message.voice);
       attachments.push(attachment);
       if (this.config.transcription.enabled) {
-        const transcript = await this.transcriber.transcribe({ path: attachment.localPath, mimeType: attachment.mimeType });
+        const transcript = await this.transcriber.transcribe({ path: attachment.localPath });
         text = [
           text,
           "Voice transcript:",
@@ -211,7 +211,7 @@ export class TelegramGateway {
       const attachment = await this.downloadTelegramFile("audio", message.audio);
       attachments.push(attachment);
       if (this.config.transcription.enabled) {
-        const transcript = await this.transcriber.transcribe({ path: attachment.localPath, mimeType: attachment.mimeType });
+        const transcript = await this.transcriber.transcribe({ path: attachment.localPath });
         text = ["Audio transcript:", transcript.text, "", `Audio path: ${attachment.localPath}`].join("\n");
       }
     }

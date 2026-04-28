@@ -3,7 +3,7 @@ import { readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { AppConfig, ensureConfiguredDirectories, resolveConfigPath } from "./config.js";
 import { BehaviorPack } from "./behavior.js";
-import { AppServerCodexClient } from "./codex.js";
+import { AppServerCodexClient, CodexCrashInfo } from "./codex.js";
 import { DirectiveAction, parseDirectives } from "./directives.js";
 import { FileStore } from "./file-store.js";
 import { CodexHeartbeat } from "./heartbeat.js";
@@ -22,6 +22,22 @@ const CODEX_UNAVAILABLE_MESSAGE = "⚠️ Codex is not available. Run 'codex log
 const DISABLED_EXEC_RESUME_MESSAGE = "exec-resume transport is disabled. Only app-server (OAuth) is supported. Run 'codex login' to authenticate.";
 const RESTARTED_RESEND_MESSAGE = "⚠️ Service was restarted. Please resend your message.";
 const TURN_RESPONSE_WARN_MS = 45_000;
+/**
+ * Hard cap on how long a single turn may keep `turnRunning = true`. If we
+ * detect a turn pinning the supervisor for longer than this we force-abort
+ * it (clearing turnRunning, draining the queue, telling the user) so the
+ * service does not become permanently wedged when something below us stops
+ * responding without rejecting. This is a watchdog of last resort — the
+ * primary fix lives in codex.ts where dead WebSockets now fail in-flight
+ * sendTurn iterators rather than letting them hang.
+ */
+const TURN_ABORT_MS = 5 * 60_000;
+const TURN_ABORTED_MESSAGE =
+  "⚠️ Your previous request timed out after 5 minutes. Please resend your message.";
+const CONTEXT_RESET_USER_MESSAGE =
+  "⚠️ Codex crashed mid-turn and was restarted. The conversation context was reset — please resend your last message and re-establish any context you need.";
+const CONTEXT_RESET_OPS_NOTE =
+  "Note: conversation context was reset due to the crash. Active users have been notified.";
 
 type QueuedEvent = {
   event: UserEvent;
@@ -45,6 +61,10 @@ export class ServiceSupervisor {
   private readonly subagents: SubagentManager;
   private messageQueue = new Map<string, QueuedEvent[]>();
   private turnRunning = false;
+  /** Wall-clock time the currently-running turn started; cleared in runTurn's finally. */
+  private turnStartedAt?: Date;
+  /** The event currently being processed; used for chat-level crash/timeout notifications. */
+  private activeTurnEvent?: UserEvent;
   private watchdogInterval?: ReturnType<typeof setInterval>;
   private injectInterval?: ReturnType<typeof setInterval>;
   private injectPolling = false;
@@ -63,8 +83,14 @@ export class ServiceSupervisor {
     if (config.codex.transport !== "app-server") {
       throw new Error(DISABLED_EXEC_RESUME_MESSAGE);
     }
-    this.codex = new AppServerCodexClient(config, this.state, this.behavior, logger, (reason) => {
-      void this.restartCodex(reason).catch((error) => {
+    this.codex = new AppServerCodexClient(config, this.state, this.behavior, logger, (reason, info) => {
+      // Capture the active chat synchronously: by the time restartCodex's
+      // first await resumes, processEventSafe's .finally may have already
+      // cleared activeTurnEvent in response to the now-failed sendTurn
+      // iterator throwing.
+      const activeChatId = this.activeTurnEvent?.chatId;
+      const activeMessageId = this.activeTurnEvent?.messageId;
+      void this.restartCodex(reason, info, { activeChatId, activeMessageId }).catch((error) => {
         this.logger.error({ component: "service", event: "restart_failed", error }, "Codex restart failed");
       });
     });
@@ -302,15 +328,43 @@ export class ServiceSupervisor {
     }
   }
 
-  private async restartCodex(reason: string): Promise<void> {
+  private async restartCodex(
+    reason: string,
+    info?: CodexCrashInfo,
+    activeTurn?: { activeChatId?: number; activeMessageId?: number }
+  ): Promise<void> {
     if (this.restartingCodex || this.stopping) return;
     this.restartingCodex = true;
-    await this.telegram.notifyOps(`Codex process crash detected: ${reason}\nRestarting...`).catch(() => undefined);
+    const wasKilled = info?.wasKilled ?? false;
+    const crashHeader = wasKilled
+      ? `⚠️ Codex was SIGKILL'd (likely OOM kill) — signal=${info?.signal ?? "SIGKILL"} code=${info?.code ?? "null"}`
+      : `Codex process crash detected: ${reason}`;
+    await this.telegram.notifyOps(`${crashHeader}\n${reason}\nRestarting...`).catch(() => undefined);
     try {
       await this.codex.stop().catch(() => undefined);
       await this.codex.start();
       const health = await this.codex.health();
-      await this.telegram.notifyOps(`Codex restarted cleanly.\ntransport: ${health.transport}\nsession: ${health.sessionId ?? "unknown"}`);
+      // After a crash the in-memory thread on the app-server is gone, so the
+      // restarted codex has either resumed our stored thread or started a
+      // fresh one — either way, the user's mid-turn context is lost. Make
+      // that explicit on the ops channel and tell the affected user directly.
+      await this.telegram.notifyOps(
+        `Codex restarted cleanly.\ntransport: ${health.transport}\nsession: ${health.sessionId ?? "unknown"}\n${CONTEXT_RESET_OPS_NOTE}`
+      );
+      if (activeTurn?.activeChatId) {
+        try {
+          await this.telegram.sendText(
+            activeTurn.activeChatId,
+            CONTEXT_RESET_USER_MESSAGE,
+            activeTurn.activeMessageId
+          );
+        } catch (sendError) {
+          this.logger.error(
+            { component: "service", event: "context_reset_notice_failed", chatId: activeTurn.activeChatId, sendError },
+            "Failed to notify user about Codex context reset"
+          );
+        }
+      }
     } catch (error) {
       await this.telegram.notifyOps(`Codex restart failed: ${error instanceof Error ? error.message : String(error)}`).catch(() => undefined);
       this.logger.error({ component: "codex", event: "restart_failed", error }, "Codex restart failed");
@@ -321,8 +375,12 @@ export class ServiceSupervisor {
 
   private runTurn(event: UserEvent): void {
     this.turnRunning = true;
+    this.turnStartedAt = new Date();
+    this.activeTurnEvent = event;
     void this.processEventSafe(event).finally(() => {
       this.turnRunning = false;
+      this.turnStartedAt = undefined;
+      this.activeTurnEvent = undefined;
       this.drainQueue();
     });
   }
@@ -494,6 +552,17 @@ export class ServiceSupervisor {
 
   private async checkTurnTimeout(): Promise<void> {
     if (!this.turnRunning) return;
+
+    // Hard abort: if a turn has been running longer than TURN_ABORT_MS,
+    // something below us (sendTurn iterator, codex process, websocket) has
+    // failed to terminate even though we expect it to. Forcibly clear the
+    // turnRunning flag, notify the user, and drain the queue so the service
+    // does not stay wedged for the rest of its uptime.
+    if (this.turnStartedAt && Date.now() - this.turnStartedAt.getTime() > TURN_ABORT_MS) {
+      await this.forceAbortStuckTurn();
+      return;
+    }
+
     const turnsDir = resolveConfigPath(this.config, join(this.config.service.stateDir, "turns"));
     try {
       const files = await readdir(turnsDir).catch(() => []);
@@ -524,6 +593,35 @@ export class ServiceSupervisor {
     } catch {
       // ignore watchdog errors entirely
     }
+  }
+
+  private async forceAbortStuckTurn(): Promise<void> {
+    const event = this.activeTurnEvent;
+    const startedAt = this.turnStartedAt?.toISOString();
+    const ageMs = this.turnStartedAt ? Date.now() - this.turnStartedAt.getTime() : undefined;
+    this.logger.error(
+      { component: "service", event: "turn_force_abort", chatId: event?.chatId, startedAt, ageMs },
+      `Force-aborting stuck turn after ${TURN_ABORT_MS}ms — something below sendTurn never resolved`
+    );
+    // Clear watchdog state synchronously so concurrent enqueues do not
+    // observe turnRunning=true and silently re-queue.
+    this.turnRunning = false;
+    this.turnStartedAt = undefined;
+    this.activeTurnEvent = undefined;
+    if (event?.chatId) {
+      try {
+        await this.telegram.sendText(event.chatId, TURN_ABORTED_MESSAGE, event.messageId);
+      } catch (sendError) {
+        this.logger.error(
+          { component: "service", event: "turn_abort_notice_failed", chatId: event.chatId, sendError },
+          "Failed to notify user about forced turn abort"
+        );
+      }
+    }
+    await this.telegram.notifyOps(
+      `Watchdog: aborted a turn that had been running for ${ageMs ?? "?"}ms (chat=${event?.chatId ?? "n/a"}, source=${event?.source ?? "n/a"}).`
+    ).catch(() => undefined);
+    this.drainQueue();
   }
 
   private formatEventForCodex(event: UserEvent): string {

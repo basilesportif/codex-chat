@@ -8,20 +8,38 @@ import { CodexClient, CodexEvent, CodexHealth, CodexTurnInput } from "./types.js
 
 type JsonRpcMessage = Record<string, unknown> & { id?: string | number; method?: string; params?: unknown; result?: unknown; error?: unknown };
 
+type QueueResult<T> = { kind: "value"; value: T } | { kind: "done" } | { kind: "error"; error: Error };
+
 class AsyncQueue<T> {
   private values: T[] = [];
-  private waiters: Array<(value: IteratorResult<T>) => void> = [];
+  private waiters: Array<(value: QueueResult<T>) => void> = [];
   private closed = false;
+  private failure?: Error;
 
   push(value: T): void {
+    if (this.closed) return;
     const waiter = this.waiters.shift();
-    if (waiter) waiter({ value, done: false });
+    if (waiter) waiter({ kind: "value", value });
     else this.values.push(value);
   }
 
   close(): void {
+    if (this.closed) return;
     this.closed = true;
-    for (const waiter of this.waiters.splice(0)) waiter({ value: undefined as T, done: true });
+    for (const waiter of this.waiters.splice(0)) waiter({ kind: "done" });
+  }
+
+  /**
+   * Terminate the queue with an error. Any pending waiters and any future
+   * iteration calls will throw. Buffered values are dropped — when the
+   * underlying transport has died we have no useful partial event to emit.
+   */
+  fail(error: Error): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.failure = error;
+    this.values = [];
+    for (const waiter of this.waiters.splice(0)) waiter({ kind: "error", error });
   }
 
   async *iterate(): AsyncIterable<T> {
@@ -30,13 +48,25 @@ class AsyncQueue<T> {
         yield this.values.shift() as T;
         continue;
       }
+      if (this.failure) throw this.failure;
       if (this.closed) return;
-      const result = await new Promise<IteratorResult<T>>((resolve) => this.waiters.push(resolve));
-      if (result.done) return;
+      const result = await new Promise<QueueResult<T>>((resolve) => this.waiters.push(resolve));
+      if (result.kind === "error") throw result.error;
+      if (result.kind === "done") return;
       yield result.value;
     }
   }
 }
+
+export interface CodexCrashInfo {
+  signal: NodeJS.Signals | null;
+  code: number | null;
+  /** True if the process was SIGKILL'd (typically the OOM killer). */
+  wasKilled: boolean;
+  source: "process_exit" | "websocket_close";
+}
+
+export type CodexCrashHandler = (reason: string, info: CodexCrashInfo) => void;
 
 export class AppServerCodexClient implements CodexClient {
   private child?: ChildProcess;
@@ -44,6 +74,7 @@ export class AppServerCodexClient implements CodexClient {
   private requestId = 1;
   private pending = new Map<string | number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
   private notificationHandlers = new Set<(message: JsonRpcMessage) => void>();
+  private activeQueues = new Set<AsyncQueue<CodexEvent>>();
   private stopping = false;
   private sessionId?: string;
   private connected = false;
@@ -54,7 +85,7 @@ export class AppServerCodexClient implements CodexClient {
     private readonly state: StateStore,
     private readonly behavior: BehaviorPack,
     private readonly logger: Logger,
-    private readonly onCrash?: (reason: string) => void
+    private readonly onCrash?: CodexCrashHandler
   ) {}
 
   async start(): Promise<void> {
@@ -75,10 +106,15 @@ export class AppServerCodexClient implements CodexClient {
     this.child.on("exit", (code, signal) => {
       this.connected = false;
       if (!this.stopping && this.startupComplete) {
-        const reason = `codex app-server exited code=${code ?? "null"} signal=${signal ?? "null"}`;
-        this.logger.warn({ component: "codex", event: "app_server_exit", code, signal }, reason);
-        if (this.pending.size > 0) this.rejectAll(new Error(reason));
-        this.onCrash?.(reason);
+        const wasKilled = signal === "SIGKILL";
+        const reason = wasKilled
+          ? `codex app-server was SIGKILL'd (likely OOM kill) code=${code ?? "null"}`
+          : `codex app-server exited code=${code ?? "null"} signal=${signal ?? "null"}`;
+        this.logger.warn({ component: "codex", event: "app_server_exit", code, signal, wasKilled }, reason);
+        const error = new Error(reason);
+        if (this.pending.size > 0) this.rejectAll(error);
+        this.failActiveQueues(error);
+        this.onCrash?.(reason, { signal: signal ?? null, code: code ?? null, wasKilled, source: "process_exit" });
       }
     });
     await this.connectWithRetry(listenUrl);
@@ -141,6 +177,7 @@ export class AppServerCodexClient implements CodexClient {
       }
     };
     this.notificationHandlers.add(handler);
+    this.activeQueues.add(queue);
     try {
       const response = await this.startTurnRequest(userInput);
       const turn = response.turn as Record<string, unknown> | undefined;
@@ -149,6 +186,7 @@ export class AppServerCodexClient implements CodexClient {
       for await (const event of queue.iterate()) yield event;
     } finally {
       this.notificationHandlers.delete(handler);
+      this.activeQueues.delete(queue);
       queue.close();
     }
   }
@@ -273,11 +311,17 @@ export class AppServerCodexClient implements CodexClient {
     ws.on("close", () => {
       this.connected = false;
       const hadPending = this.pending.size > 0;
+      const hadActiveQueues = this.activeQueues.size > 0;
       if (!this.stopping && this.startupComplete) {
         const reason = "codex app-server websocket closed";
-        this.logger.warn({ component: "codex", event: "ws_closed" }, reason);
-        if (hadPending) this.rejectAll(new Error(reason));
-        this.onCrash?.(reason);
+        this.logger.warn({ component: "codex", event: "ws_closed", hadPending, activeQueues: this.activeQueues.size }, reason);
+        const error = new Error(reason);
+        if (hadPending) this.rejectAll(error);
+        // Always close any in-flight sendTurn iterators — without this they
+        // would hang forever waiting on AsyncQueue waiters that nobody will
+        // satisfy, leaving turnRunning permanently true in the supervisor.
+        if (hadActiveQueues) this.failActiveQueues(error);
+        this.onCrash?.(reason, { signal: null, code: null, wasKilled: false, source: "websocket_close" });
         return;
       }
       if (hadPending) {
@@ -285,6 +329,7 @@ export class AppServerCodexClient implements CodexClient {
         this.logger.debug({ component: "codex", event: "ws_closed_startup", pending: this.pending.size }, reason);
         this.rejectAll(new Error(reason));
       }
+      if (hadActiveQueues) this.failActiveQueues(new Error("codex app-server websocket closed"));
     });
     ws.on("error", (error) => {
       this.connected = false;
@@ -348,5 +393,11 @@ export class AppServerCodexClient implements CodexClient {
   private rejectAll(error: Error): void {
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
+  }
+
+  private failActiveQueues(error: Error): void {
+    if (this.activeQueues.size === 0) return;
+    for (const queue of this.activeQueues) queue.fail(error);
+    this.activeQueues.clear();
   }
 }

@@ -215,6 +215,14 @@ export class AppServerCodexClient implements CodexClient {
     }
   }
 
+  private threadConfig(): Record<string, unknown> {
+    const cfg: Record<string, unknown> = { model_reasoning_effort: this.config.codex.effort };
+    if (this.config.codex.addDirs.length > 0) {
+      cfg.sandbox_workspace_write = { writable_roots: this.config.codex.addDirs };
+    }
+    return cfg;
+  }
+
   private turnStartParams(userInput: unknown[]): Record<string, unknown> {
     return {
       threadId: this.sessionId,
@@ -255,7 +263,7 @@ export class AppServerCodexClient implements CodexClient {
       cwd: this.config.service.workspace,
       approvalPolicy: this.config.codex.approvalPolicy,
       sandbox: this.config.codex.sandbox,
-      config: { model_reasoning_effort: this.config.codex.effort },
+      config: this.threadConfig(),
       serviceName: "codex-chat",
       baseInstructions: bootstrap,
       developerInstructions: bootstrap,
@@ -297,7 +305,7 @@ export class AppServerCodexClient implements CodexClient {
       cwd: this.config.service.workspace,
       approvalPolicy: this.config.codex.approvalPolicy,
       sandbox: this.config.codex.sandbox,
-      config: { model_reasoning_effort: this.config.codex.effort },
+      config: this.threadConfig(),
       developerInstructions: bootstrap,
       persistExtendedHistory: true
     });

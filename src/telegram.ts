@@ -80,15 +80,28 @@ export class TelegramGateway {
     await this.pollingTask?.catch(() => undefined);
   }
 
-  async sendText(chatId: number, text: string, replyToMessageId?: number): Promise<void> {
+  async sendText(chatId: number, text: string, replyToMessageId?: number, format?: "text" | "markdownv2"): Promise<void> {
     if (!this.bot) throw new Error("Telegram bot is not started");
+    let parseMode: string | undefined;
+    if (format === "markdownv2") {
+      parseMode = "MarkdownV2";
+    } else if (format === "text") {
+      parseMode = undefined;
+    } else {
+      parseMode = this.config.telegram.parseMode === "plain" ? undefined : this.config.telegram.parseMode;
+    }
     for (const chunk of chunkText(text || "(empty response)")) {
       await this.bot.api.sendMessage(chatId, chunk, {
-        parse_mode: this.config.telegram.parseMode === "plain" ? undefined : this.config.telegram.parseMode,
+        parse_mode: parseMode,
         reply_parameters: replyToMessageId ? { message_id: replyToMessageId } : undefined
       } as never);
       await this.state.recordMessage({ direction: "outbound", chatId, text: chunk, sentAt: nowIso() });
     }
+  }
+
+  async sendReaction(chatId: number, messageId: number, emoji: string): Promise<void> {
+    if (!this.bot) throw new Error("Telegram bot is not started");
+    await this.bot.api.setMessageReaction(chatId, messageId, [{ type: "emoji", emoji }] as never);
   }
 
   /**

@@ -31,6 +31,17 @@ Example ack directive:
 }
 ```
 
+## Telegram Workflow
+
+Read the full Telegram workflow from:
+/home/tim/pkg/tim/assistant-claude/config/TELEGRAM.md
+
+That file defines the ack rules, voice handling, sub-agent dispatch, and reply requirements.
+For I/O mapping: where TELEGRAM.md says "send a reply", emit a `send_text` directive.
+Where it says "send a reaction", emit a `react` directive (see Directives section).
+Attachments are pre-downloaded by the service — you receive the local path directly.
+MarkdownV2: use `"format": "markdownv2"` in `send_text` directives for rich formatting.
+
 ## Response Style
 
 - Be concise and direct in Telegram responses.

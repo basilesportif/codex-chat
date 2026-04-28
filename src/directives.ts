@@ -11,7 +11,8 @@ const sendTextAction = baseAction.extend({
   type: z.literal("send_text"),
   chatId: z.number().int().optional(),
   text: z.string().min(1),
-  replyToMessageId: z.number().int().optional()
+  replyToMessageId: z.number().int().optional(),
+  format: z.enum(["text", "markdownv2"]).optional()
 });
 
 const sendImageAction = baseAction.extend({
@@ -60,6 +61,13 @@ const enqueueMainAction = baseAction.extend({
   metadata: z.record(z.string(), z.unknown()).optional()
 });
 
+const reactAction = baseAction.extend({
+  type: z.literal("react"),
+  chatId: z.number().int().optional(),
+  messageId: z.number().int(),
+  emoji: z.string().min(1)
+});
+
 export const directiveActionSchema = z.discriminatedUnion("type", [
   sendTextAction,
   sendImageAction,
@@ -67,7 +75,8 @@ export const directiveActionSchema = z.discriminatedUnion("type", [
   dispatchSubagentAction,
   cancelJobAction,
   notifyOwnerAction,
-  enqueueMainAction
+  enqueueMainAction,
+  reactAction
 ]);
 
 export const directiveBlockSchema = z.object({

@@ -342,7 +342,7 @@ export class ServiceSupervisor {
     await this.state.saveAction(stored);
     try {
       const defaultChatId = origin.chatId;
-      if (action.type === "send_text") await this.telegram.sendText(action.chatId ?? this.requireChat(defaultChatId), action.text, action.replyToMessageId);
+      if (action.type === "send_text") await this.telegram.sendText(action.chatId ?? this.requireChat(defaultChatId), action.text, action.replyToMessageId, action.format);
       if (action.type === "send_image") await this.telegram.sendImage(action.chatId ?? this.requireChat(defaultChatId), action);
       if (action.type === "send_document") await this.telegram.sendDocument(action.chatId ?? this.requireChat(defaultChatId), action);
       if (action.type === "dispatch_subagent") {
@@ -350,6 +350,7 @@ export class ServiceSupervisor {
       }
       if (action.type === "cancel_job") await this.subagents.cancel(action.jobId);
       if (action.type === "notify_owner") await this.telegram.notifyOps(action.text);
+      if (action.type === "react") await this.telegram.sendReaction(action.chatId ?? this.requireChat(defaultChatId), action.messageId, action.emoji);
       if (action.type === "enqueue_main") void this.enqueueSynthetic(action.text, action.metadata);
       stored.status = "completed";
     } catch (error) {

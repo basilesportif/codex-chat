@@ -75,3 +75,73 @@ And this`);
     expect(parsed.cleanText).not.toContain("codex-chat");
   });
 });
+
+// Manual verification of MarkdownV2 rendering:
+// 1. From a Telegram chat connected to codex-chat, send a message that asks for
+//    bold, italic, or code-block output (e.g. "reply with bold + a code block").
+// 2. Confirm the agent emits a `send_text` directive containing
+//    "format": "markdownv2" and properly escaped text.
+// 3. Verify Telegram renders the formatting (bold/italic/code) instead of
+//    showing raw asterisks/backticks. If you see raw chars, the format flag
+//    was dropped on the way to bot.api.sendMessage — check service.ts and
+//    telegram.ts wiring.
+describe("send_text format", () => {
+  test("accepts format: markdownv2", () => {
+    const parsed = parseDirectives(`\`\`\`codex-chat
+{"version":1,"actions":[{"type":"send_text","idempotencyKey":"md-1","text":"*bold*","format":"markdownv2"}]}
+\`\`\``);
+    expect(parsed.errors).toEqual([]);
+    expect(parsed.blocks).toHaveLength(1);
+    const action = parsed.blocks[0]?.actions[0];
+    expect(action?.type).toBe("send_text");
+    if (action?.type === "send_text") {
+      expect(action.format).toBe("markdownv2");
+    }
+  });
+
+  test("send_text without format still parses (defaults to plain)", () => {
+    const parsed = parseDirectives(`\`\`\`codex-chat
+{"version":1,"actions":[{"type":"send_text","idempotencyKey":"plain-1","text":"hello"}]}
+\`\`\``);
+    expect(parsed.errors).toEqual([]);
+    expect(parsed.blocks).toHaveLength(1);
+    const action = parsed.blocks[0]?.actions[0];
+    expect(action?.type).toBe("send_text");
+    if (action?.type === "send_text") {
+      expect(action.format).toBeUndefined();
+    }
+  });
+
+  test("rejects unknown format value", () => {
+    const parsed = parseDirectives(`\`\`\`codex-chat
+{"version":1,"actions":[{"type":"send_text","idempotencyKey":"bad-1","text":"x","format":"html"}]}
+\`\`\``);
+    expect(parsed.blocks).toHaveLength(0);
+    expect(parsed.errors.length).toBeGreaterThan(0);
+  });
+});
+
+describe("react directive", () => {
+  test("parses a valid react directive", () => {
+    const parsed = parseDirectives(`\`\`\`codex-chat
+{"version":1,"actions":[{"type":"react","idempotencyKey":"react-1","messageId":42,"emoji":"👀"}]}
+\`\`\``);
+    expect(parsed.errors).toEqual([]);
+    expect(parsed.blocks).toHaveLength(1);
+    const action = parsed.blocks[0]?.actions[0];
+    expect(action?.type).toBe("react");
+    if (action?.type === "react") {
+      expect(action.messageId).toBe(42);
+      expect(action.emoji).toBe("👀");
+    }
+  });
+
+  test("react requires messageId and emoji", () => {
+    const parsed = parseDirectives(`\`\`\`codex-chat
+{"version":1,"actions":[{"type":"react","idempotencyKey":"react-bad"}]}
+\`\`\``);
+    expect(parsed.blocks).toHaveLength(0);
+    expect(parsed.errors.length).toBeGreaterThan(0);
+  });
+});
+

@@ -280,14 +280,16 @@ export class SubagentManager {
       "--sandbox",
       this.config.codex.sandbox,
       "-c",
-      `ask_for_approval="${this.config.codex.approvalPolicy}"`,
-      "-c",
-      `model_reasoning_effort="${effort || this.config.subagents.defaultEffort}"`
+      `ask_for_approval="${this.config.codex.approvalPolicy}"`
     ];
+    for (const item of this.config.codex.extraConfig) {
+      if (/^\s*model_reasoning_effort\s*=/.test(item)) continue;
+      args.push("-c", item);
+    }
+    args.push("-c", `model_reasoning_effort="${effort || this.config.subagents.defaultEffort}"`);
     const selectedModel = model || this.config.subagents.defaultModel || this.config.codex.model;
     if (selectedModel) args.push("--model", selectedModel);
     if (this.config.codex.profile) args.push("--profile", this.config.codex.profile);
-    for (const item of this.config.codex.extraConfig) args.push("-c", item);
     for (const image of images) args.push("--image", image);
     args.push("-");
     return args;

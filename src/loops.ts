@@ -225,8 +225,7 @@ export function generateCronLines(config: AppConfig, loops: LoopsConfig): string
       const lock = loop.lock ?? loops.defaults.lock;
       const runner = `${binary} --config ${config.configPath} loop run ${loop.id}`;
       const command = lock ? `flock -n ${resolveConfigPath(config, join("data/locks", `loop-${loop.id}.lock`))} ${runner}` : runner;
-      const tz = loop.timezone ?? loops.defaults.timezone;
-      return `${tz ? `CRON_TZ=${tz} ` : ""}${loop.schedule} CODEX_CHAT_CONFIG=${config.configPath} ${command} >> ${logPath} 2>&1`;
+      return `${loop.schedule} CODEX_CHAT_CONFIG=${config.configPath} ${command} >> ${logPath} 2>&1`;
     });
 }
 

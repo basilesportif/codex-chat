@@ -138,4 +138,33 @@ describe("subagents", () => {
     await expect(manager.dispatch({ profile: "x", prompt: "overflow", route: "return_to_main" }))
       .rejects.toThrow(/Subagent dispatch queue is full/);
   });
+
+  test("subagent effort override wins over codex.extraConfig", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
+    tempDirs.push(root);
+    const spawn = vi.fn(() => fakeChild());
+    vi.doMock("node:child_process", async () => {
+      const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+      return { ...actual, spawn };
+    });
+    const { SubagentManager } = await import("../subagents.js");
+    const config = makeConfig(root, 1);
+    config.codex.extraConfig = ['model_reasoning_effort="medium"', 'experimental_feature="on"'];
+    const behavior = { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") };
+    const state = { saveJob: vi.fn().mockResolvedValue(undefined) };
+    const manager = new SubagentManager(
+      config,
+      behavior as never,
+      state as never,
+      fakeLogger() as never,
+      { onReturnToMain: vi.fn(), onSendToUser: vi.fn() }
+    );
+
+    await manager.dispatch({ profile: "x", prompt: "a", route: "return_to_main", effort: "xhigh" });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const args = spawn.mock.calls[0]?.[1] as string[];
+    expect(args).toContain('experimental_feature="on"');
+    expect(args.filter((arg) => arg.includes("model_reasoning_effort"))).toEqual(['model_reasoning_effort="xhigh"']);
+  });
 });

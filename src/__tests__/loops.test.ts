@@ -101,7 +101,7 @@ describe("loops config", () => {
     ].join("\n"), "testbot", lines);
 
     expect(lines).toHaveLength(1);
-    expect(lines[0]).toContain("CRON_TZ=Etc/UTC */5 * * * *");
+    expect(lines[0]).toContain("*/5 * * * * CODEX_CHAT_CONFIG=");
     expect(lines[0]).toContain("/usr/local/bin/codex-chat --config /tmp/codex-chat-test/config/codex-chat.toml loop run health");
     expect(next).toContain("MAILTO=tim@example.com");
     expect(next).toContain("0 0 * * * echo outside");

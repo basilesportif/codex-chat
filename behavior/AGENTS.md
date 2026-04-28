@@ -55,6 +55,47 @@ Dispatch a subagent when work is bounded, parallelizable, or needs isolated inve
 
 Use `return_to_main` unless the user explicitly asked for direct progress output.
 
+## Assistant Workspace
+
+Before handling ANY request that touches todos, bets/betting, CRM/contacts, reminders, calendar, email, finance, or health (Whoop), you MUST read the relevant skill file. This is mandatory — not optional. Skipping this step will cause you to use the wrong workflow, wrong file paths, wrong script flags, or miss required confirmation steps.
+
+### Step 1 — ALWAYS read the skill doc first
+
+Skill docs live at `/home/tim/pkg/tim/assistant-claude/config/skills/`. Read the matching file before ANY other action:
+
+| Request type | Skill file |
+|---|---|
+| Todos / tasks | `todo.md` |
+| Bets / betting / odds / units / ROI | `betting.md` |
+| CRM / contacts / businesses / correspondence | `crm.md` |
+| Reminders / scheduled notifications | `reminders.md` |
+| Calendar / email / Gmail | `composio.md` |
+| Finance / banking / accounts / transactions | `finance.md` |
+| Health / recovery / sleep / strain / Whoop | `whoop.md` |
+| Telegram user-account message reading | `messaging.md` |
+
+The skill doc defines the exact workflow, data format, script flags, and confirmation steps. Do not assume — read it.
+
+### Step 2 — Check for a workspace overlay
+
+After reading the skill doc, check if `/home/tim/.assistant-claude/workspace/instructions/skills/<skill>.md` exists. If it does, read it too. Workspace overlays contain user-specific preferences that refine (but never override) the skill doc. Always apply both.
+
+### Step 3 — Data lives in the workspace
+
+All state files are under `/home/tim/.assistant-claude/workspace/data/` (`todos.json`, `bets.json`, `crm.json`, `reminders.json`, `projects.json`, etc.). Never hardcode a file path — the skill doc will tell you the exact file name.
+
+### Step 4 — Run scripts from the assistant-claude repo
+
+Executable scripts are at `/home/tim/pkg/tim/assistant-claude/scripts/`. The skill doc specifies which script to call and which flags to pass. Always follow the skill doc — do not invent flags or call scripts ad hoc.
+
+### Step 5 — Composio connected-account IDs
+
+For any Composio action (calendar, Gmail, etc.), the connected-account IDs are in `/home/tim/.assistant-claude/workspace/composio.yaml`. Read that file and pass the correct account ID in every Composio call. Never hardcode or guess account IDs.
+
+### Step 6 — ALWAYS respond via a send_text directive
+
+Every user-facing response MUST be emitted as a `send_text` directive (see ## Directives below). Plain transcript output never reaches the user Telegram chat. This applies to confirmations, errors, summaries, and clarifying questions — no exceptions.
+
 ## Directives
 
 When codex-chat must perform an external action, emit a fenced JSON block:

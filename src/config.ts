@@ -91,7 +91,8 @@ const configSchema = z.object({
     provider: z.enum(["openai"]).default("openai"),
     model: z.string().default("gpt-4o-mini-transcribe"),
     apiKeyEnv: z.string().default("OPENAI_API_KEY"),
-    language: z.string().default("")
+    language: z.string().default(""),
+    promptPath: z.string().default("")
   }),
   security: z.object({
     redactSecretsInLogs: z.boolean().default(true),
@@ -185,7 +186,8 @@ const defaultConfig = configSchema.parse({
     provider: "openai",
     model: "gpt-4o-mini-transcribe",
     apiKeyEnv: "OPENAI_API_KEY",
-    language: ""
+    language: "",
+    promptPath: ""
   },
   security: {
     redactSecretsInLogs: true,
@@ -264,7 +266,8 @@ function collectEnvOverrides(env: NodeJS.ProcessEnv = process.env): Record<strin
     { name: "CODEX_CHAT_TELEGRAM_MODE", path: ["telegram", "mode"] },
     { name: "CODEX_CHAT_LOOPS_PATH", path: ["loops", "path"] },
     { name: "CODEX_CHAT_MONITORS_PATH", path: ["monitors", "path"] },
-    { name: "CODEX_CHAT_TRANSCRIPTION_ENABLED", path: ["transcription", "enabled"], parse: parseBooleanEnv }
+    { name: "CODEX_CHAT_TRANSCRIPTION_ENABLED", path: ["transcription", "enabled"], parse: parseBooleanEnv },
+    { name: "CODEX_CHAT_TRANSCRIPTION_PROMPT_PATH", path: ["transcription", "promptPath"] }
   ];
   for (const spec of specs) {
     const value = env[spec.name];

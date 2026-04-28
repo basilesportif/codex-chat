@@ -84,6 +84,8 @@ provider = "openai"
 model = "gpt-4o-transcribe"
 apiKeyEnv = "OPENAI_API_KEY"
 language = ""
+# Read fresh for every voice/audio transcription; missing or empty files are ignored.
+promptPath = "/home/tim/.assistant-claude/workspace/instructions/prompts/voice-transcription.md"
 
 [security]
 redactSecretsInLogs = true

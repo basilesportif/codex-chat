@@ -39,6 +39,18 @@ codex-chat jobs list
 - Telegram downloads: `data/files/`
 - Subagent artifacts: `data/subagents/`
 
+## Voice Transcription Prompt
+
+Voice and audio transcription can use a prompt or dictionary file for names,
+project terms, and preferred spellings. Set `transcription.promptPath` in
+`config/codex-chat.toml` to the file path. The service chooses that path at
+startup, then reads the file fresh for every transcription, so edits to the
+prompt file do not require restarting `codex-chat`.
+
+The recommended deployment file is
+`/home/tim/.assistant-claude/workspace/instructions/prompts/voice-transcription.md`.
+If `promptPath` is unset, missing, empty, or unreadable, transcription runs
+without a prompt.
 
 ## Server bootstrap skill
 
@@ -55,4 +67,3 @@ The behavior pack includes `behavior/skills/setup-server/SKILL.md`, a deployment
 In this architecture, `codex-chat` supplies the runtime while `assistant-agent-logic` supplies reusable workflows and `assistant-agent-data` supplies user-specific state. Other deployments can replace the logic and data layers while keeping `codex-chat` as the Telegram/Codex service.
 
 The canonical documentation for this deployment's repo relationships lives in `assistant-agent-data` at `docs/assistant-system-architecture.md`.
-

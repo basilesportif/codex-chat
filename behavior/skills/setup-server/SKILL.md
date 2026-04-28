@@ -242,6 +242,38 @@ Then configure `config/codex-chat.toml` for the deployment. If the repo already 
 - allowed Telegram user/chat IDs include the owner.
 - behavior dir points to the repo-local `behavior/` directory.
 - data dir points to the repo-local `data/` directory.
+- optional voice transcription prompt/dictionary path is set with `transcription.promptPath`.
+
+Recommended transcription dictionary file:
+
+```toml
+[transcription]
+enabled = true
+provider = "openai"
+model = "gpt-4o-transcribe"
+apiKeyEnv = "OPENAI_API_KEY"
+language = ""
+promptPath = "/home/$USERNAME/.assistant-claude/workspace/instructions/prompts/voice-transcription.md"
+```
+
+Create the prompt file on the server if the deployment uses voice messages:
+
+```bash
+ssh $USERNAME@$SERVER_IP bash <<'REMOTE'
+set -euo pipefail
+mkdir -p "$HOME/.assistant-claude/workspace/instructions/prompts"
+cat > "$HOME/.assistant-claude/workspace/instructions/prompts/voice-transcription.md" <<'PROMPT'
+Use this as transcription vocabulary and correction guidance. Preserve the speaker's meaning. Prefer the spellings and replacements below when audio is ambiguous. Remove filler words.
+
+USER DICTIONARY:
+- GPT-5.5
+- Codex
+- xhigh
+PROMPT
+REMOTE
+```
+
+`codex-chat` reads this file fresh for every voice/audio transcription. Editing the dictionary contents does not require a service restart. Changing `promptPath` itself does require restarting the service because the configured path is loaded at startup. Do not put secrets in the prompt file; it is sent to OpenAI with each transcription request.
 
 If no allowlist is configured yet, start the service and use its one-time `/pair <code>` flow from Telegram.
 

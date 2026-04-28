@@ -39,18 +39,40 @@ codex-chat jobs list
 - Telegram downloads: `data/files/`
 - Subagent artifacts: `data/subagents/`
 
-## Voice Transcription Prompt
+## Voice Transcription Prompt and Dictionary
 
-Voice and audio transcription can use a prompt or dictionary file for names,
-project terms, and preferred spellings. Set `transcription.promptPath` in
-`config/codex-chat.toml` to the file path. The service chooses that path at
-startup, then reads the file fresh for every transcription, so edits to the
-prompt file do not require restarting `codex-chat`.
+Voice and audio transcription can use an OpenAI transcription prompt file for
+names, project terms, preferred spellings, and lightweight cleanup guidance. Set
+`transcription.promptPath` in `config/codex-chat.toml` to the file path. The
+service chooses that path at startup, then reads the file fresh for every
+transcription, so edits to the prompt/dictionary file do **not** require
+restarting `codex-chat`.
 
-The recommended deployment file is
-`/home/tim/.assistant-claude/workspace/instructions/prompts/voice-transcription.md`.
+The recommended deployment file is:
+
+```text
+/home/tim/.assistant-claude/workspace/instructions/prompts/voice-transcription.md
+```
+
+Example file contents:
+
+```md
+Use this as transcription vocabulary and correction guidance. Preserve the
+speaker's meaning. Prefer the spellings and replacements below when audio is
+ambiguous. Remove filler words.
+
+USER DICTIONARY:
+- GPT-5.5
+- Codex
+- xhigh
+- Telegram.md → TELEGRAM.md
+- Mosh → Mush
+- Derek White → Derrick White
+```
+
 If `promptPath` is unset, missing, empty, or unreadable, transcription runs
-without a prompt.
+without a prompt. Keep secrets out of this file: it is sent to OpenAI with each
+voice/audio transcription request.
 
 ## Server bootstrap skill
 

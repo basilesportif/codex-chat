@@ -6,7 +6,7 @@ import type { Logger } from "pino";
 import { AppConfig, resolveConfigPath } from "./config.js";
 import { StateStore } from "./state.js";
 import { MonitorEvent, Route } from "./types.js";
-import { atomicWriteText, ensureDir, makeId, nowIso, pathExists } from "./util.js";
+import { atomicWriteText, ensureDir, killProcessTree, makeId, nowIso, pathExists } from "./util.js";
 
 const patternSchema = z.object({
   id: z.string().min(1),
@@ -115,15 +115,7 @@ export class MonitorManager {
         clearTimeout(running.restartTimer);
         running.restartTimer = undefined;
       }
-      if (running.child?.pid && running.child.pid > 0) {
-        try {
-          process.kill(-running.child.pid, "SIGTERM");
-        } catch {
-          try { running.child.kill("SIGTERM"); } catch { /* already dead */ }
-        }
-      } else if (running.child) {
-        try { running.child.kill("SIGTERM"); } catch { /* already dead */ }
-      }
+      if (running.child) killProcessTree(running.child, "SIGTERM");
     }
     this.monitors.clear();
   }
@@ -293,15 +285,7 @@ export class MonitorManager {
       clearTimeout(running.restartTimer);
       running.restartTimer = undefined;
     }
-    if (running.child?.pid && running.child.pid > 0) {
-      try {
-        process.kill(-running.child.pid, "SIGTERM");
-      } catch {
-        try { running.child.kill("SIGTERM"); } catch { /* already dead */ }
-      }
-    } else if (running.child) {
-      try { running.child.kill("SIGTERM"); } catch { /* already dead */ }
-    }
+    if (running.child) killProcessTree(running.child, "SIGTERM");
     await this.startManagedProcess(running);
   }
 

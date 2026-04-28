@@ -7,7 +7,7 @@ import { BehaviorPack } from "./behavior.js";
 import { DirectiveAction } from "./directives.js";
 import { StateStore } from "./state.js";
 import { Route, SubagentJob } from "./types.js";
-import { ensureDir, makeId, nowIso, pathExists } from "./util.js";
+import { ensureDir, killProcessTree, makeId, nowIso, pathExists } from "./util.js";
 
 const SIGKILL_GRACE_MS = 5_000;
 const MAX_QUEUE_DEPTH = 200;
@@ -115,25 +115,14 @@ export class SubagentManager {
     await this.state.saveJob(running.job);
     clearTimeout(running.timeout);
     const child = running.child;
-    const pid = child.pid;
-    try {
-      if (pid && pid > 0) process.kill(-pid, "SIGTERM");
-      else child.kill("SIGTERM");
-    } catch {
-      try { child.kill("SIGTERM"); } catch { /* already dead */ }
-    }
+    killProcessTree(child, "SIGTERM");
     // Escalate to SIGKILL if the process ignores SIGTERM. Without this a
     // misbehaving subagent can cling to its slot indefinitely, starving the
     // dispatch queue.
     setTimeout(() => {
       if (child.exitCode !== null || child.killed) return;
-      this.logger.warn({ component: "subagents", event: "sigkill_after_grace", jobId, pid }, "subagent ignored SIGTERM; sending SIGKILL");
-      try {
-        if (pid && pid > 0) process.kill(-pid, "SIGKILL");
-        else child.kill("SIGKILL");
-      } catch {
-        try { child.kill("SIGKILL"); } catch { /* already dead */ }
-      }
+      this.logger.warn({ component: "subagents", event: "sigkill_after_grace", jobId, pid: child.pid }, "subagent ignored SIGTERM; sending SIGKILL");
+      killProcessTree(child, "SIGKILL");
     }, SIGKILL_GRACE_MS).unref?.();
     this.running.delete(jobId);
     return true;

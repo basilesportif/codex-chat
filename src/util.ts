@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { access, mkdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
+import type { ChildProcess } from "node:child_process";
 
 export function nowIso(): string {
   return new Date().toISOString();
@@ -169,3 +170,17 @@ export async function fileSize(path: string): Promise<number> {
 }
 
 
+/**
+ * Send `signal` to a child process — preferring its process group so detached
+ * children get the signal too. Falls back to signaling the child directly if
+ * the group kill fails. All errors swallowed (process may already be dead).
+ */
+export function killProcessTree(child: ChildProcess, signal: NodeJS.Signals = "SIGTERM"): void {
+  const pid = child.pid;
+  try {
+    if (pid && pid > 0) process.kill(-pid, signal);
+    else child.kill(signal);
+  } catch {
+    try { child.kill(signal); } catch { /* already dead */ }
+  }
+}

@@ -212,6 +212,13 @@ export class TelegramGateway {
     }
     const message = ctx.message;
     if (!message || !ctx.from || !ctx.chat) return;
+    // React immediately at the Telegram ingress layer. Codex-emitted `react`
+    // directives cannot fire until the model starts returning output, and voice
+    // transcription can also add latency before the event reaches Codex. This
+    // best-effort reaction confirms receipt as soon as the bot has the message.
+    void this.sendReaction(ctx.chat.id, message.message_id, "👀").catch((error) => {
+      this.logger.warn({ component: "telegram", event: "immediate_reaction_failed", chatId: ctx.chat?.id, messageId: message.message_id, error }, "immediate reaction failed");
+    });
     // Fire-and-forget typing indicator so the user sees instant feedback
     // before Codex even starts processing. Independent of any
     // Codex-emitted ack — we always want some immediate signal of receipt.

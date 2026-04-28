@@ -15,6 +15,8 @@ export interface LogBufferEntry {
   ts: string;
   stream: "stdout" | "stderr" | "event";
   line: string;
+  /** True for high-frequency noisy events; omitted from recent() unless includeRaw=true. */
+  raw?: boolean;
 }
 
 const SECRET_PATTERNS: Array<{ regex: RegExp; replacement: string }> = [
@@ -55,24 +57,33 @@ export class LogBuffer {
    *
    * The `stream` parameter accepts "stdout", "stderr" (process output), or
    * "event" (formatted WebSocket notification events).
+   *
+   * When `isRaw` is true the entry is stored with `raw: true` and will be
+   * excluded from recent() calls unless `includeRaw` is set.
    */
-  append(stream: "stdout" | "stderr" | "event", chunk: string): void {
+  append(stream: "stdout" | "stderr" | "event", chunk: string, isRaw = false): void {
     if (!chunk) return;
     const lines = chunk.split(/\r?\n/);
     const ts = new Date().toISOString();
-    for (const raw of lines) {
-      if (raw.length === 0) continue;
-      const line = scrubSecrets(raw);
-      this.entries.push({ ts, stream, line });
+    for (const rawLine of lines) {
+      if (rawLine.length === 0) continue;
+      const line = scrubSecrets(rawLine);
+      const entry: LogBufferEntry = { ts, stream, line };
+      if (isRaw) entry.raw = true;
+      this.entries.push(entry);
       if (this.entries.length > this.capacity) this.entries.shift();
     }
   }
 
-  /** Returns up to `n` most-recent entries (oldest first). */
-  recent(n: number): LogBufferEntry[] {
+  /**
+   * Returns up to `n` most-recent entries (oldest first).
+   * When `includeRaw` is false (default) entries flagged as raw/noisy are excluded.
+   */
+  recent(n: number, includeRaw = false): LogBufferEntry[] {
     if (n <= 0) return [];
-    if (n >= this.entries.length) return this.entries.slice();
-    return this.entries.slice(this.entries.length - n);
+    const filtered = includeRaw ? this.entries : this.entries.filter((e) => !e.raw);
+    if (n >= filtered.length) return filtered.slice();
+    return filtered.slice(filtered.length - n);
   }
 
   size(): number {

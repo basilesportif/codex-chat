@@ -99,3 +99,41 @@ describe("LogBuffer", () => {
     expect(formatted).toMatch(/\[.*\] event  \[TURN START\]/);
   });
 });
+
+describe("LogBuffer raw filtering", () => {
+  test("raw entries are excluded from recent() by default", () => {
+    const buf = new LogBuffer(10);
+    buf.append("event", "[TURN START] turn_id=abc\n");
+    buf.append("event", "[WS:thread/status/changed] {...}\n", true);
+    buf.append("event", "[TURN END] turn_id=abc status=completed\n");
+    // Default: raw entries excluded
+    const clean = buf.recent(10);
+    expect(clean).toHaveLength(2);
+    expect(clean.map((e) => e.line)).not.toContain(expect.stringContaining("thread/status/changed"));
+  });
+
+  test("raw entries are included when includeRaw=true", () => {
+    const buf = new LogBuffer(10);
+    buf.append("event", "[TURN START] turn_id=abc\n");
+    buf.append("event", "[WS:thread/status/changed] {...}\n", true);
+    buf.append("event", "[TURN END] turn_id=abc status=completed\n");
+    const all = buf.recent(10, true);
+    expect(all).toHaveLength(3);
+  });
+
+  test("size() counts all entries including raw", () => {
+    const buf = new LogBuffer(10);
+    buf.append("event", "clean\n");
+    buf.append("event", "noisy\n", true);
+    expect(buf.size()).toBe(2);
+  });
+
+  test("recent(n) with includeRaw=false returns at most n non-raw entries", () => {
+    const buf = new LogBuffer(20);
+    for (let i = 0; i < 5; i++) buf.append("event", `clean ${i}\n`);
+    for (let i = 0; i < 5; i++) buf.append("event", `noisy ${i}\n`, true);
+    const last3 = buf.recent(3);
+    expect(last3).toHaveLength(3);
+    expect(last3.every((e) => !e.raw)).toBe(true);
+  });
+});

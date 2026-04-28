@@ -59,7 +59,7 @@ export interface CodexClient {
   health(): Promise<CodexHealth>;
   sendTurn(input: CodexTurnInput): AsyncIterable<CodexEvent>;
   /** Optional — clients may expose recent app-server output for introspection. */
-  getRecentLogs?(n?: number): string[];
+  getRecentLogs?(n?: number, includeRaw?: boolean): string[];
 }
 
 export interface StoredAction {

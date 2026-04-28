@@ -96,9 +96,9 @@ export class AppServerCodexClient implements CodexClient {
     private readonly onCrash?: CodexCrashHandler
   ) {}
 
-  /** Returns up to `n` most-recent app-server output lines (oldest first). */
-  getRecentLogs(n = 100): string[] {
-    return this.logBuffer.recent(n).map((entry) => `[${entry.ts}] ${entry.stream.padEnd(6)} ${entry.line}`);
+  /** Returns up to `n` most-recent app-server output lines (oldest first). When includeRaw is true, noisy WS events are included. */
+  getRecentLogs(n = 100, includeRaw = false): string[] {
+    return this.logBuffer.recent(n, includeRaw).map((entry) => `[${entry.ts}] ${entry.stream.padEnd(6)} ${entry.line}`);
   }
 
   /**
@@ -142,11 +142,21 @@ export class AppServerCodexClient implements CodexClient {
         // Skip — too granular, tool call begin/end captures what matters.
         return;
       }
-      default: {
-        // Log unknown notification methods at low verbosity so new event types
-        // surface without requiring code changes.
+      // Known-noisy high-frequency events: store with raw=true so they are
+      // excluded from default introspect output but visible with "introspect raw N".
+      case "thread/status/changed":
+      case "thread/tokenUsage/updated":
+      case "mcpServer/startupStatus/updated":
+      case "turn/started":
+      case "item/started": {
         const preview = JSON.stringify(params).slice(0, 120);
-        line = `[WS:${method}] ${preview}`;
+        this.logBuffer.append("event", scrubSecrets(`[WS:${method}] ${preview}`), true);
+        return;
+      }
+      default: {
+        // Truly unknown event: log clean one-liner without JSON params so new
+        // event types surface without cluttering the default view.
+        line = `[EVENT] ${method}`;
         break;
       }
     }

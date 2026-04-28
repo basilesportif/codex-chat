@@ -56,13 +56,22 @@ export function injectFilePath(config: AppConfig): string {
 
 /**
  * Returns true when the message text is a "logs" or "introspect" command,
- * along with the requested number of lines to return.
+ * along with the requested number of lines to return and whether raw mode
+ * (including noisy WS events) was requested.
  * Handled entirely at the service level — Codex is never involved.
+ *
+ * Accepted forms:
+ *   introspect [N]        — clean output (default)
+ *   introspect raw [N]    — include raw/noisy events
+ *   logs [N]
+ *   logs raw [N]
  */
-function parseLogCommand(text: string): { isLog: boolean; lines: number } {
-  const match = text.trim().match(/^(logs?|introspect)\s*(\d+)?$/i);
-  if (!match) return { isLog: false, lines: 0 };
-  return { isLog: true, lines: match[2] ? Math.min(parseInt(match[2], 10), 2000) : 100 };
+function parseLogCommand(text: string): { isLog: boolean; lines: number; includeRaw: boolean } {
+  const match = text.trim().match(/^(logs?|introspect)(?:\s+(raw))?(?:\s+(\d+))?$/i);
+  if (!match) return { isLog: false, lines: 0, includeRaw: false };
+  const includeRaw = match[2]?.toLowerCase() === "raw";
+  const lines = match[3] ? Math.min(parseInt(match[3], 10), 2000) : 100;
+  return { isLog: true, lines, includeRaw };
 }
 
 export class ServiceSupervisor {
@@ -198,9 +207,9 @@ export class ServiceSupervisor {
     // Intercept "logs [N]" and "introspect [N]" commands before they reach Codex.
     // Reply directly from the service — no turn, no tokens consumed.
     if (event.source === "telegram" && event.chatId && event.text) {
-      const { isLog, lines } = parseLogCommand(event.text);
+      const { isLog, lines, includeRaw } = parseLogCommand(event.text);
       if (isLog) {
-        await this.handleLogCommandEvent(event, lines);
+        await this.handleLogCommandEvent(event, lines, includeRaw);
         return;
       }
     }
@@ -823,7 +832,7 @@ export class ServiceSupervisor {
    * Service-level handler for "logs [N]" / "introspect [N]" Telegram commands.
    * Called BEFORE the event is enqueued for Codex — Codex is never involved.
    */
-  private async handleLogCommandEvent(event: UserEvent, lines: number): Promise<void> {
+  private async handleLogCommandEvent(event: UserEvent, lines: number, includeRaw = false): Promise<void> {
     const chatId = event.chatId!;
     const count = Math.max(1, Math.min(lines, 2000));
     const getRecentLogs = this.codex.getRecentLogs?.bind(this.codex);
@@ -831,7 +840,7 @@ export class ServiceSupervisor {
       await this.telegram.sendText(chatId, "Log buffer is not available for this transport.", event.messageId);
       return;
     }
-    const recent = getRecentLogs(count);
+    const recent = getRecentLogs(count, includeRaw);
     if (recent.length === 0) {
       await this.telegram.sendText(chatId, "Codex app-server log buffer is empty.", event.messageId);
       return;

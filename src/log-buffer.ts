@@ -1,5 +1,6 @@
 /**
- * In-process ring buffer for Codex app-server stdout/stderr.
+ * In-process ring buffer for Codex app-server stdout/stderr and WebSocket
+ * event notifications.
  *
  * Used by the `get_logs` directive so Tim can introspect recent app-server
  * output from Telegram without SSH'ing into the box. The buffer holds at most
@@ -12,7 +13,7 @@
 
 export interface LogBufferEntry {
   ts: string;
-  stream: "stdout" | "stderr";
+  stream: "stdout" | "stderr" | "event";
   line: string;
 }
 
@@ -51,8 +52,11 @@ export class LogBuffer {
    * chunk, but for simplicity we just split on newlines and store non-empty
    * lines individually — Codex output is line-oriented and partial lines are
    * acceptable to fold into the next entry as a separate one.
+   *
+   * The `stream` parameter accepts "stdout", "stderr" (process output), or
+   * "event" (formatted WebSocket notification events).
    */
-  append(stream: "stdout" | "stderr", chunk: string): void {
+  append(stream: "stdout" | "stderr" | "event", chunk: string): void {
     if (!chunk) return;
     const lines = chunk.split(/\r?\n/);
     const ts = new Date().toISOString();

@@ -64,4 +64,38 @@ describe("LogBuffer", () => {
     buf.clear();
     expect(buf.size()).toBe(0);
   });
+
+  test("accepts event stream type for WS notification entries", () => {
+    const buf = new LogBuffer(10);
+    buf.append("event", "[TURN START] turn_id=abc123 session_id=sess456\n");
+    buf.append("event", "[TOOL] shell_exec(ls -la)\n");
+    buf.append("event", "[TOOL RESULT] shell_exec exit=0 output=total 8\n");
+    buf.append("event", "[REASONING] turn_id=abc123 The user wants to list files\n");
+    buf.append("event", "[TURN END] turn_id=abc123 status=completed\n");
+    expect(buf.size()).toBe(5);
+    const entries = buf.recent(5);
+    expect(entries[0]!.stream).toBe("event");
+    expect(entries[0]!.line).toMatch(/TURN START/);
+    expect(entries[1]!.line).toMatch(/TOOL/);
+    expect(entries[4]!.line).toMatch(/TURN END/);
+  });
+
+  test("event entries are mixed with stdout/stderr in chronological order", () => {
+    const buf = new LogBuffer(10);
+    buf.append("stderr", "app-server started\n");
+    buf.append("event", "[TURN START] turn_id=t1 session_id=s1\n");
+    buf.append("stderr", "some stderr output\n");
+    buf.append("event", "[TURN END] turn_id=t1 status=completed\n");
+    expect(buf.size()).toBe(4);
+    const streams = buf.recent(4).map((e) => e.stream);
+    expect(streams).toEqual(["stderr", "event", "stderr", "event"]);
+  });
+
+  test("formatLogEntries pads event stream label to 6 chars", () => {
+    const buf = new LogBuffer(5);
+    buf.append("event", "[TURN START] turn_id=abc\n");
+    const formatted = formatLogEntries(buf.recent(1));
+    // "event".padEnd(6) = "event " then template adds a space => "event  " (two spaces total)
+    expect(formatted).toMatch(/\[.*\] event  \[TURN START\]/);
+  });
 });

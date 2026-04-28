@@ -4,7 +4,7 @@ import WebSocket from "ws";
 import type { Logger } from "pino";
 import { AppConfig } from "./config.js";
 import { BehaviorPack } from "./behavior.js";
-import { LogBuffer } from "./log-buffer.js";
+import { LogBuffer, scrubSecrets } from "./log-buffer.js";
 import { StateStore } from "./state.js";
 import { CodexClient, CodexEvent, CodexHealth, CodexTurnInput } from "./types.js";
 
@@ -99,6 +99,69 @@ export class AppServerCodexClient implements CodexClient {
   /** Returns up to `n` most-recent app-server output lines (oldest first). */
   getRecentLogs(n = 100): string[] {
     return this.logBuffer.recent(n).map((entry) => `[${entry.ts}] ${entry.stream.padEnd(6)} ${entry.line}`);
+  }
+
+  /**
+   * Format and append a WebSocket notification event to the log buffer.
+   * Produces human-readable lines suitable for Telegram introspection.
+   * Secrets are scrubbed before appending.
+   */
+  private logWsEvent(method: string, params: Record<string, unknown>): void {
+    let line: string;
+    switch (method) {
+      case "item/agentMessage/delta": {
+        // Logged only when a turn ends (via logTurnReasoning) — skip per-delta to avoid flooding.
+        return;
+      }
+      case "turn/completed": {
+        const turn = typeof params.turn === "object" && params.turn !== null ? (params.turn as Record<string, unknown>) : {};
+        const turnId = typeof turn.id === "string" ? turn.id : "?";
+        const status = typeof turn.status === "string" ? turn.status : "unknown";
+        line = `[TURN END] turn_id=${turnId} status=${status}`;
+        break;
+      }
+      case "error": {
+        const msg = typeof params.message === "string" ? params.message : JSON.stringify(params);
+        line = `[ERROR] ${msg.slice(0, 300)}`;
+        break;
+      }
+      case "item/toolCall/begin": {
+        const name = typeof params.name === "string" ? params.name : "?";
+        const args = params.arguments !== undefined ? JSON.stringify(params.arguments).slice(0, 150) : "";
+        line = `[TOOL] ${name}(${args})`;
+        break;
+      }
+      case "item/toolCall/end": {
+        const name = typeof params.name === "string" ? params.name : "?";
+        const exitCode = params.exitCode !== undefined ? String(params.exitCode) : "?";
+        const output = typeof params.output === "string" ? params.output.slice(0, 200) : "";
+        line = `[TOOL RESULT] ${name} exit=${exitCode}${output ? ` output=${output}` : ""}`;
+        break;
+      }
+      case "item/toolCall/delta": {
+        // Skip — too granular, tool call begin/end captures what matters.
+        return;
+      }
+      default: {
+        // Log unknown notification methods at low verbosity so new event types
+        // surface without requiring code changes.
+        const preview = JSON.stringify(params).slice(0, 120);
+        line = `[WS:${method}] ${preview}`;
+        break;
+      }
+    }
+    this.logBuffer.append("event", scrubSecrets(line));
+  }
+
+  /**
+   * Log a reasoning summary line once a turn's text output is complete.
+   * Called after turn/completed is received with the full accumulated text.
+   */
+  private logTurnReasoning(turnId: string, accumulated: string): void {
+    if (!accumulated) return;
+    const preview = accumulated.slice(0, 200);
+    const suffix = accumulated.length > 200 ? `… (${accumulated.length} chars total)` : "";
+    this.logBuffer.append("event", scrubSecrets(`[REASONING] turn_id=${turnId} ${preview}${suffix}`));
   }
 
   async start(): Promise<void> {
@@ -196,6 +259,7 @@ export class AppServerCodexClient implements CodexClient {
       if (message.method === "turn/completed" && typeof params.turn === "object" && params.turn !== null) {
         const turn = params.turn as Record<string, unknown>;
         if (turn.id === turnId) {
+          this.logTurnReasoning(turnId, accumulated);
           queue.push({ type: "final", text: accumulated });
           queue.close();
         }
@@ -211,6 +275,7 @@ export class AppServerCodexClient implements CodexClient {
       const turn = response.turn as Record<string, unknown> | undefined;
       turnId = typeof turn?.id === "string" ? turn.id : "";
       if (!turnId) throw new Error("Codex app-server did not return a turn id");
+      this.logBuffer.append("event", scrubSecrets(`[TURN START] turn_id=${turnId} session_id=${this.sessionId ?? "?"}`));
       for await (const event of queue.iterate()) yield event;
     } finally {
       this.notificationHandlers.delete(handler);
@@ -414,6 +479,10 @@ export class AppServerCodexClient implements CodexClient {
       if (message.error) pending?.reject(new Error(JSON.stringify(message.error)));
       else pending?.resolve(message.result);
       return;
+    }
+    // Log meaningful WS notification events to the introspection buffer.
+    if (message.method && typeof message.params === "object" && message.params !== null) {
+      this.logWsEvent(message.method, message.params as Record<string, unknown>);
     }
     for (const handler of this.notificationHandlers) handler(message);
   }

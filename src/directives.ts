@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { Route } from "./types.js";
 
 const routeSchema = z.enum(["return_to_main", "send_to_user", "send_progress_and_return", "send_to_admins", "store_only", "silent"]);
 
@@ -108,8 +107,3 @@ export function parseDirectives(text: string): DirectiveParseResult {
   return { cleanText, blocks, errors };
 }
 
-export function routeOf(action: DirectiveAction): Route {
-  if (action.type === "dispatch_subagent") return action.route;
-  if (action.type === "enqueue_main") return action.route ?? "return_to_main";
-  return "send_to_user";
-}

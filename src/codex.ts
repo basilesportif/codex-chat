@@ -153,10 +153,6 @@ export class AppServerCodexClient implements CodexClient {
     };
   }
 
-  async resume(sessionId: string): Promise<void> {
-    this.sessionId = sessionId;
-    if (this.connected) await this.resumeThread(sessionId);
-  }
 
   async *sendTurn(input: CodexTurnInput): AsyncIterable<CodexEvent> {
     this.assertConnected();

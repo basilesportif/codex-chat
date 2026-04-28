@@ -7,10 +7,7 @@ import { pathExists } from "./util.js";
 export class BehaviorPack {
   readonly dir: string;
   readonly entrypointPath: string;
-  private cachedHash?: string;
-  private cachedBootstrap?: string;
-
-  constructor(private readonly config: AppConfig) {
+  constructor(config: AppConfig) {
     this.dir = resolveConfigPath(config, config.behavior.dir);
     this.entrypointPath = join(this.dir, config.behavior.entrypoint);
   }
@@ -34,24 +31,13 @@ export class BehaviorPack {
       "",
       "When you need the service to perform an external action, emit only a valid codex-chat directive block matching the documented JSON schemas."
     ].join("\n");
-    this.cachedBootstrap = prompt;
     return prompt;
   }
 
   async hash(): Promise<string> {
-    const hash = await this.computeHash();
-    this.cachedHash = hash;
-    return hash;
+    return this.computeHash();
   }
 
-  async refreshIfChanged(): Promise<{ changed: boolean; hash: string; prompt: string }> {
-    const previous = this.cachedHash;
-    const nextHash = await this.computeHash();
-    const changed = previous !== undefined && previous !== nextHash;
-    this.cachedHash = nextHash;
-    const prompt = changed || !this.cachedBootstrap ? await this.loadBootstrapPrompt() : this.cachedBootstrap;
-    return { changed, hash: nextHash, prompt };
-  }
 
   private async computeHash(): Promise<string> {
     const files = await this.collectFiles(this.dir);

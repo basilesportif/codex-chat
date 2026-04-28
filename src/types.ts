@@ -58,7 +58,6 @@ export interface CodexClient {
   stop(): Promise<void>;
   health(): Promise<CodexHealth>;
   sendTurn(input: CodexTurnInput): AsyncIterable<CodexEvent>;
-  resume(sessionId: string): Promise<void>;
 }
 
 export interface StoredAction {

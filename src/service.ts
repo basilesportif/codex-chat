@@ -1,9 +1,19 @@
 import type { Logger } from "pino";
+import { spawn } from "node:child_process";
 import { readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { AppConfig, ensureConfiguredDirectories, resolveConfigPath } from "./config.js";
 import { BehaviorPack } from "./behavior.js";
 import { AppServerCodexClient, CodexCrashInfo } from "./codex.js";
+import {
+  consumeDeployMarker,
+  DeployMarker,
+  formatDeployFailureMessage,
+  formatDeploySuccessMessage,
+  isDeployCommand,
+  spawnDeployScript,
+  waitForTurnDrain
+} from "./deploy.js";
 import { DirectiveAction, parseDirectives } from "./directives.js";
 import { FileStore } from "./file-store.js";
 import { CodexHeartbeat } from "./heartbeat.js";
@@ -13,7 +23,7 @@ import { MonitorManager } from "./monitors.js";
 import { StateStore } from "./state.js";
 import { SubagentManager } from "./subagents.js";
 import { DisabledTranscriber, OpenAITranscriber, Transcriber } from "./transcription.js";
-import { TelegramGateway } from "./telegram.js";
+import { isTelegramAdmin, TelegramGateway } from "./telegram.js";
 import { CodexClient, StoredAction, SubagentJob, UserEvent } from "./types.js";
 import { makeId, nowIso } from "./util.js";
 
@@ -44,6 +54,11 @@ const CONTEXT_RESET_OPS_NOTE =
   "Note: conversation context was reset due to the crash. Active users have been notified.";
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60_000;
 const MAX_SEEN_IDEMPOTENCY = 5_000;
+const DEPLOY_ACK_MESSAGE =
+  "Deploying — pulling latest and rebuilding. Will message you when ready.";
+const DEPLOY_DENIED_MESSAGE =
+  "Deploy is admin-only. Ask Tim to add you to telegram.allowlist.adminUserIds.";
+const DEPLOY_DRAIN_MS = 30_000;
 
 type QueuedEvent = {
   event: UserEvent;
@@ -186,7 +201,11 @@ export class ServiceSupervisor {
     this.watchdogInterval = setInterval(() => void this.checkTurnTimeout(), 15_000);
     this.injectInterval = setInterval(() => void this.pollInjectFile(), 1_000);
     const health = await this.codex.health();
-    await this.telegram.notifyOps(`codex-chat started\ntransport: ${health.transport}\nsandbox: ${this.config.codex.sandbox}\nsession: ${health.sessionId ?? "new"}`);
+    const commit = await this.readCurrentCommit();
+    await this.telegram.notifyOps(
+      `codex-chat started\ncommit: ${commit}\ntransport: ${health.transport}\nsandbox: ${this.config.codex.sandbox}\nsession: ${health.sessionId ?? "new"}`
+    );
+    await this.announceDeployResult(commit);
   }
 
   async stop(): Promise<void> {
@@ -210,6 +229,13 @@ export class ServiceSupervisor {
       const { isLog, lines, includeRaw } = parseLogCommand(event.text);
       if (isLog) {
         await this.handleLogCommandEvent(event, lines, includeRaw);
+        return;
+      }
+      // Intercept "update" / "deploy" / "redeploy" before Codex sees it.
+      // Codex must not be the one driving its own restart — chicken/egg —
+      // so the service handles the whole thing.
+      if (isDeployCommand(event.text)) {
+        await this.handleDeployCommandEvent(event);
         return;
       }
     }
@@ -856,5 +882,103 @@ export class ServiceSupervisor {
     if (!this.config.transcription.enabled) return new DisabledTranscriber();
     if (this.config.transcription.provider === "openai") return new OpenAITranscriber(this.config);
     return new DisabledTranscriber();
+  }
+
+  /**
+   * Service-level handler for "update" / "deploy" / "redeploy" commands.
+   * Acks instantly, waits for the current turn (if any) to finish so its
+   * response isn't lost mid-flight, then spawns scripts/deploy.sh detached
+   * and returns. The script handles git pull + build + systemctl restart;
+   * after the restart, announceDeployResult tells the user the new commit.
+   *
+   * Restricted to admin users — even though the Telegram allowlist already
+   * gates inbound messages, restarting the service from a non-admin would
+   * be surprising and a footgun.
+   */
+  private async handleDeployCommandEvent(event: UserEvent): Promise<void> {
+    const chatId = event.chatId;
+    if (!chatId) return;
+    const isAdmin = isTelegramAdmin({
+      userId: event.userId,
+      configAdminUserIds: this.config.telegram.allowlist.adminUserIds,
+      stateUsers: await this.state.listTelegramUsers()
+    });
+    if (!isAdmin) {
+      await this.telegram.sendText(chatId, DEPLOY_DENIED_MESSAGE, event.messageId).catch(() => undefined);
+      return;
+    }
+    // Send the ack BEFORE doing anything else so the user sees feedback
+    // even if drain or spawn takes a moment.
+    try {
+      await this.telegram.sendText(chatId, DEPLOY_ACK_MESSAGE, event.messageId);
+    } catch (error) {
+      this.logger.error({ component: "deploy", event: "ack_failed", error }, "Failed to send deploy ack");
+    }
+    // Wait for the active turn (if any) to drain so its reply is delivered
+    // before we restart. Capped at 30s so a wedged turn cannot block deploy
+    // forever — the post-restart abandon-turns logic handles the lost reply.
+    await waitForTurnDrain(() => this.turnRunning, DEPLOY_DRAIN_MS, this.logger);
+    // Fire and forget — deploy.sh restarts us, killing this process. Any
+    // code after this line will not execute reliably.
+    spawnDeployScript({ config: this.config, logger: this.logger, isTurnRunning: () => this.turnRunning }, chatId, event.messageId);
+  }
+
+  /**
+   * On startup, read the deploy marker (if present) and tell the user how
+   * the deploy went. Failure markers exist when deploy.sh failed AFTER the
+   * old process already restarted (e.g. systemctl restart_failed) — rare,
+   * but we surface it so the user is not left guessing.
+   */
+  private async announceDeployResult(currentCommit: string): Promise<void> {
+    let marker: DeployMarker | undefined;
+    try {
+      marker = await consumeDeployMarker(this.config, this.logger);
+    } catch (error) {
+      this.logger.warn({ component: "deploy", event: "marker_read_failed", error }, "Could not read deploy marker");
+      return;
+    }
+    if (!marker) return;
+    const text = marker.status === "success"
+      ? formatDeploySuccessMessage(marker, currentCommit)
+      : formatDeployFailureMessage(marker);
+    if (marker.chatId) {
+      try {
+        await this.telegram.sendText(
+          marker.chatId,
+          text,
+          marker.replyToMessageId ?? undefined
+        );
+      } catch (error) {
+        this.logger.error(
+          { component: "deploy", event: "result_notify_failed", chatId: marker.chatId, error },
+          "Failed to send deploy result to user"
+        );
+      }
+    }
+    // Mirror to ops channel so Tim sees it even if the deploy was triggered
+    // from a different chat (e.g. a group).
+    await this.telegram.notifyOps(text).catch(() => undefined);
+  }
+
+  private async readCurrentCommit(): Promise<string> {
+    return new Promise((resolveCommit) => {
+      try {
+        const child = spawn("git", ["rev-parse", "--short", "HEAD"], {
+          cwd: this.config.rootDir,
+          stdio: ["ignore", "pipe", "pipe"]
+        });
+        let out = "";
+        child.stdout.on("data", (chunk) => {
+          out += chunk.toString();
+        });
+        child.on("error", () => resolveCommit("unknown"));
+        child.on("exit", (code) => {
+          if (code === 0 && out.trim()) resolveCommit(out.trim());
+          else resolveCommit("unknown");
+        });
+      } catch {
+        resolveCommit("unknown");
+      }
+    });
   }
 }

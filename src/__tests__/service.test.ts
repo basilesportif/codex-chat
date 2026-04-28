@@ -347,7 +347,7 @@ describe("service supervisor", () => {
     ["calendar lookup", "what is on my calendar today?"],
     ["email lookup", "check my Gmail inbox for Derek"],
     ["external data", "look up the latest model pricing online"]
-  ])("blocks %s prompts from silently completing as main-loop clean text", async (_label, text) => {
+  ])("delivers main-loop clean text for %s prompts when Codex chose not to dispatch", async (_label, text) => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
     const service = new ServiceSupervisor(config, logger);
@@ -360,15 +360,10 @@ describe("service supervisor", () => {
     await service.enqueueUserEvent(userEvent(500, text));
     await waitForIdle(service);
 
-    expect(sendText).toHaveBeenCalledWith(
-      253768951,
-      expect.stringContaining("Routing guardrail blocked"),
-      500
-    );
-    expect(sendText.mock.calls.some((call) => call[1] === "Main-loop plain answer.")).toBe(false);
+    expect(sendText).toHaveBeenCalledWith(253768951, "Main-loop plain answer.", 500);
   });
 
-  test("blocks send_text directives for prompts that require subagent routing", async () => {
+  test("executes send_text directives even when the prompt contains routing keywords", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
     const service = new ServiceSupervisor(config, logger);
@@ -386,12 +381,7 @@ describe("service supervisor", () => {
     await service.enqueueUserEvent(userEvent(503, "check my calendar today"));
     await waitForIdle(service);
 
-    expect(sendText).toHaveBeenCalledWith(
-      253768951,
-      expect.stringContaining("Routing guardrail blocked"),
-      503
-    );
-    expect(sendText.mock.calls.some((call) => call[1] === "I checked your calendar.")).toBe(false);
+    expect(sendText).toHaveBeenCalledWith(253768951, "I checked your calendar.", undefined, undefined);
   });
 
   test.each([
@@ -415,7 +405,7 @@ describe("service supervisor", () => {
     expect(sendText).toHaveBeenCalledWith(253768951, "Pong.", 501);
   });
 
-  test("does not guardrail a subagent-routed response for a research prompt", async () => {
+  test("dispatches a subagent when Codex chooses subagent routing for a research prompt", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
     const service = new ServiceSupervisor(config, logger);
@@ -436,7 +426,6 @@ describe("service supervisor", () => {
     await waitForIdle(service);
 
     expect(dispatchFromDirective).toHaveBeenCalled();
-    expect(sendText.mock.calls.map((call) => call[1] as string).some((message) => message.includes("Routing guardrail blocked"))).toBe(false);
     expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("Dispatching subagent: Research routing"), 502);
   });
 });
@@ -520,7 +509,7 @@ describe("incremental directive execution", () => {
 
     // The react directive should fire exactly once despite being in both the
     // pre-execution pass (delta) and visible to the final pass (which skips it
-    // via preExecutedCount).
+    // via the action key).
     expect(reactCallCount).toBe(1);
   });
 

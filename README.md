@@ -51,6 +51,12 @@ email lookup, research, debugging, architecture, multi-step work, ambiguous
 work, and external-data lookup must dispatch a subagent with explicit
 `summary`, `model`, and `effort`.
 
+The service does not enforce this policy by keyword-blocking final main-loop
+replies. The main Codex loop must choose the route up front, then either reply
+directly or emit a `dispatch_subagent` directive. Service-level guardrails are
+reserved for malformed directive blocks, leaked directive fragments, and other
+transport safety cases.
+
 ## Voice Transcription Prompt and Dictionary
 
 Voice and audio transcription can use an OpenAI transcription prompt file for

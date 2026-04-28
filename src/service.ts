@@ -59,30 +59,6 @@ const DEPLOY_ACK_MESSAGE =
 const DEPLOY_DENIED_MESSAGE =
   "Deploy is admin-only. Ask Tim to add you to telegram.allowlist.adminUserIds.";
 const DEPLOY_DRAIN_MS = 30_000;
-const ROUTING_GUARDRAIL_MESSAGE =
-  "⚠️ Routing guardrail blocked a main-loop reply for a task that should be dispatched to a subagent. Please resend the request.";
-const SUBAGENT_ROUTING_PATTERNS = [
-  /\bresearch(?:es|ing)?\b/i,
-  /\binvestigat(?:e|es|ing|ion)\b/i,
-  /\bdebug(?:s|ging)?\b/i,
-  /\bdiagnos(?:e|es|ing|is)\b/i,
-  /\btroubleshoot(?:s|ing)?\b/i,
-  /\breview(?:s|ing)?\b/i,
-  /\baudit(?:s|ing)?\b/i,
-  /\bedit(?:s|ing)?\b/i,
-  /\bimplement(?:s|ing|ation)?\b/i,
-  /\bmodif(?:y|ies|ying)\b/i,
-  /\bpatch(?:es|ing)?\b/i,
-  /\brefactor(?:s|ing)?\b/i,
-  /\barchitect(?:ure|ural|ing)?\b/i,
-  /\banaly[sz](?:e|es|ing)\b/i,
-  /\banalysis\b/i,
-  /\b(?:repo|repository|codebase|working tree|source tree|diff)\b/i,
-  /\b(?:readme|docs?|documentation|markdown|agents\.md)\b/i,
-  /\b(?:calendar|gmail|email|inbox)\b/i,
-  /\b(?:web|internet|online|latest|news|weather|stock|price|external[- ]data)\b/i,
-  /\b(?:look\s*up|lookup|search|google|browse|find)\b.*\b(?:calendar|gmail|email|inbox|web|internet|online|latest|news|weather|stock|price|external[- ]data)\b/i
-];
 
 type QueuedEvent = {
   event: UserEvent;
@@ -138,10 +114,6 @@ export function parseAgentKillCommand(text: string): { isKill: boolean; jobId: s
  */
 export function parseHelpCommand(text: string): boolean {
   return /^help$/i.test(text.trim());
-}
-
-export function telegramPromptRequiresSubagent(text: string): boolean {
-  return SUBAGENT_ROUTING_PATTERNS.some((pattern) => pattern.test(text));
 }
 
 export const HELP_TEXT = `Service commands (handled instantly, bypass Codex):
@@ -469,8 +441,8 @@ export class ServiceSupervisor {
             // and fire streaming-safe actions immediately (fire-and-forget)
             // so react(👀) fires the moment the fence closes rather than
             // waiting for the full turn to complete. User-facing actions wait
-            // for the final routing guardrail because some prompts must
-            // dispatch a subagent instead of completing in the main loop.
+            // for the final pass so malformed or incomplete directive output
+            // can be parsed consistently before anything is sent.
             const parsed = parseDirectives(output);
             parsed.blocks.forEach((block, blockIndex) => {
               block.actions.forEach((action, actionIndex) => {
@@ -508,31 +480,18 @@ export class ServiceSupervisor {
         return;
       }
       const parsed = parseDirectives(output);
-      const blockedMainLoopResponse = this.shouldBlockMainLoopResponse(event, parsed.blocks);
-      if (blockedMainLoopResponse && event.chatId) {
-        await this.telegram.sendText(event.chatId, ROUTING_GUARDRAIL_MESSAGE, event.messageId);
-        this.logger.warn({
-          component: "service",
-          event: "routing_guardrail_blocked_main_loop_response",
-          turnId,
-          chatId: event.chatId,
-          messageId: event.messageId,
-          prompt: event.text.slice(0, 200)
-        }, "blocked main-loop response for subagent-routed prompt");
-      } else {
-        if (parsed.cleanText && event.chatId) {
-          await this.telegram.sendText(event.chatId, parsed.cleanText, event.messageId);
-        }
-        // Final pass: execute any directive actions that were NOT already
-        // pre-executed during streaming. The idempotency key system is an
-        // additional safety net against double-fires.
-        for (let blockIndex = 0; blockIndex < parsed.blocks.length; blockIndex++) {
-          const block = parsed.blocks[blockIndex]!;
-          for (let actionIndex = 0; actionIndex < block.actions.length; actionIndex++) {
-            const action = block.actions[actionIndex]!;
-            const actionKey = this.directiveActionKey(action, blockIndex, actionIndex);
-            if (!preExecutedActions.has(actionKey)) await this.executeDirective(action, event);
-          }
+      if (parsed.cleanText && event.chatId) {
+        await this.telegram.sendText(event.chatId, parsed.cleanText, event.messageId);
+      }
+      // Final pass: execute any directive actions that were NOT already
+      // pre-executed during streaming. The idempotency key system is an
+      // additional safety net against double-fires.
+      for (let blockIndex = 0; blockIndex < parsed.blocks.length; blockIndex++) {
+        const block = parsed.blocks[blockIndex]!;
+        for (let actionIndex = 0; actionIndex < block.actions.length; actionIndex++) {
+          const action = block.actions[actionIndex]!;
+          const actionKey = this.directiveActionKey(action, blockIndex, actionIndex);
+          if (!preExecutedActions.has(actionKey)) await this.executeDirective(action, event);
         }
       }
       for (const error of parsed.errors) {
@@ -600,12 +559,6 @@ export class ServiceSupervisor {
 
   private directiveActionKey(action: DirectiveAction, blockIndex: number, actionIndex: number): string {
     return action.idempotencyKey ? `${action.type}:${action.idempotencyKey}` : `${blockIndex}:${actionIndex}:${action.type}`;
-  }
-
-  private shouldBlockMainLoopResponse(event: UserEvent, blocks: ReturnType<typeof parseDirectives>["blocks"]): boolean {
-    if (event.source !== "telegram") return false;
-    if (!event.text || !telegramPromptRequiresSubagent(event.text)) return false;
-    return !blocks.some((block) => block.actions.some((action) => action.type === "dispatch_subagent"));
   }
 
   private async restartCodex(

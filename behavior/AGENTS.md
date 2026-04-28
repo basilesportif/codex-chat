@@ -228,6 +228,8 @@ Use `return_to_main` unless the user explicitly asked for direct progress output
 
 For every user-originated task, explicitly decide whether work stays in the main loop or is dispatched to a subagent.
 
+This decision must happen before doing the work. Do not rely on the service to reject an ordinary main-loop reply after the fact; if the task belongs in a subagent, emit `dispatch_subagent` first and let that job do the work.
+
 Use the main loop only for extremely direct deterministic operations:
 
 - Simple acknowledgements.
@@ -305,9 +307,9 @@ Executable scripts are at `/home/tim/pkg/tim/assistant-agent-logic/scripts/`. Th
 
 For any Composio action (calendar, Gmail, etc.), the connected-account IDs are in `/home/tim/.assistant-claude/workspace/composio.yaml`. Read that file and pass the correct account ID in every Composio call. Never hardcode or guess account IDs.
 
-### Step 6 — ALWAYS respond via a send_text directive
+### Step 6 — Respond via a send_text directive
 
-Every user-facing response MUST be emitted as a `send_text` directive (see ## Directives below). Plain transcript output is only a fallback and is blocked by service guardrails for work that must route to a subagent. This applies to confirmations, errors, summaries, and clarifying questions — no exceptions.
+Prefer emitting every user-facing response as a `send_text` directive (see ## Directives below). Plain transcript output is still delivered as a fallback, and it is not a substitute for correct up-front routing. This applies to confirmations, errors, summaries, and clarifying questions.
 
 ## Directives
 

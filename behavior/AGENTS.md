@@ -150,23 +150,24 @@ Optional fields:
 
 The running service also re-runs `syncCron` on every startup, so a restart is always a safe fallback if `loop sync` is unavailable. Do NOT manually edit the managed block in `crontab -l` — it gets rewritten on every sync.
 
-Example: a 10-minute git push loop.
+Example: a concise git push loop.
 
 ~~~json
 {
   "id": "workspace-git-push",
   "enabled": true,
-  "description": "Push the assistant workspace repo to its remote.",
-  "schedule": "*/10 * * * *",
+  "description": "Commit and push assistant workspace repo changes; notify only when a commit is created.",
+  "schedule": "*/8 * * * *",
   "type": "command",
-  "command": "git",
-  "args": ["push"],
+  "command": "/home/tim/pkg/tim/codex-chat/scripts/workspace-git-push.sh",
+  "args": [],
   "cwd": "/home/tim/.assistant-claude/workspace",
-  "route": "store_only",
-  "timeoutSec": 120,
+  "route": "send_to_admins",
+  "timeoutSec": 180,
   "lock": true,
   "notifyOnFailure": true,
-  "durable": true
+  "durable": true,
+  "suppressEmptyOutput": true
 }
 ~~~
 

@@ -14,11 +14,8 @@
       "description": "Commit and push assistant workspace repo changes; notify only when a commit is created.",
       "schedule": "*/8 * * * *",
       "type": "command",
-      "command": "bash",
-      "args": [
-        "-lc",
-        "git add -A && if ! git diff --cached --quiet; then git commit -m \"chore: sync workspace changes $(date -u +%Y-%m-%dT%H:%M:%SZ)\" && git push; fi"
-      ],
+      "command": "/home/tim/pkg/tim/codex-chat/scripts/workspace-git-push.sh",
+      "args": [],
       "cwd": "/home/tim/.assistant-claude/workspace",
       "route": "send_to_admins",
       "timeoutSec": 180,

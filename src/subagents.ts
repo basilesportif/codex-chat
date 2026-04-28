@@ -107,6 +107,27 @@ export class SubagentManager {
     return [...this.jobs.values()].sort((a, b) => (b.startedAt ?? "").localeCompare(a.startedAt ?? ""));
   }
 
+  /**
+   * Bulk-add jobs to the in-memory map.
+   * Designed for future disk hydration: callers can load persisted jobs on
+   * startup and inject them here without touching the dispatch/drain path.
+   */
+  addJobs(jobs: SubagentJob[]): void {
+    for (const job of jobs) {
+      this.jobs.set(job.id, job);
+    }
+  }
+
+  /**
+   * Stub for future disk-based job persistence.
+   * When disk support is added, this method will read stored jobs and call
+   * addJobs() so the in-memory map reflects the full historical record.
+   * For now it is a no-op that signals intent via a log line.
+   */
+  loadJobs(): void {
+    this.logger.info({ component: "subagents", event: "load_jobs" }, "loadJobs: in-memory only");
+  }
+
   async cancel(jobId: string): Promise<boolean> {
     const running = this.running.get(jobId);
     if (!running) return false;

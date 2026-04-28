@@ -89,6 +89,46 @@ function parseLogCommand(text: string): { isLog: boolean; lines: number; include
   return { isLog: true, lines, includeRaw };
 }
 
+/**
+ * Parses "agents [N]" / "subagents [N]" commands.
+ * Returns isAgents=true, and optionally the last-N count (0 = default).
+ */
+export function parseAgentsCommand(text: string): { isAgents: boolean; lastN: number } {
+  const match = text.trim().match(/^(?:agents?|subagents?)(?:\s+(\d+))?$/i);
+  if (!match) return { isAgents: false, lastN: 0 };
+  const lastN = match[1] ? Math.min(parseInt(match[1], 10), 200) : 0;
+  return { isAgents: true, lastN };
+}
+
+/**
+ * Parses "agent kill <id>" / "subagent kill <id>" commands.
+ */
+export function parseAgentKillCommand(text: string): { isKill: boolean; jobId: string } {
+  const match = text.trim().match(/^(?:agents?|subagents?)\s+kill\s+(\S+)$/i);
+  if (!match) return { isKill: false, jobId: "" };
+  return { isKill: true, jobId: match[1] as string };
+}
+
+/**
+ * Returns true when the message is a "help" command (service-level).
+ */
+export function parseHelpCommand(text: string): boolean {
+  return /^help$/i.test(text.trim());
+}
+
+export const HELP_TEXT = `Service commands (handled instantly, bypass Codex):
+
+  logs [N]          — last N app-server log lines (default 50)
+  logs raw [N]      — include raw/verbose events
+  introspect [N]    — same as logs
+  agents            — subagent status (running/queued/completed)
+  subagents         — alias for agents
+  agents <N>        — last N completed jobs
+  agent kill <id>   — cancel a subagent by ID prefix
+  help              — this message
+  update / deploy   — pull latest and restart service`;
+
+
 export class ServiceSupervisor {
   readonly state: StateStore;
   readonly behavior: BehaviorPack;
@@ -238,6 +278,22 @@ export class ServiceSupervisor {
         await this.handleDeployCommandEvent(event);
         return;
       }
+      const agentKill = parseAgentKillCommand(event.text);
+      if (agentKill.isKill) {
+        const result = await this.cancelJob(agentKill.jobId);
+        await this.telegram.sendText(event.chatId, result, event.messageId);
+        return;
+      }
+      const agentsCmd = parseAgentsCommand(event.text);
+      if (agentsCmd.isAgents) {
+        const output = this.formatJobsDetailed(agentsCmd.lastN);
+        await this.telegram.sendText(event.chatId, output, event.messageId);
+        return;
+      }
+      if (parseHelpCommand(event.text)) {
+        await this.telegram.sendText(event.chatId, HELP_TEXT, event.messageId);
+        return;
+      }
     }
     const key = event.chatId ? String(event.chatId) : "system";
     if (this.shouldQueueTurn()) {
@@ -290,6 +346,58 @@ export class ServiceSupervisor {
     const jobs = this.subagents.listJobs();
     if (jobs.length === 0) return "No subagent jobs.";
     return jobs.slice(0, 20).map((job) => `${job.id} ${job.status} ${job.profile}${job.startedAt ? ` started=${job.startedAt}` : ""}`).join("\n");
+  }
+
+  formatJobsDetailed(lastN = 0): string {
+    const all = this.subagents.listJobs();
+    const running = all.filter((j) => j.status === "running");
+    const queued = all.filter((j) => j.status === "queued");
+    const completed = all.filter((j) => j.status === "completed" || j.status === "failed" || j.status === "cancelled");
+    const now = Date.now();
+
+    function elapsedSec(iso?: string): number {
+      if (!iso) return 0;
+      return Math.round((now - new Date(iso).getTime()) / 1000);
+    }
+
+    function durationSec(start?: string, end?: string): number {
+      if (!start || !end) return 0;
+      return Math.round((new Date(end).getTime() - new Date(start).getTime()) / 1000);
+    }
+
+    function shortId(id: string): string {
+      return id.slice(0, 6);
+    }
+
+    const lines: string[] = [];
+    lines.push(`Subagents: ${running.length} running, ${queued.length} queued, ${completed.length} completed`);
+
+    if (running.length > 0) {
+      lines.push("\nRunning:");
+      for (const j of running) {
+        lines.push(`  [${shortId(j.id)}] ${j.profile} — ${elapsedSec(j.startedAt)}s`);
+      }
+    }
+
+    if (queued.length > 0) {
+      lines.push("\nQueued:");
+      for (const j of queued) {
+        lines.push(`  [${shortId(j.id)}] ${j.profile}`);
+      }
+    }
+
+    const recentN = lastN > 0 ? lastN : 5;
+    const recent = completed.slice(0, recentN);
+    if (recent.length > 0) {
+      lines.push(`\nRecently completed (last ${recentN}):`);
+      for (const j of recent) {
+        const dur = durationSec(j.startedAt, j.completedAt);
+        const mark = j.status === "completed" ? "✓" : j.status === "failed" ? "✗" : "⊘";
+        lines.push(`  [${shortId(j.id)}] ${j.profile} — done in ${dur}s ${mark}`);
+      }
+    }
+
+    return lines.join("\n");
   }
 
   async cancelJob(jobId: string): Promise<string> {

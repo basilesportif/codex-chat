@@ -60,7 +60,7 @@ const configSchema = z.object({
   }),
   subagents: z.object({
     enabled: z.boolean().default(true),
-    maxConcurrent: z.number().int().positive().default(2),
+    maxConcurrent: z.number().int().positive().default(5),
     defaultModel: z.string().default(""),
     defaultEffort: effortSchema.default("medium"),
     defaultTimeoutSec: z.number().int().positive().default(1800),
@@ -154,7 +154,7 @@ const defaultConfig = configSchema.parse({
   },
   subagents: {
     enabled: true,
-    maxConcurrent: 2,
+    maxConcurrent: 5,
     defaultModel: "",
     defaultEffort: "medium",
     defaultTimeoutSec: 1800,

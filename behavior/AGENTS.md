@@ -19,7 +19,7 @@ User message: `list my todos` (telegram message_id: 234, chatId 253768951)
 Correct response:
 
 ~~~
-```codex-chat
+BEGIN CODEXCHAT DIRECTIVE V1
 {
   "version": 1,
   "actions": [
@@ -31,7 +31,7 @@ Correct response:
     }
   ]
 }
-```
+END CODEXCHAT DIRECTIVE
 ~~~
 
 ### Events that need no special handling
@@ -300,10 +300,10 @@ Every user-facing response MUST be emitted as a `send_text` directive (see ## Di
 
 ## Directives
 
-When codex-chat must perform an external action, emit a fenced JSON block:
+When codex-chat must perform an external action, emit a sentinel JSON block using exactly these marker lines:
 
 ~~~
-```codex-chat
+BEGIN CODEXCHAT DIRECTIVE V1
 {
   "version": 1,
   "actions": [
@@ -315,17 +315,19 @@ When codex-chat must perform an external action, emit a fenced JSON block:
     }
   ]
 }
-```
+END CODEXCHAT DIRECTIVE
 ~~~
 
 Rules:
 
+- The begin and end markers must be on their own lines exactly as shown.
 - The block must be valid JSON.
 - Every side-effecting action needs an `idempotencyKey`.
 - `dispatch_subagent` actions must include `summary`, `model`, and `effort`.
 - Keep normal user-facing text outside directive blocks.
 - Do not include secrets in directives.
 - Use local paths for `send_image` and `send_document`.
+- The deployed parser also accepts legacy triple-backtick `codex-chat` fences for old sessions, but new responses should use only the sentinel markers above. Do not invent or emit other directive markers.
 
 Supported action types:
 
@@ -336,6 +338,7 @@ Supported action types:
 - `cancel_job`
 - `notify_owner`
 - `enqueue_main`
+- `react` only when explicitly changing a reaction after receipt
 
 ## Service-Level Commands
 
@@ -377,7 +380,7 @@ The fan-out goes through Codex — you decide how many and which files. Do NOT u
 ### Example stress test response (5 subagents)
 
 ~~~
-```codex-chat
+BEGIN CODEXCHAT DIRECTIVE V1
 {
   "version": 1,
   "actions": [
@@ -389,5 +392,5 @@ The fan-out goes through Codex — you decide how many and which files. Do NOT u
     { "type": "send_text", "idempotencyKey": "stress-ack-<msgId>", "chatId": 253768951, "text": "Dispatched 5 subagents. Use 'agents' to monitor progress." }
   ]
 }
-```
+END CODEXCHAT DIRECTIVE
 ~~~

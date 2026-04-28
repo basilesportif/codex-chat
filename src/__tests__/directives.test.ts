@@ -36,6 +36,21 @@ After`);
     }
   });
 
+  test("accepts a line-delimited sentinel directive block", () => {
+    const parsed = parseDirectives(`Before
+
+BEGIN CODEXCHAT DIRECTIVE V1
+{"version":1,"actions":[{"type":"send_text","idempotencyKey":"sentinel-1","text":"Hello"}]}
+END CODEXCHAT DIRECTIVE
+
+After`);
+
+    expect(parsed.errors).toEqual([]);
+    expect(parsed.blocks).toHaveLength(1);
+    expect(parsed.blocks[0]?.actions[0]?.type).toBe("send_text");
+    expect(parsed.cleanText).toBe("Before\n\n\nAfter");
+  });
+
   test("reports invalid directives without throwing", () => {
     const parsed = parseDirectives(`Visible
 
@@ -45,6 +60,31 @@ After`);
 
     expect(parsed.blocks).toEqual([]);
     expect(parsed.errors).toHaveLength(1);
+    expect(parsed.cleanText).toBe("Visible");
+  });
+
+  test("reports invalid sentinel directives without leaking raw fragments", () => {
+    const parsed = parseDirectives(`Visible
+
+BEGIN CODEXCHAT DIRECTIVE V1
+{ "version": 1, "actions": [] }
+END CODEXCHAT DIRECTIVE`);
+
+    expect(parsed.blocks).toEqual([]);
+    expect(parsed.errors).toHaveLength(1);
+    expect(parsed.cleanText).toBe("Visible");
+    expect(parsed.cleanText).not.toContain("BEGIN CODEXCHAT");
+    expect(parsed.cleanText).not.toContain("\"actions\"");
+  });
+
+  test("strips unterminated sentinel fragments from user-facing text", () => {
+    const parsed = parseDirectives(`Visible
+
+BEGIN CODEXCHAT DIRECTIVE V1
+{"version":1,"actions":[`);
+
+    expect(parsed.blocks).toEqual([]);
+    expect(parsed.errors).toEqual(["Unterminated codex-chat sentinel directive block"]);
     expect(parsed.cleanText).toBe("Visible");
   });
 
@@ -83,6 +123,26 @@ Two
     expect(parsed.blocks.flatMap((block) => block.actions.map((action) => action.type))).toEqual(["notify_owner", "send_text"]);
   });
 
+  test("extracts multiple mixed sentinel and fenced directives in order", () => {
+    const parsed = parseDirectives(`One
+BEGIN CODEXCHAT DIRECTIVE V1
+{"version":1,"actions":[{"type":"notify_owner","idempotencyKey":"ops-sentinel","text":"Heads up"}]}
+END CODEXCHAT DIRECTIVE
+Two
+\`\`\`codex-chat
+{"version":1,"actions":[{"type":"send_text","idempotencyKey":"send-fence","text":"Hello"}]}
+\`\`\`
+Three
+BEGIN CODEXCHAT DIRECTIVE V1
+{"version":1,"actions":[{"type":"react","idempotencyKey":"react-sentinel","messageId":7,"emoji":"👀"}]}
+END CODEXCHAT DIRECTIVE`);
+
+    expect(parsed.errors).toEqual([]);
+    expect(parsed.blocks).toHaveLength(3);
+    expect(parsed.blocks.flatMap((block) => block.actions.map((action) => action.type))).toEqual(["notify_owner", "send_text", "react"]);
+    expect(parsed.cleanText).toBe("One\nTwo\n\nThree");
+  });
+
   test("rejects unknown directive types", () => {
     // get_logs was removed from the schema — it is now handled at the service
     // level before Codex ever sees the message. Any directive block emitted by
@@ -103,6 +163,21 @@ And this`);
 
     expect(parsed.cleanText).toBe("Keep this\n\nAnd this");
     expect(parsed.cleanText).not.toContain("codex-chat");
+  });
+
+  test("preserves normal Markdown code fences", () => {
+    const markdown = `Here is an example:
+\`\`\`text
+BEGIN CODEXCHAT DIRECTIVE V1
+{"version":1,"actions":[{"type":"send_text","idempotencyKey":"example","text":"not a directive"}]}
+END CODEXCHAT DIRECTIVE
+\`\`\`
+Done`;
+    const parsed = parseDirectives(markdown);
+
+    expect(parsed.blocks).toEqual([]);
+    expect(parsed.errors).toEqual([]);
+    expect(parsed.cleanText).toBe(markdown);
   });
 });
 

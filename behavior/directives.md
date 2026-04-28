@@ -31,6 +31,7 @@ Common examples:
       "profile": "debugger",
       "prompt": "Investigate the monitor context at data/logs/monitors/web/context.log",
       "route": "return_to_main",
+      "summary": "Investigate web monitor error",
       "timeoutSec": 1800,
       "model": "gpt-5.5",
       "effort": "high"
@@ -38,3 +39,5 @@ Common examples:
   ]
 }
 ```
+
+For `dispatch_subagent`, callers should set `summary`, `model`, and `effort` explicitly. The service sends a visible dispatch status with those values and records them on the subagent job so `agents` / `subagents` output shows which model and effort were used.

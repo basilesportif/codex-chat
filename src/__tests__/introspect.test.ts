@@ -133,6 +133,38 @@ describe("HELP_TEXT", () => {
   });
 });
 
+
+describe("dispatch_subagent status", () => {
+  test("sends model and effort status before dispatch", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    const sendText = vi.fn().mockResolvedValue(undefined);
+    const dispatchFromDirective = vi.fn().mockResolvedValue("job_123");
+    (service as unknown as { telegram: { sendText: typeof sendText } }).telegram.sendText = sendText;
+    (service as unknown as { subagents: { dispatchFromDirective: typeof dispatchFromDirective } }).subagents.dispatchFromDirective = dispatchFromDirective;
+
+    await (service as unknown as { executeDirective(action: unknown, origin: unknown): Promise<void> }).executeDirective(
+      {
+        type: "dispatch_subagent",
+        idempotencyKey: "dispatch-status-test",
+        profile: "researcher",
+        route: "return_to_main",
+        summary: "inspect routing",
+        prompt: "Inspect routing behavior",
+        model: "gpt-5.5",
+        effort: "high"
+      },
+      { source: "telegram", text: "x", attachments: [], receivedAt: new Date().toISOString(), chatId: 123, messageId: 456 }
+    );
+
+    expect(sendText).toHaveBeenCalledWith(123, expect.stringContaining("Dispatching subagent: inspect routing"), 456);
+    expect(sendText.mock.calls[0]?.[1]).toContain("model: gpt-5.5");
+    expect(sendText.mock.calls[0]?.[1]).toContain("effort: high");
+    expect(dispatchFromDirective).toHaveBeenCalled();
+  });
+});
+
 // ---------------------------------------------------------------------------
 // formatJobsDetailed
 // ---------------------------------------------------------------------------
@@ -195,8 +227,8 @@ describe("formatJobsDetailed", () => {
     const now = new Date().toISOString();
     const past = new Date(Date.now() - 30_000).toISOString();
     const jobs: SubagentJob[] = [
-      { id: "job_abc123def", profile: "researcher", route: "return_to_main", status: "running", promptPath: "/tmp/p", artifactDir: "/tmp/a", startedAt: now },
-      { id: "job_ghi789jkl", profile: "debugger", route: "return_to_main", status: "completed", promptPath: "/tmp/p", artifactDir: "/tmp/a", startedAt: past, completedAt: now },
+      { id: "job_abc123def", profile: "researcher", route: "return_to_main", status: "running", promptPath: "/tmp/p", artifactDir: "/tmp/a", startedAt: now, model: "gpt-5.5", effort: "high", summary: "research task" },
+      { id: "job_ghi789jkl", profile: "debugger", route: "return_to_main", status: "completed", promptPath: "/tmp/p", artifactDir: "/tmp/a", startedAt: past, completedAt: now, model: "gpt-5.5", effort: "xhigh", summary: "debug task" },
     ];
     (service as unknown as { subagents: { listJobs(): SubagentJob[] } }).subagents.listJobs = () => jobs;
     const result = (service as unknown as { formatJobsDetailed(n: number): string }).formatJobsDetailed(0);
@@ -206,6 +238,9 @@ describe("formatJobsDetailed", () => {
     expect(result).toContain("researcher");
     expect(result).toContain("[job_gh]");
     expect(result).toContain("debugger");
+    expect(result).toContain("model=gpt-5.5");
+    expect(result).toContain("effort=xhigh");
+    expect(result).toContain("research task");
     expect(result).toContain("✓");
   });
 

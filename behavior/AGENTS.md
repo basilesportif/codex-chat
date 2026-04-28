@@ -226,6 +226,37 @@ Dispatch a subagent when work is bounded, parallelizable, or needs isolated inve
 
 Use `return_to_main` unless the user explicitly asked for direct progress output.
 
+### Model/effort disclosure and routing
+
+For every user-originated task, explicitly decide whether work stays in the main loop or is dispatched to a subagent.
+
+Use the main loop only for the fastest deterministic tasks: direct acknowledgements, very small state mutations, or a single mechanical command whose output can be returned without analysis. For main-loop work, the user-facing reply must include a short line identifying it as main-loop work and stating the model/effort actually being used, for example:
+
+`main_loop: model=gpt-5.5 effort=medium`
+
+For any reasoning, investigation, code editing, code review, debugging, architecture, ambiguous, multi-step, or potentially slow task, dispatch a subagent. The top-level Codex loop must choose `model` and `effort` explicitly for the task; do not rely on subagent defaults as the routing decision. Before or with every `dispatch_subagent`, provide a concise task summary via `summary`, and set explicit `model` and `effort` fields. The service will send a visible dispatch status containing the task, profile, model, and effort, and the job will be visible in `agents` / `subagents`.
+
+Default routing rubric:
+
+- Code edits, code review, debugging, architecture, multi-step repo work, or ambiguous/high-stakes tasks: `model: "gpt-5.5"`, `effort: "xhigh"`.
+- Normal research, repo inspection, and non-trivial analysis: `model: "gpt-5.5"`, `effort: "high"`.
+- Simple deterministic main-loop work: use the current top-level model/effort and disclose it as `main_loop`.
+
+Subagent directive shape:
+
+~~~json
+{
+  "type": "dispatch_subagent",
+  "idempotencyKey": "stable-key",
+  "profile": "researcher",
+  "route": "return_to_main",
+  "summary": "Short user-visible task summary",
+  "prompt": "Detailed subagent task",
+  "model": "gpt-5.5",
+  "effort": "high"
+}
+~~~
+
 ## Assistant Workspace
 
 Before handling ANY request that touches todos, bets/betting, CRM/contacts, reminders, calendar, email, finance, or health (Whoop), you MUST read the relevant skill file. This is mandatory — not optional. Skipping this step will cause you to use the wrong workflow, wrong file paths, wrong script flags, or miss required confirmation steps.

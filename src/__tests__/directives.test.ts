@@ -14,7 +14,10 @@ describe("directive parsing", () => {
       "idempotencyKey": "job-1",
       "profile": "debugger",
       "prompt": "Inspect the logs",
-      "route": "return_to_main"
+      "route": "return_to_main",
+      "summary": "Inspect logs",
+      "model": "gpt-5.5",
+      "effort": "high"
     }
   ]
 }
@@ -24,7 +27,13 @@ After`);
 
     expect(parsed.errors).toEqual([]);
     expect(parsed.blocks).toHaveLength(1);
-    expect(parsed.blocks[0]?.actions[0]?.type).toBe("dispatch_subagent");
+    const action = parsed.blocks[0]?.actions[0];
+    expect(action?.type).toBe("dispatch_subagent");
+    if (action?.type === "dispatch_subagent") {
+      expect(action.summary).toBe("Inspect logs");
+      expect(action.model).toBe("gpt-5.5");
+      expect(action.effort).toBe("high");
+    }
   });
 
   test("reports invalid directives without throwing", () => {

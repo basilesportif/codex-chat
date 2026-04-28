@@ -80,6 +80,9 @@ export interface SubagentJob {
   status: "queued" | "running" | "completed" | "failed" | "cancelled";
   promptPath: string;
   artifactDir: string;
+  model?: string;
+  effort?: string;
+  summary?: string;
   startedAt?: string;
   completedAt?: string;
   exitCode?: number | null;

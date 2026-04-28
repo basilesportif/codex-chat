@@ -39,6 +39,7 @@ const dispatchSubagentAction = baseAction.extend({
   prompt: z.string().min(1),
   route: routeSchema.default("return_to_main"),
   timeoutSec: z.number().int().positive().optional(),
+  summary: z.string().min(1).optional(),
   model: z.string().optional(),
   effort: z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]).optional(),
   images: z.array(z.string()).optional()

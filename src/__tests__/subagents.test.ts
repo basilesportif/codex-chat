@@ -110,6 +110,34 @@ describe("subagents", () => {
     expect(spawn.mock.calls.length).toBeLessThanOrEqual(2);
   });
 
+
+  test("stores selected model, effort, and summary on queued job", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
+    tempDirs.push(root);
+    const spawn = vi.fn(() => fakeChild());
+    vi.doMock("node:child_process", async () => {
+      const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+      return { ...actual, spawn };
+    });
+    const { SubagentManager } = await import("../subagents.js");
+    const config = makeConfig(root, 0);
+    const behavior = { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") };
+    const state = { saveJob: vi.fn().mockResolvedValue(undefined) };
+    const manager = new SubagentManager(
+      config,
+      behavior as never,
+      state as never,
+      fakeLogger() as never,
+      { onReturnToMain: vi.fn(), onSendToUser: vi.fn() }
+    );
+
+    await manager.dispatch({ profile: "x", prompt: "a", route: "return_to_main", model: "gpt-5.5", effort: "xhigh", summary: "test task" });
+
+    const saved = state.saveJob.mock.calls[0]?.[0];
+    expect(saved).toMatchObject({ model: "gpt-5.5", effort: "xhigh", summary: "test task", status: "queued" });
+    expect(manager.listJobs()[0]).toMatchObject({ model: "gpt-5.5", effort: "xhigh", summary: "test task" });
+  });
+
   test("rejects new dispatch when queue depth is exhausted", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
     tempDirs.push(root);

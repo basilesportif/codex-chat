@@ -345,7 +345,7 @@ export class ServiceSupervisor {
   formatJobs(): string {
     const jobs = this.subagents.listJobs();
     if (jobs.length === 0) return "No subagent jobs.";
-    return jobs.slice(0, 20).map((job) => `${job.id} ${job.status} ${job.profile}${job.startedAt ? ` started=${job.startedAt}` : ""}`).join("\n");
+    return jobs.slice(0, 20).map((job) => `${job.id} ${job.status} ${job.profile}${this.formatJobModelEffort(job)}${job.startedAt ? ` started=${job.startedAt}` : ""}`).join("\n");
   }
 
   formatJobsDetailed(lastN = 0): string {
@@ -375,14 +375,14 @@ export class ServiceSupervisor {
     if (running.length > 0) {
       lines.push("\nRunning:");
       for (const j of running) {
-        lines.push(`  [${shortId(j.id)}] ${j.profile} — ${elapsedSec(j.startedAt)}s`);
+        lines.push(`  [${shortId(j.id)}] ${j.profile}${this.formatJobModelEffort(j)} — ${elapsedSec(j.startedAt)}s${j.summary ? ` — ${j.summary}` : ""}`);
       }
     }
 
     if (queued.length > 0) {
       lines.push("\nQueued:");
       for (const j of queued) {
-        lines.push(`  [${shortId(j.id)}] ${j.profile}`);
+        lines.push(`  [${shortId(j.id)}] ${j.profile}${this.formatJobModelEffort(j)}${j.summary ? ` — ${j.summary}` : ""}`);
       }
     }
 
@@ -393,11 +393,23 @@ export class ServiceSupervisor {
       for (const j of recent) {
         const dur = durationSec(j.startedAt, j.completedAt);
         const mark = j.status === "completed" ? "✓" : j.status === "failed" ? "✗" : "⊘";
-        lines.push(`  [${shortId(j.id)}] ${j.profile} — done in ${dur}s ${mark}`);
+        lines.push(`  [${shortId(j.id)}] ${j.profile}${this.formatJobModelEffort(j)} — done in ${dur}s ${mark}${j.summary ? ` — ${j.summary}` : ""}`);
       }
     }
 
     return lines.join("\n");
+  }
+
+  private formatJobModelEffort(job: SubagentJob): string {
+    const parts = [job.model ? `model=${job.model}` : "", job.effort ? `effort=${job.effort}` : ""].filter(Boolean);
+    return parts.length > 0 ? ` (${parts.join(" ")})` : "";
+  }
+
+  private formatDispatchSummary(action: Extract<DirectiveAction, { type: "dispatch_subagent" }>): string {
+    const summary = action.summary ?? action.prompt.split("\n").find((line) => line.trim())?.trim().slice(0, 160) ?? action.profile;
+    const model = action.model || this.subagents.resolveModel(action.model);
+    const effort = action.effort || this.subagents.resolveEffort(action.effort);
+    return [`Dispatching subagent: ${summary}`, `profile: ${action.profile}`, `model: ${model}`, `effort: ${effort}`].join("\n");
   }
 
   async cancelJob(jobId: string): Promise<string> {
@@ -512,6 +524,9 @@ export class ServiceSupervisor {
       if (action.type === "send_image") await this.telegram.sendImage(action.chatId ?? this.requireChat(defaultChatId), action);
       if (action.type === "send_document") await this.telegram.sendDocument(action.chatId ?? this.requireChat(defaultChatId), action);
       if (action.type === "dispatch_subagent") {
+        if (origin.chatId) {
+          await this.telegram.sendText(origin.chatId, this.formatDispatchSummary(action), origin.messageId);
+        }
         await this.subagents.dispatchFromDirective(action, { chatId: origin.chatId, messageId: origin.messageId });
       }
       if (action.type === "cancel_job") await this.subagents.cancel(action.jobId);

@@ -20,6 +20,7 @@ interface DispatchInput {
   timeoutSec?: number;
   model?: string;
   effort?: string;
+  summary?: string;
   images?: string[];
   originChatId?: number;
   originMessageId?: number;
@@ -64,6 +65,7 @@ export class SubagentManager {
       timeoutSec: action.timeoutSec,
       model: action.model,
       effort: action.effort,
+      summary: action.summary,
       images: action.images,
       originChatId: origin?.chatId,
       originMessageId: origin?.messageId
@@ -86,6 +88,8 @@ export class SubagentManager {
     }
     input.id = makeId("job");
     const artifactDir = resolveConfigPath(this.config, join(this.config.subagents.artifactDir, input.id));
+    const model = this.resolveModel(input.model);
+    const effort = this.resolveEffort(input.effort);
     const queuedJob: SubagentJob = {
       id: input.id,
       profile: input.profile,
@@ -93,6 +97,9 @@ export class SubagentManager {
       status: "queued",
       promptPath: join(artifactDir, "prompt.md"),
       artifactDir,
+      model,
+      effort,
+      summary: input.summary,
       originChatId: input.originChatId,
       originMessageId: input.originMessageId
     };
@@ -202,6 +209,8 @@ export class SubagentManager {
     const stdoutPath = join(artifactDir, "events.jsonl");
     const stderrPath = join(artifactDir, "stderr.log");
     const timeoutSec = Math.min(input.timeoutSec ?? this.config.subagents.defaultTimeoutSec, this.config.subagents.maxTimeoutSec);
+    const model = this.resolveModel(input.model);
+    const effort = this.resolveEffort(input.effort);
     const job: SubagentJob = {
       id,
       profile: input.profile,
@@ -211,13 +220,16 @@ export class SubagentManager {
       artifactDir,
       startedAt: nowIso(),
       lastMessagePath,
+      model,
+      effort,
+      summary: input.summary,
       originChatId: input.originChatId,
       originMessageId: input.originMessageId
     };
     this.jobs.set(id, job);
     await this.state.saveJob(job);
 
-    const args = this.buildArgs(lastMessagePath, input.model, input.effort, input.images ?? []);
+    const args = this.buildArgs(lastMessagePath, model, effort, input.images ?? []);
     this.logger.info({ component: "subagents", event: "start", jobId: id, profile: input.profile, args }, "starting subagent");
     const { OPENAI_API_KEY: _omit, ...safeEnv } = process.env;
     const child = spawn(this.config.codex.binary, args, {
@@ -269,6 +281,14 @@ export class SubagentManager {
     void this.drain();
   }
 
+  resolveModel(model?: string): string {
+    return model || this.config.subagents.defaultModel || this.config.codex.model;
+  }
+
+  resolveEffort(effort?: string): string {
+    return effort || this.config.subagents.defaultEffort;
+  }
+
   private buildArgs(lastMessagePath: string, model?: string, effort?: string, images: string[] = []): string[] {
     const args = [
       "exec",
@@ -286,8 +306,8 @@ export class SubagentManager {
       if (/^\s*model_reasoning_effort\s*=/.test(item)) continue;
       args.push("-c", item);
     }
-    args.push("-c", `model_reasoning_effort="${effort || this.config.subagents.defaultEffort}"`);
-    const selectedModel = model || this.config.subagents.defaultModel || this.config.codex.model;
+    args.push("-c", `model_reasoning_effort="${this.resolveEffort(effort)}"`);
+    const selectedModel = this.resolveModel(model);
     if (selectedModel) args.push("--model", selectedModel);
     if (this.config.codex.profile) args.push("--profile", this.config.codex.profile);
     for (const image of images) args.push("--image", image);

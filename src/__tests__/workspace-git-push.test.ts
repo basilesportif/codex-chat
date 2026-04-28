@@ -75,4 +75,36 @@ describe("workspace git push script", () => {
     expect(status.stdout).toBe("");
     expect(head.stdout).toBe(remoteHead.stdout);
   });
+
+  test("pulls remote changes before committing local dirty worktree changes", async () => {
+    const workspace = await setupWorkspace();
+    const root = join(workspace, "..");
+    const external = join(root, "external");
+
+    await run("git", ["clone", "-b", "main", join(root, "origin.git"), external], root);
+    await run("git", ["config", "user.name", "External User"], external);
+    await run("git", ["config", "user.email", "external@example.com"], external);
+    await mkdir(join(external, "assistant-agent-data"));
+    await writeFile(join(external, "assistant-agent-data", "dictionary.txt"), "remote\n");
+    await run("git", ["add", "assistant-agent-data/dictionary.txt"], external);
+    await run("git", ["commit", "-m", "external dictionary update"], external);
+    await run("git", ["push", "origin", "main"], external);
+
+    await writeFile(join(workspace, "README.md"), "initial\nlocal\n");
+    await writeFile(join(workspace, "local-notes.txt"), "local\n");
+
+    const result = await run(scriptPath, [], workspace);
+    const status = await run("git", ["status", "--short"], workspace);
+    const log = await run("git", ["log", "--format=%s", "-2"], workspace);
+    const remoteFile = await run("git", ["show", "HEAD~1:assistant-agent-data/dictionary.txt"], workspace);
+
+    expect(result.stdout).toMatch(/^workspace-git-push ran: committed and pushed 2 files? changed, 2 insertions\(\+\)\n$/);
+    expect(result.stderr).toBe("");
+    expect(status.stdout).toBe("");
+    expect(log.stdout.split("\n").filter(Boolean)).toEqual([
+      expect.stringMatching(/^chore: sync workspace changes /),
+      "external dictionary update"
+    ]);
+    expect(remoteFile.stdout).toBe("remote\n");
+  });
 });

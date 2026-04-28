@@ -3,7 +3,7 @@ import { writeFile } from "node:fs/promises";
 import { AppConfig, resolveConfigPath } from "./config.js";
 import { StateStore } from "./state.js";
 import { Attachment } from "./types.js";
-import { atomicWriteText, ensureDir, fileSize, isInsidePath, nowIso, sha256Buffer } from "./util.js";
+import { ensureDir, isInsidePath, nowIso, sha256Buffer } from "./util.js";
 
 const mimeExtensions: Record<string, string> = {
   "image/jpeg": ".jpg",
@@ -75,11 +75,6 @@ export class FileStore {
     return attachment;
   }
 
-  async writeArtifact(rel: string, content: string): Promise<string> {
-    const destination = join(this.artifactRoot, rel);
-    await atomicWriteText(destination, content);
-    return destination;
-  }
 
   validateSendPath(path: string): string {
     const resolved = resolve(path);
@@ -89,10 +84,6 @@ export class FileStore {
     return resolved;
   }
 
-  async fileInfo(path: string): Promise<{ path: string; sizeBytes: number }> {
-    const resolved = this.validateSendPath(path);
-    return { path: resolved, sizeBytes: await fileSize(resolved) };
-  }
 
   private chooseExtension(mimeType?: string, originalName?: string): string {
     if (originalName) {

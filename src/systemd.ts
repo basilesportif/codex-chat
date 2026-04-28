@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { rm, writeFile } from "node:fs/promises";
 import { AppConfig } from "./config.js";
 import { ensureDir, pathExists } from "./util.js";
 
@@ -56,11 +56,6 @@ export async function uninstallUserService(): Promise<void> {
   await runSystemctl(["--user", "daemon-reload"]).catch(() => undefined);
 }
 
-export async function readUserService(): Promise<string | undefined> {
-  const unitPath = join(homedir(), ".config/systemd/user/codex-chat.service");
-  if (!(await pathExists(unitPath))) return undefined;
-  return readFile(unitPath, "utf8");
-}
 
 function runSystemctl(args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {

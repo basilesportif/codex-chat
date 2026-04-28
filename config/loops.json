@@ -12,7 +12,7 @@
       "id": "workspace-git-push",
       "enabled": true,
       "description": "Commit and push assistant workspace repo changes; notify only when a commit is created.",
-      "schedule": "* * * * *",
+      "schedule": "*/8 * * * *",
       "type": "command",
       "command": "bash",
       "args": [

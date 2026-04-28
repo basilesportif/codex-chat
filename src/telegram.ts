@@ -91,6 +91,24 @@ export class TelegramGateway {
     }
   }
 
+  /**
+   * Send a Telegram chat action (e.g. "typing") so the user sees an instant
+   * indicator that we received their message and are working on a reply.
+   * Telegram displays the action for ~5 seconds or until the next message,
+   * whichever comes first. Failures are logged but never thrown — this is a
+   * best-effort UX hint, not a critical send. Disabled when
+   * telegram.sendProgressUpdates is false.
+   */
+  async sendChatAction(chatId: number, action: "typing" | "upload_photo" | "upload_document" = "typing"): Promise<void> {
+    if (!this.bot) return;
+    if (!this.config.telegram.sendProgressUpdates) return;
+    try {
+      await this.bot.api.sendChatAction(chatId, action);
+    } catch (error) {
+      this.logger.warn({ component: "telegram", event: "chat_action_failed", chatId, action, error }, "sendChatAction failed");
+    }
+  }
+
   async sendImage(chatId: number, input: { path?: string; fileId?: string; caption?: string; asDocument?: boolean; replyToMessageId?: number }): Promise<void> {
     if (!this.bot) throw new Error("Telegram bot is not started");
     const media = input.fileId ?? new InputFile(this.files.validateSendPath(input.path ?? ""));
@@ -181,6 +199,10 @@ export class TelegramGateway {
     }
     const message = ctx.message;
     if (!message || !ctx.from || !ctx.chat) return;
+    // Fire-and-forget typing indicator so the user sees instant feedback
+    // before Codex even starts processing. Independent of any
+    // Codex-emitted ack — we always want some immediate signal of receipt.
+    void this.sendChatAction(ctx.chat.id, "typing");
     const attachments: Attachment[] = [];
     let text = "text" in message && typeof message.text === "string" ? message.text : "";
     if ("caption" in message && typeof message.caption === "string") text = message.caption;

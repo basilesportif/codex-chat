@@ -250,6 +250,24 @@ export class ServiceSupervisor {
       turnClosed = true;
     };
     await this.state.writeJson(`turns/${turnId}.json`, { id: turnId, status: "running", input: event, startedAt: nowIso() });
+    // Keep a "typing..." indicator visible to the user for the entire duration
+    // of the Codex turn so they always know we received the message and are
+    // working on it. Telegram clears the typing action after ~5s, so we refresh
+    // it on a short interval. The first call happens synchronously below so
+    // even queued and synthetic-with-chat events get an instant indicator.
+    let typingInterval: ReturnType<typeof setInterval> | undefined;
+    if (event.chatId) {
+      void this.telegram.sendChatAction(event.chatId, "typing");
+      typingInterval = setInterval(() => {
+        if (event.chatId) void this.telegram.sendChatAction(event.chatId, "typing");
+      }, 4_000);
+    }
+    const stopTyping = (): void => {
+      if (typingInterval) {
+        clearInterval(typingInterval);
+        typingInterval = undefined;
+      }
+    };
     try {
       await this.removePersistedQueuedEvent(event);
       let output = "";
@@ -298,6 +316,7 @@ export class ServiceSupervisor {
       }
       throw error;
     } finally {
+      stopTyping();
       await this.removePersistedQueuedEvent(event);
     }
   }

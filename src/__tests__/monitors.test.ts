@@ -43,7 +43,7 @@ describe("monitors config", () => {
         patterns: [{
           id: "error",
           regex: "Error",
-          action: { type: "send_to_main" }
+          action: { type: "dispatch_subagent", model: "gpt-5.4", effort: "high" }
         }]
       }]
     });
@@ -51,7 +51,9 @@ describe("monitors config", () => {
     const parsed = await loadMonitorsConfig(config);
 
     expect(parsed.monitors).toHaveLength(1);
-    expect(parsed.monitors[0]?.patterns[0]?.action.type).toBe("send_to_main");
+    expect(parsed.monitors[0]?.patterns[0]?.action.type).toBe("dispatch_subagent");
+    expect(parsed.monitors[0]?.patterns[0]?.action.model).toBe("gpt-5.4");
+    expect(parsed.monitors[0]?.patterns[0]?.action.effort).toBe("high");
   });
 
   test("enforces required monitor fields", async () => {

@@ -27,7 +27,7 @@ keepAliveSec = 60
 extraConfig = [
   "model_reasoning_effort=\"medium\""
 ]
-addDirs = ["/home/tim/pkg/tim/assistant-claude"]
+addDirs = ["/home/tim/pkg/tim/assistant-agent-logic"]
 
 [telegram]
 mode = "polling"

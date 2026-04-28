@@ -42,13 +42,17 @@ describe("loops config", () => {
         enabled: true,
         schedule: "15 9 * * *",
         type: "prompt",
-        prompt: "Summarize the day"
+        prompt: "Summarize the day",
+        model: "gpt-5.4",
+        effort: "high"
       }]
     });
 
     const loops = await loadLoopsConfig(config);
 
     expect(loops.loops[0]?.id).toBe("daily");
+    expect(loops.loops[0]?.model).toBe("gpt-5.4");
+    expect(loops.loops[0]?.effort).toBe("high");
     expect(loops.defaults.route).toBe("return_to_main");
   });
 

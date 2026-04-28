@@ -1,6 +1,6 @@
 # Assistant Skills
 
-The assistant-claude repo will be cloned at `/home/tim/pkg/tim/assistant-claude` (see docs/ASSISTANT_INTEGRATION_PLAN.md for setup). The workspace data lives at `/home/tim/.assistant-claude/workspace/`.
+The assistant-agent-logic repo will be cloned at `/home/tim/pkg/tim/assistant-agent-logic` (see docs/ASSISTANT_INTEGRATION_PLAN.md for setup). The workspace data lives at `/home/tim/.assistant-claude/workspace/`.
 
 Scripts require env vars from `/home/tim/.assistant-claude/workspace/.env`. Always prefix script runs with:
 
@@ -12,14 +12,14 @@ set -a && source /home/tim/.assistant-claude/workspace/.env && set +a
 
 Run these with `node <path>` from any directory:
 
-- **Todos**: `node /home/tim/pkg/tim/assistant-claude/scripts/todo-list.js` — list todos; `scripts/todo-add.js`, `scripts/todo-complete.js`
-- **Reminders**: `node /home/tim/pkg/tim/assistant-claude/scripts/reminder-check.js` — check due reminders; `scripts/reminder-add.js`
-- **Calendar**: `node /home/tim/pkg/tim/assistant-claude/scripts/calendar-today.js` — today's events; `scripts/calendar-week.js`
-- **Email**: `node /home/tim/pkg/tim/assistant-claude/scripts/email-actionable.js` — actionable emails across providers
+- **Todos**: `node /home/tim/pkg/tim/assistant-agent-logic/scripts/todo-list.js` — list todos; `scripts/todo-add.js`, `scripts/todo-complete.js`
+- **Reminders**: `node /home/tim/pkg/tim/assistant-agent-logic/scripts/reminder-check.js` — check due reminders; `scripts/reminder-add.js`
+- **Calendar**: `node /home/tim/pkg/tim/assistant-agent-logic/scripts/calendar-today.js` — today's events; `scripts/calendar-week.js`
+- **Email**: `node /home/tim/pkg/tim/assistant-agent-logic/scripts/email-actionable.js` — actionable emails across providers
 - **CRM**: data at `~/.assistant-claude/workspace/data/crm.json`; read and write directly via JSON
 - **Betting**: data at `~/.assistant-claude/workspace/data/bets.json`; read and write directly via JSON
-- **Finance**: `node /home/tim/pkg/tim/assistant-claude/scripts/finance-balances.js`
-- **Whoop**: `node /home/tim/pkg/tim/assistant-claude/scripts/whoop-today.js`
+- **Finance**: `node /home/tim/pkg/tim/assistant-agent-logic/scripts/finance-balances.js`
+- **Whoop**: `node /home/tim/pkg/tim/assistant-agent-logic/scripts/whoop-today.js`
 
 ## Data Files
 
@@ -41,7 +41,7 @@ cd ~/.assistant-claude/workspace && git add -A && git commit -m "update" && git 
 
 ## Skill Docs
 
-Full documentation for each capability is in the assistant-claude repo:
+Full documentation for each capability is in the assistant-agent-logic repo:
 
 - `config/skills/todo.md`
 - `config/skills/reminders.md`

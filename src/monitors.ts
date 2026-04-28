@@ -8,6 +8,8 @@ import { StateStore } from "./state.js";
 import { MonitorEvent, Route } from "./types.js";
 import { atomicWriteText, ensureDir, killProcessTree, makeId, nowIso, pathExists } from "./util.js";
 
+const effortSchema = z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]);
+
 const patternSchema = z.object({
   id: z.string().min(1),
   stream: z.enum(["stdout", "stderr", "both"]).default("both"),
@@ -26,7 +28,10 @@ const patternSchema = z.object({
     type: z.enum(["send_to_main", "dispatch_subagent", "restart_monitor"]).default("send_to_main"),
     promptFile: z.string().optional(),
     includeRingBufferLines: z.number().int().nonnegative().optional(),
-    profile: z.string().optional()
+    profile: z.string().optional(),
+    timeoutSec: z.number().int().positive().optional(),
+    model: z.string().optional(),
+    effort: effortSchema.optional()
   }).default({ type: "send_to_main" })
 });
 
@@ -64,7 +69,7 @@ export type MonitorsConfig = z.infer<typeof monitorsConfigSchema>;
 
 interface MonitorCallbacks {
   enqueueMain(text: string, metadata?: Record<string, unknown>): Promise<void>;
-  dispatchSubagent(input: { profile: string; prompt: string; route: Route; timeoutSec?: number }): Promise<void>;
+  dispatchSubagent(input: { profile: string; prompt: string; route: Route; timeoutSec?: number; model?: string; effort?: string }): Promise<void>;
   notifyAdmins(text: string): Promise<void>;
 }
 
@@ -231,7 +236,7 @@ export class MonitorManager {
       preActionOutput ? `Pre-action output:\n${preActionOutput}` : ""
     ].filter(Boolean).join("\n");
     if (pattern.action.type === "send_to_main") await this.callbacks.enqueueMain(prompt, { source: "monitor", monitorId: running.definition.id, patternId: pattern.id, contextPath });
-    if (pattern.action.type === "dispatch_subagent") await this.callbacks.dispatchSubagent({ profile: pattern.action.profile ?? "debugger", prompt, route: "return_to_main" });
+    if (pattern.action.type === "dispatch_subagent") await this.callbacks.dispatchSubagent({ profile: pattern.action.profile ?? "debugger", prompt, route: "return_to_main", timeoutSec: pattern.action.timeoutSec, model: pattern.action.model, effort: pattern.action.effort });
     if (pattern.action.type === "restart_monitor") await this.restartMonitor(running);
   }
 

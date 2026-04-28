@@ -31,7 +31,9 @@ Common examples:
       "profile": "debugger",
       "prompt": "Investigate the monitor context at data/logs/monitors/web/context.log",
       "route": "return_to_main",
-      "timeoutSec": 1800
+      "timeoutSec": 1800,
+      "model": "gpt-5.5",
+      "effort": "high"
     }
   ]
 }

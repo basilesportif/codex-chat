@@ -43,7 +43,7 @@ Loop events, monitor alerts, subagent result callbacks, and synthetic system eve
 
 ## Telegram Workflow Reference
 
-The shared workflow doc at `/home/tim/pkg/tim/assistant-claude/config/TELEGRAM.md` describes voice handling, sub-agent dispatch patterns, and reply requirements. That doc is written for a different agent (Claude Code) and references tools you do not have (`mcp__plugin_telegram_telegram__reply`, the Agent tool, TodoWrite). Read it for the workflow shape, but the canonical mapping for codex-chat is:
+The shared workflow doc at `/home/tim/pkg/tim/assistant-agent-logic/config/TELEGRAM.md` describes voice handling, sub-agent dispatch patterns, and reply requirements. That doc is written for a different agent (Claude Code) and references tools you do not have (`mcp__plugin_telegram_telegram__reply`, the Agent tool, TodoWrite). Read it for the workflow shape, but the canonical mapping for codex-chat is:
 
 - "Send a reply" → emit a `send_text` directive.
 - "React with an emoji" → emit a `react` directive.
@@ -135,6 +135,8 @@ Optional fields:
 - `route`: `return_to_main` | `send_to_admins` | `store_only` | `dispatch_subagent`. Defaults to `defaults.route`.
 - `profile` (string): subagent profile (`researcher`, `debugger`, `implementer`, `reviewer`) when route or type involves dispatch.
 - `timeoutSec` (number): per-run timeout. Defaults to `defaults.timeoutSec` (1800).
+- `model` (string): optional Codex model override for subagents spawned by this loop.
+- `effort` (`none` | `minimal` | `low` | `medium` | `high` | `xhigh`): optional Codex reasoning effort override for subagents spawned by this loop.
 - `lock` (bool): if true, wrap the cron command with `flock -n` so a slow run never overlaps the next tick. Defaults to `defaults.lock` (true). Keep this true unless you have a reason.
 - `notifyOnFailure` (bool): if true, notify ops via Telegram when a run errors.
 - `durable` (bool): if true, when the service IPC socket is unreachable at fire time the run is spooled to `data/spool/loops/` and replayed on next service start. Use for important loops you don't want to lose.
@@ -232,7 +234,7 @@ Reminder: even before reading a skill file, you must already have emitted the ac
 
 ### Step 1 — ALWAYS read the skill doc first
 
-Skill docs live at `/home/tim/pkg/tim/assistant-claude/config/skills/`. Read the matching file before ANY other action:
+Skill docs live at `/home/tim/pkg/tim/assistant-agent-logic/config/skills/`. Read the matching file before ANY other action:
 
 | Request type | Skill file |
 |---|---|
@@ -255,9 +257,9 @@ After reading the skill doc, check if `/home/tim/.assistant-claude/workspace/ins
 
 All state files are under `/home/tim/.assistant-claude/workspace/data/` (`todos.json`, `bets.json`, `crm.json`, `reminders.json`, `projects.json`, etc.). Never hardcode a file path — the skill doc will tell you the exact file name.
 
-### Step 4 — Run scripts from the assistant-claude repo
+### Step 4 — Run scripts from the assistant-agent-logic repo
 
-Executable scripts are at `/home/tim/pkg/tim/assistant-claude/scripts/`. The skill doc specifies which script to call and which flags to pass. Always follow the skill doc — do not invent flags or call scripts ad hoc.
+Executable scripts are at `/home/tim/pkg/tim/assistant-agent-logic/scripts/`. The skill doc specifies which script to call and which flags to pass. Always follow the skill doc — do not invent flags or call scripts ad hoc.
 
 ### Step 5 — Composio connected-account IDs
 

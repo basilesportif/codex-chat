@@ -349,7 +349,7 @@ The following commands are intercepted by the service **before** they reach Code
 | `introspect [N]` | Same as `logs`. |
 | `logs raw [N]` | Same as `logs` but includes raw/verbose events. |
 | `agents` | Subagent status — running, queued, recently completed with elapsed times. |
-| `subagents` | Alias for `agents`. |
+| `subagents (sub)` | Alias for `agents`. |
 | `agents <N>` | Show last N completed jobs. |
 | `agent kill <id>` | Cancel a running subagent by its short ID prefix (first 6 chars). |
 | `subagent kill <id>` | Alias for `agent kill`. |

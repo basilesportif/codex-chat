@@ -107,11 +107,11 @@ function parseLogCommand(text: string): { isLog: boolean; lines: number; include
 }
 
 /**
- * Parses "agents [N]" / "subagents [N]" commands.
+ * Parses "agents [N]" / "subagents [N]" / "sub [N]" commands.
  * Returns isAgents=true, and optionally the last-N count (0 = default).
  */
 export function parseAgentsCommand(text: string): { isAgents: boolean; lastN: number } {
-  const match = text.trim().match(/^(?:agents?|subagents?)(?:\s+(\d+))?$/i);
+  const match = text.trim().match(/^(?:agents?|subagents?|sub)(?:\s+(\d+))?$/i);
   if (!match) return { isAgents: false, lastN: 0 };
   const lastN = match[1] ? Math.min(parseInt(match[1], 10), 200) : 0;
   return { isAgents: true, lastN };
@@ -143,7 +143,7 @@ export const HELP_TEXT = `Service commands (handled instantly, bypass Codex):
   logs raw [N]      — include raw/verbose events
   introspect [N]    — same as logs
   agents            — subagent status (running/queued/completed)
-  subagents         — alias for agents
+  subagents (sub)   — alias for agents
   agents <N>        — last N completed jobs
   agent kill <id>   — cancel a subagent by ID prefix
   help              — this message

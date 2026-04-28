@@ -33,6 +33,10 @@ describe("parseAgentsCommand", () => {
     expect(parseAgentsCommand("subagents")).toEqual({ isAgents: true, lastN: 0 });
   });
 
+  test("matches 'sub'", () => {
+    expect(parseAgentsCommand("sub")).toEqual({ isAgents: true, lastN: 0 });
+  });
+
   test("matches 'agent' (singular)", () => {
     expect(parseAgentsCommand("agent")).toEqual({ isAgents: true, lastN: 0 });
   });
@@ -45,9 +49,14 @@ describe("parseAgentsCommand", () => {
     expect(parseAgentsCommand("subagents 3")).toEqual({ isAgents: true, lastN: 3 });
   });
 
+  test("matches 'sub 3'", () => {
+    expect(parseAgentsCommand("sub 3")).toEqual({ isAgents: true, lastN: 3 });
+  });
+
   test("case insensitive", () => {
     expect(parseAgentsCommand("AGENTS")).toEqual({ isAgents: true, lastN: 0 });
     expect(parseAgentsCommand("Subagents 5")).toEqual({ isAgents: true, lastN: 5 });
+    expect(parseAgentsCommand("SUB 5")).toEqual({ isAgents: true, lastN: 5 });
   });
 
   test("clamps lastN at 200", () => {
@@ -125,7 +134,7 @@ describe("HELP_TEXT", () => {
     expect(HELP_TEXT).toContain("logs");
     expect(HELP_TEXT).toContain("introspect");
     expect(HELP_TEXT).toContain("agents");
-    expect(HELP_TEXT).toContain("subagents");
+    expect(HELP_TEXT).toContain("subagents (sub)");
     expect(HELP_TEXT).toContain("agent kill");
     expect(HELP_TEXT).toContain("help");
     expect(HELP_TEXT).toContain("update");
@@ -409,6 +418,28 @@ describe("service command routing", () => {
     });
 
     expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("Subagents:"), 2);
+    expect(runTurn).not.toHaveBeenCalled();
+  });
+
+  test("'sub' command is intercepted and bypasses Codex", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+    const runTurn = vi.spyOn(service as unknown as { runTurn(e: unknown): void }, "runTurn");
+
+    await service.enqueueUserEvent({
+      source: "telegram",
+      chatId: 253768951,
+      userId: 253768951,
+      messageId: 3,
+      text: "sub",
+      attachments: [],
+      receivedAt: new Date().toISOString()
+    });
+
+    expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("Subagents:"), 3);
     expect(runTurn).not.toHaveBeenCalled();
   });
 

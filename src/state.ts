@@ -16,7 +16,7 @@ export class StateStore {
 
   async init(): Promise<void> {
     await ensureDir(this.root);
-    for (const dir of ["messages", "files", "turns", "queued_turns", "jobs", "loop_runs", "monitor_events", "outbound_messages", "actions"]) {
+    for (const dir of ["messages", "files", "turns", "queued_turns", "jobs", "loop_runs", "monitor_events", "actions"]) {
       await ensureDir(join(this.root, dir));
     }
     if (!(await pathExists(join(this.root, "schema.json")))) {

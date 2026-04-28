@@ -63,6 +63,14 @@ async function flush(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+async function waitForIdle(service: ServiceSupervisor): Promise<void> {
+  for (let i = 0; i < 30; i++) {
+    const running = (service as unknown as { turnRunning: boolean }).turnRunning;
+    if (!running) return;
+    await flush();
+  }
+}
+
 function userEvent(messageId: number, text = `message ${messageId}`): UserEvent {
   return {
     source: "telegram",
@@ -305,6 +313,74 @@ describe("service supervisor", () => {
     const turn = JSON.parse(await readFile(join(config.rootDir, "state", "turns", files[0] as string), "utf8")) as { status: string; errorMessage?: string };
     expect(turn.status).toBe("error");
     expect(turn.errorMessage).toContain("telegram send failed");
+  });
+
+  test.each([
+    ["research", "research codex-chat routing"],
+    ["debug", "debug the failing service test"],
+    ["review", "review the current diff"],
+    ["edit", "edit the routing docs"],
+    ["architecture", "architecture check for subagent routing"]
+  ])("blocks %s prompts from silently completing as main-loop clean text", async (_label, text) => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
+      yield { type: "final", text: "Main-loop plain answer." };
+    });
+    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+
+    await service.enqueueUserEvent(userEvent(500, text));
+    await waitForIdle(service);
+
+    expect(sendText).toHaveBeenCalledWith(
+      253768951,
+      expect.stringContaining("Routing guardrail blocked"),
+      500
+    );
+    expect(sendText.mock.calls.some((call) => call[1] === "Main-loop plain answer.")).toBe(false);
+  });
+
+  test("allows clean text for simple Telegram prompts that do not require subagent routing", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
+      yield { type: "final", text: "Pong." };
+    });
+    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+
+    await service.enqueueUserEvent(userEvent(501, "ping"));
+    await waitForIdle(service);
+
+    expect(sendText).toHaveBeenCalledWith(253768951, "Pong.", 501);
+  });
+
+  test("does not guardrail a subagent-routed response for a research prompt", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    const dispatchFromDirective = vi.fn().mockResolvedValue("job_123");
+    (service as unknown as { subagents: { dispatchFromDirective: typeof dispatchFromDirective } }).subagents.dispatchFromDirective = dispatchFromDirective;
+    vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
+      yield {
+        type: "final",
+        text: `\`\`\`codex-chat
+{"version":1,"actions":[{"type":"dispatch_subagent","idempotencyKey":"research-route-1","profile":"researcher","route":"return_to_main","summary":"Research routing","prompt":"Research routing behavior","model":"gpt-5.5","effort":"high"}]}
+\`\`\``
+      };
+    });
+    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+
+    await service.enqueueUserEvent(userEvent(502, "research routing behavior"));
+    await waitForIdle(service);
+
+    expect(dispatchFromDirective).toHaveBeenCalled();
+    expect(sendText.mock.calls.map((call) => call[1] as string).some((message) => message.includes("Routing guardrail blocked"))).toBe(false);
+    expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("Dispatching subagent: Research routing"), 502);
   });
 });
 

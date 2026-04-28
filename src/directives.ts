@@ -39,9 +39,9 @@ const dispatchSubagentAction = baseAction.extend({
   prompt: z.string().min(1),
   route: routeSchema.default("return_to_main"),
   timeoutSec: z.number().int().positive().optional(),
-  summary: z.string().min(1).optional(),
-  model: z.string().optional(),
-  effort: z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]).optional(),
+  summary: z.string().min(1),
+  model: z.string().min(1),
+  effort: z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]),
   images: z.array(z.string()).optional()
 });
 
@@ -116,4 +116,3 @@ export function parseDirectives(text: string): DirectiveParseResult {
   }).trim();
   return { cleanText, blocks, errors };
 }
-

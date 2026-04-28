@@ -40,4 +40,4 @@ Common examples:
 }
 ```
 
-For `dispatch_subagent`, callers should set `summary`, `model`, and `effort` explicitly. The service sends a visible dispatch status with those values and records them on the subagent job so `agents` / `subagents` output shows which model and effort were used.
+For `dispatch_subagent`, callers must include `summary`, `model`, and `effort`. The schema rejects dispatch actions missing any of those fields. The service sends a visible dispatch status with those values and records them on the subagent job so `agents` / `subagents` output shows which model and effort were used.

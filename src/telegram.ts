@@ -220,8 +220,8 @@ export class TelegramGateway {
       this.logger.warn({ component: "telegram", event: "immediate_reaction_failed", chatId: ctx.chat?.id, messageId: message.message_id, error }, "immediate reaction failed");
     });
     // Fire-and-forget typing indicator so the user sees instant feedback
-    // before Codex even starts processing. Independent of any
-    // Codex-emitted ack — we always want some immediate signal of receipt.
+    // before Codex even starts processing. Independent of any assistant
+    // output — we always want some immediate signal of receipt.
     void this.sendChatAction(ctx.chat.id, "typing");
     const attachments: Attachment[] = [];
     let text = "text" in message && typeof message.text === "string" ? message.text : "";

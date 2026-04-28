@@ -272,7 +272,10 @@ Directive block format:
       "profile": "debugger",
       "prompt": "Investigate the failing build logs in data/files/...",
       "route": "return_to_main",
-      "timeoutSec": 1800
+      "summary": "Investigate failing build",
+      "timeoutSec": 1800,
+      "model": "gpt-5.5",
+      "effort": "high"
     }
   ]
 }
@@ -287,6 +290,7 @@ Directive rules:
 - Require `idempotencyKey` for side-effecting actions.
 - Store every action in the JSON state store before executing it.
 - Make route explicit.
+- Require `summary`, `model`, and `effort` on every `dispatch_subagent` directive.
 
 Supported first-version action types:
 

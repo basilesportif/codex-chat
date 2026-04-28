@@ -48,6 +48,27 @@ After`);
     expect(parsed.cleanText).toBe("Visible");
   });
 
+  test.each(["summary", "model", "effort"])("dispatch_subagent requires %s", (field) => {
+    const action: Record<string, unknown> = {
+      type: "dispatch_subagent",
+      idempotencyKey: "job-missing-field",
+      profile: "debugger",
+      prompt: "Inspect the logs",
+      route: "return_to_main",
+      summary: "Inspect logs",
+      model: "gpt-5.5",
+      effort: "high"
+    };
+    delete action[field];
+
+    const parsed = parseDirectives(`\`\`\`codex-chat
+${JSON.stringify({ version: 1, actions: [action] })}
+\`\`\``);
+
+    expect(parsed.blocks).toHaveLength(0);
+    expect(parsed.errors).toHaveLength(1);
+  });
+
   test("extracts multiple directives from one message", () => {
     const parsed = parseDirectives(`One
 \`\`\`codex-chat
@@ -153,4 +174,3 @@ describe("react directive", () => {
     expect(parsed.errors.length).toBeGreaterThan(0);
   });
 });
-

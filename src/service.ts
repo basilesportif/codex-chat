@@ -45,9 +45,9 @@ const TURN_RESPONSE_WARN_MS = 45_000;
  * primary fix lives in codex.ts where dead WebSockets now fail in-flight
  * sendTurn iterators rather than letting them hang.
  */
-const TURN_ABORT_MS = 5 * 60_000;
+const TURN_ABORT_MS = 80_000;
 const TURN_ABORTED_MESSAGE =
-  "⚠️ Your previous request timed out after 5 minutes. Please resend your message.";
+  "⚠️ Your previous request timed out after 80 seconds. Please resend your message.";
 const CONTEXT_RESET_USER_MESSAGE =
   "⚠️ Codex crashed mid-turn and was restarted. The conversation context was reset — please resend your last message and re-establish any context you need.";
 const CONTEXT_RESET_OPS_NOTE =
@@ -259,7 +259,7 @@ export class ServiceSupervisor {
     await this.loops.processSpooled().catch((error) => this.logger.warn({ component: "loops", event: "spool_process_failed", error }));
     await this.monitors.start();
     this.heartbeat.start();
-    this.watchdogInterval = setInterval(() => void this.checkTurnTimeout(), 15_000);
+    this.watchdogInterval = setInterval(() => void this.checkTurnTimeout(), 5_000);
     this.injectInterval = setInterval(() => void this.pollInjectFile(), 1_000);
     const health = await this.codex.health();
     const commit = await this.readCurrentCommit();

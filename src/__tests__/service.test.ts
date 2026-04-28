@@ -239,6 +239,26 @@ describe("service supervisor", () => {
     expect(calls).toEqual([1, 2, 3]);
   });
 
+  test("watchdog aborts main-loop turns after 80 seconds", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+    vi.spyOn(service.telegram, "notifyOps").mockResolvedValue();
+    const blockedTurn = deferred();
+    vi.spyOn(service as unknown as { processEvent(event: UserEvent): Promise<void> }, "processEvent").mockReturnValue(blockedTurn.promise);
+
+    await service.enqueueUserEvent(userEvent(80));
+    (service as unknown as { turnStartedAt: Date }).turnStartedAt = new Date(Date.now() - 80_001);
+
+    await (service as unknown as { checkTurnTimeout(): Promise<void> }).checkTurnTimeout();
+
+    expect(sendText).toHaveBeenCalledWith(253768951, "⚠️ Your previous request timed out after 80 seconds. Please resend your message.", 80);
+    expect((service as unknown as { turnRunning: boolean }).turnRunning).toBe(false);
+    blockedTurn.resolve();
+  });
+
   test("restartCodex retries with backoff and notifies ops on exhaustion without draining queue", async () => {
     const config = await loadTestConfig();
     // Tighten retry knobs so the test runs fast.

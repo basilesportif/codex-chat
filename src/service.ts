@@ -159,7 +159,7 @@ export class ServiceSupervisor {
     await this.telegram.start();
     await this.recoverAbandonedWork();
     await this.ipc.start();
-    if (this.config.loops.enabled) await syncCron(this.config, this.logger).catch((error) => this.logger.warn({ component: "loops", event: "cron_sync_failed", error }));
+    if (this.config.loops.enabled) await syncCron(this.config, this.logger).catch((error) => this.logger.warn({ component: "loops", event: "cron_sync_failed", error: error instanceof Error ? { message: error.message, stack: error.stack } : String(error) }, "cron sync failed; loops will not fire on schedule until this is resolved"));
     await this.loops.processSpooled().catch((error) => this.logger.warn({ component: "loops", event: "spool_process_failed", error }));
     await this.monitors.start();
     this.heartbeat.start();

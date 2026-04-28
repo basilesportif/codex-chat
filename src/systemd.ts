@@ -34,11 +34,14 @@ ExecStart=${runtime} ${main} --config ${config.configPath} start
 Restart=always
 RestartSec=5
 StartLimitIntervalSec=0
+# NoNewPrivileges is intentionally NOT set: the system crontab binary is
+# setgid (group crontab) and loop sync invokes it to install the managed
+# block. NoNewPrivileges=true would silently break "codex-chat loop sync"
+# on every service start with an empty error.
 KillSignal=SIGTERM
 TimeoutStopSec=30
 StandardOutput=journal
 StandardError=journal
-NoNewPrivileges=true
 
 [Install]
 WantedBy=default.target

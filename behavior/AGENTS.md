@@ -174,7 +174,12 @@ Example: a 10-minute git push loop.
 - Do NOT call `crontab -e`, `crontab <file>`, or write to `/etc/cron.d/` directly — `codex-chat loop sync` owns the managed block and any hand edits inside it are lost on the next sync.
 - Do NOT create `~/.config/systemd/user/*.timer` or `*.service` units to schedule codex-chat work. Loops belong in `config/loops.json`.
 - Do NOT use `at`, `batch`, `anacron`, or shell `sleep` daemons for recurring tasks.
-- If `crontab` ever appears blocked, diagnose it (check `/etc/cron.allow`, `/etc/cron.deny`, the `crontab` group membership, and that `cron.service` is active) — do not work around it with another scheduler.
+- If `crontab` ever appears blocked, the answer is to diagnose, not to work around it. Common causes:
+  - `cron.service` is not running (`systemctl status cron`).
+  - `/etc/cron.allow` exists and the user is not in it, or `/etc/cron.deny` lists the user.
+  - The user is missing membership of the `crontab` group required to invoke the setgid `crontab` binary (`getent group crontab`).
+  - The systemd unit running codex-chat sets `NoNewPrivileges=true`, which blocks the `crontab` setgid escalation. The shipped `codex-chat service install` template intentionally omits this; if you find it set, remove it and `systemctl --user daemon-reload && systemctl --user restart codex-chat`.
+  - When `cron_sync_failed` shows up in logs with an empty error, run `codex-chat loop sync` interactively from a real shell — the CLI surfaces the real stderr from the failing `crontab` call. Fix the underlying cause; never substitute systemd timers.
 
 ## Monitor Alerts
 

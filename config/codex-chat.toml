@@ -50,7 +50,7 @@ reloadOnSighup = true
 
 [subagents]
 enabled = true
-maxConcurrent = 2
+maxConcurrent = 3
 defaultModel = ""
 defaultEffort = "medium"
 defaultTimeoutSec = 1800

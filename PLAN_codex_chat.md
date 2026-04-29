@@ -419,7 +419,7 @@ If the route is `return_to_main`, enqueue a synthetic event:
 
 Configurable controls:
 
-- `subagents.maxConcurrent`: default 2.
+- `subagents.maxConcurrent`: default 3.
 - `subagents.defaultTimeoutSec`: default 1800.
 - `subagents.maxTimeoutSec`: default 7200.
 - `subagents.maxPromptBytes`: prevent accidental huge prompts.
@@ -783,7 +783,7 @@ reloadOnSighup = true
 
 [subagents]
 enabled = true
-maxConcurrent = 2
+maxConcurrent = 3
 defaultModel = ""
 defaultEffort = "medium"
 defaultTimeoutSec = 1800

@@ -59,11 +59,16 @@ const DEPLOY_ACK_MESSAGE =
 const DEPLOY_DENIED_MESSAGE =
   "Deploy is admin-only. Ask Tim to add you to telegram.allowlist.adminUserIds.";
 const DEPLOY_DRAIN_MS = 30_000;
+const DISPATCH_ACK_MAX_CHARS = 360;
+const DISPATCH_ACK_MAX_LINES = 4;
 
 type QueuedEvent = {
   event: UserEvent;
   persistedId?: string;
 };
+
+type DispatchSubagentAction = Extract<DirectiveAction, { type: "dispatch_subagent" }>;
+type SendTextAction = Extract<DirectiveAction, { type: "send_text" }>;
 
 export function injectFilePath(config: AppConfig): string {
   return join(config.service.workspace, "inject.json");
@@ -423,11 +428,13 @@ export class ServiceSupervisor {
     return parts.length > 0 ? ` (${parts.join(" ")})` : "";
   }
 
-  private formatDispatchSummary(action: Extract<DirectiveAction, { type: "dispatch_subagent" }>): string {
+  private formatDispatchSummary(action: DispatchSubagentAction, followupText?: string): string {
     const summary = action.summary ?? action.prompt.split("\n").find((line) => line.trim())?.trim().slice(0, 160) ?? action.profile;
     const model = action.model || this.subagents.resolveModel(action.model);
     const effort = action.effort || this.subagents.resolveEffort(action.effort);
-    return [`Sub: ${summary}`, `${action.profile} · ${model} · ${effort}`].join("\n");
+    const lines = [`Sub: ${summary}`, `${action.profile} · ${model} · ${effort}`];
+    if (followupText) lines.push("", followupText);
+    return lines.join("\n");
   }
 
   async cancelJob(jobId: string): Promise<string> {
@@ -509,7 +516,21 @@ export class ServiceSupervisor {
         for (let actionIndex = 0; actionIndex < block.actions.length; actionIndex++) {
           const action = block.actions[actionIndex]!;
           const actionKey = this.directiveActionKey(action, blockIndex, actionIndex);
-          if (!preExecutedActions.has(actionKey)) await this.executeDirective(action, event);
+          if (preExecutedActions.has(actionKey)) continue;
+          const nextAction = block.actions[actionIndex + 1];
+          const nextActionKey = nextAction ? this.directiveActionKey(nextAction, blockIndex, actionIndex + 1) : undefined;
+          if (action.type === "dispatch_subagent" && nextAction && nextActionKey && !preExecutedActions.has(nextActionKey)) {
+            const mergedAckText = this.dispatchFollowupAckText(nextAction, event);
+            if (mergedAckText) {
+              const status = await this.executeDirective(action, event, { dispatchStatusText: this.formatDispatchSummary(action, mergedAckText) });
+              if (status !== "failed") {
+                await this.skipDirective(nextAction, "merged_dispatch_ack");
+                actionIndex++;
+              }
+              continue;
+            }
+          }
+          await this.executeDirective(action, event);
         }
       }
       for (const error of parsed.errors) {
@@ -526,7 +547,49 @@ export class ServiceSupervisor {
     }
   }
 
-  private async executeDirective(action: DirectiveAction, origin: UserEvent): Promise<void> {
+  private dispatchFollowupAckText(action: DirectiveAction, origin: UserEvent): string | undefined {
+    if (action.type !== "send_text" || origin.chatId === undefined) return undefined;
+    const sendTextAction: SendTextAction = action;
+    if (sendTextAction.format && sendTextAction.format !== "text") return undefined;
+
+    const chatId = sendTextAction.chatId ?? origin.chatId;
+    if (chatId !== origin.chatId) return undefined;
+
+    const replyToMessageId = this.directiveReplyToMessageId(chatId, sendTextAction.replyToMessageId, origin);
+    if (replyToMessageId !== origin.messageId) return undefined;
+
+    return this.compactDispatchAckText(sendTextAction.text);
+  }
+
+  private compactDispatchAckText(text: string): string | undefined {
+    const lines = text.trim().split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    if (lines.length === 0 || lines.length > DISPATCH_ACK_MAX_LINES) return undefined;
+    const compact = lines.join("\n");
+    if (compact.length > DISPATCH_ACK_MAX_CHARS) return undefined;
+    return compact;
+  }
+
+  private async skipDirective(action: DirectiveAction, reason: string): Promise<StoredAction["status"]> {
+    const stored: StoredAction = {
+      id: makeId("action"),
+      idempotencyKey: action.idempotencyKey,
+      type: action.type,
+      status: "skipped",
+      createdAt: nowIso(),
+      completedAt: nowIso(),
+      payload: action
+    };
+    if (action.idempotencyKey && this.hasSeenIdempotency(action.idempotencyKey)) {
+      await this.state.saveAction(stored);
+      return stored.status;
+    }
+    if (action.idempotencyKey) this.rememberIdempotency(action.idempotencyKey);
+    this.logger.debug({ component: "directives", event: "action_skipped", actionType: action.type, reason }, "directive action skipped");
+    await this.state.saveAction(stored);
+    return stored.status;
+  }
+
+  private async executeDirective(action: DirectiveAction, origin: UserEvent, options: { dispatchStatusText?: string } = {}): Promise<StoredAction["status"]> {
     const stored: StoredAction = {
       id: makeId("action"),
       idempotencyKey: action.idempotencyKey,
@@ -538,7 +601,7 @@ export class ServiceSupervisor {
     if (action.idempotencyKey && this.hasSeenIdempotency(action.idempotencyKey)) {
       stored.status = "skipped";
       await this.state.saveAction(stored);
-      return;
+      return stored.status;
     }
     if (action.idempotencyKey) this.rememberIdempotency(action.idempotencyKey);
     await this.state.saveAction(stored);
@@ -560,7 +623,7 @@ export class ServiceSupervisor {
       }
       if (action.type === "dispatch_subagent") {
         if (origin.chatId) {
-          await this.telegram.sendText(origin.chatId, this.formatDispatchSummary(action), origin.messageId);
+          await this.telegram.sendText(origin.chatId, options.dispatchStatusText ?? this.formatDispatchSummary(action), origin.messageId);
         }
         await this.subagents.dispatchFromDirective(action, { chatId: origin.chatId, messageId: origin.messageId });
       }
@@ -578,6 +641,7 @@ export class ServiceSupervisor {
       stored.completedAt = nowIso();
       await this.state.saveAction(stored);
     }
+    return stored.status;
   }
 
   private shouldPreExecuteDirective(action: DirectiveAction): boolean {

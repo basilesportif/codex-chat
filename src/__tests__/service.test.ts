@@ -524,6 +524,41 @@ describe("service supervisor", () => {
     expect(dispatchFromDirective).toHaveBeenCalled();
     expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("Sub: Research routing"), 502);
   });
+
+  test("merges an immediate same-chat send_text acknowledgement into dispatch status", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    const dispatchFromDirective = vi.fn().mockResolvedValue("job_123");
+    (service as unknown as { subagents: { dispatchFromDirective: typeof dispatchFromDirective } }).subagents.dispatchFromDirective = dispatchFromDirective;
+    vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
+      yield {
+        type: "final",
+        text: `\`\`\`codex-chat
+{"version":1,"actions":[{"type":"dispatch_subagent","idempotencyKey":"research-route-merge-1","profile":"researcher","route":"return_to_main","summary":"Research routing","prompt":"Research routing behavior","model":"gpt-5.5","effort":"high"},{"type":"send_text","idempotencyKey":"research-route-merge-ack-1","text":"I'm dispatching a researcher to inspect the directive flow."}]}
+\`\`\``
+      };
+    });
+    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+
+    await service.enqueueUserEvent(userEvent(506, "research routing behavior"));
+    await waitForIdle(service);
+
+    expect(dispatchFromDirective).toHaveBeenCalled();
+    expect(sendText).toHaveBeenCalledTimes(1);
+    expect(sendText).toHaveBeenCalledWith(
+      253768951,
+      "Sub: Research routing\nresearcher · gpt-5.5 · high\n\nI'm dispatching a researcher to inspect the directive flow.",
+      506
+    );
+
+    await (service as unknown as { executeDirective(action: unknown, origin: unknown): Promise<unknown> }).executeDirective(
+      { type: "send_text", idempotencyKey: "research-route-merge-ack-1", text: "I'm dispatching a researcher to inspect the directive flow." },
+      userEvent(506, "research routing behavior")
+    );
+    expect(sendText).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("incremental directive execution", () => {

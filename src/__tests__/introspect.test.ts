@@ -168,9 +168,7 @@ describe("dispatch_subagent status", () => {
       { source: "telegram", text: "x", attachments: [], receivedAt: new Date().toISOString(), chatId: 123, messageId: 456 }
     );
 
-    expect(sendText).toHaveBeenCalledWith(123, expect.stringContaining("Dispatching subagent: inspect routing"), 456);
-    expect(sendText.mock.calls[0]?.[1]).toContain("model: gpt-5.5");
-    expect(sendText.mock.calls[0]?.[1]).toContain("effort: high");
+    expect(sendText).toHaveBeenCalledWith(123, "Dispatching subagent: inspect routing\nresearcher · gpt-5.5 · high", 456);
     expect(dispatchFromDirective).toHaveBeenCalled();
   });
 });

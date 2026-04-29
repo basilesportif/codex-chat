@@ -427,7 +427,7 @@ export class ServiceSupervisor {
     const summary = action.summary ?? action.prompt.split("\n").find((line) => line.trim())?.trim().slice(0, 160) ?? action.profile;
     const model = action.model || this.subagents.resolveModel(action.model);
     const effort = action.effort || this.subagents.resolveEffort(action.effort);
-    return [`Dispatching subagent: ${summary}`, `${action.profile} · ${model} · ${effort}`].join("\n");
+    return [`Sub: ${summary}`, `${action.profile} · ${model} · ${effort}`].join("\n");
   }
 
   async cancelJob(jobId: string): Promise<string> {

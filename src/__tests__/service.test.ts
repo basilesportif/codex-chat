@@ -522,7 +522,7 @@ describe("service supervisor", () => {
     await waitForIdle(service);
 
     expect(dispatchFromDirective).toHaveBeenCalled();
-    expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("Dispatching subagent: Research routing"), 502);
+    expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("Sub: Research routing"), 502);
   });
 });
 

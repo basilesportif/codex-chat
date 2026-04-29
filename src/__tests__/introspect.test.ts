@@ -168,7 +168,7 @@ describe("dispatch_subagent status", () => {
       { source: "telegram", text: "x", attachments: [], receivedAt: new Date().toISOString(), chatId: 123, messageId: 456 }
     );
 
-    expect(sendText).toHaveBeenCalledWith(123, "Dispatching subagent: inspect routing\nresearcher · gpt-5.5 · high", 456);
+    expect(sendText).toHaveBeenCalledWith(123, "Sub: inspect routing\nresearcher · gpt-5.5 · high", 456);
     expect(dispatchFromDirective).toHaveBeenCalled();
   });
 });

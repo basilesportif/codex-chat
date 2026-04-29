@@ -16,6 +16,7 @@ import type { SubagentJob } from "../types.js";
 const tempDirs: string[] = [];
 
 afterEach(async () => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
@@ -251,6 +252,28 @@ describe("formatJobsDetailed", () => {
     expect(result).toContain("effort=xhigh");
     expect(result).toContain("research task");
     expect(result).toContain("✓");
+  });
+
+  test("formats running and finished durations as minutes and seconds", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    const now = new Date("2026-04-29T12:00:00.000Z");
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const ago = (seconds: number) => new Date(now.getTime() - seconds * 1000).toISOString();
+    const jobs: SubagentJob[] = [
+      { id: "job_run007xxx", profile: "runner", route: "return_to_main", status: "running", promptPath: "/tmp/p", artifactDir: "/tmp/a", startedAt: ago(7) },
+      { id: "job_done065xx", profile: "finisher", route: "return_to_main", status: "completed", promptPath: "/tmp/p", artifactDir: "/tmp/a", startedAt: ago(65), completedAt: now.toISOString() },
+      { id: "job_fail3725x", profile: "debugger", route: "return_to_main", status: "failed", promptPath: "/tmp/p", artifactDir: "/tmp/a", startedAt: ago(3725), completedAt: now.toISOString() },
+      { id: "job_stop007xx", profile: "reviewer", route: "return_to_main", status: "cancelled", promptPath: "/tmp/p", artifactDir: "/tmp/a", startedAt: ago(7), completedAt: now.toISOString() },
+    ];
+    (service as unknown as { subagents: { listJobs(): SubagentJob[] } }).subagents.listJobs = () => jobs;
+    const result = (service as unknown as { formatJobsDetailed(n: number): string }).formatJobsDetailed(0);
+    expect(result).toContain("[job_ru] runner — 0:07");
+    expect(result).toContain("[job_do] finisher — done in 1:05 ✓");
+    expect(result).toContain("[job_fa] debugger — done in 62:05 ✗");
+    expect(result).toContain("[job_st] reviewer — done in 0:07 ⊘");
   });
 
   test("respects lastN parameter for completed jobs", async () => {

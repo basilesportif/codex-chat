@@ -69,6 +69,14 @@ export function injectFilePath(config: AppConfig): string {
   return join(config.service.workspace, "inject.json");
 }
 
+function formatDurationSeconds(seconds: number): string {
+  const rounded = Math.round(seconds);
+  const totalSeconds = Number.isFinite(rounded) ? Math.max(0, rounded) : 0;
+  const minutes = Math.floor(totalSeconds / 60);
+  const remainingSeconds = totalSeconds % 60;
+  return `${minutes}:${String(remainingSeconds).padStart(2, "0")}`;
+}
+
 /**
  * Returns true when the message text is a "logs" or "introspect" command,
  * along with the requested number of lines to return and whether raw mode
@@ -375,7 +383,7 @@ export class ServiceSupervisor {
     if (running.length > 0) {
       lines.push("\nRunning:");
       for (const j of running) {
-        lines.push(`  [${shortId(j.id)}] ${j.profile}${this.formatJobModelEffort(j)} — ${elapsedSec(j.startedAt)}s${j.summary ? ` — ${j.summary}` : ""}`);
+        lines.push(`  [${shortId(j.id)}] ${j.profile}${this.formatJobModelEffort(j)} — ${formatDurationSeconds(elapsedSec(j.startedAt))}${j.summary ? ` — ${j.summary}` : ""}`);
       }
     }
 
@@ -393,7 +401,7 @@ export class ServiceSupervisor {
       for (const j of recent) {
         const dur = durationSec(j.startedAt, j.completedAt);
         const mark = j.status === "completed" ? "✓" : j.status === "failed" ? "✗" : "⊘";
-        lines.push(`  [${shortId(j.id)}] ${j.profile}${this.formatJobModelEffort(j)} — done in ${dur}s ${mark}${j.summary ? ` — ${j.summary}` : ""}`);
+        lines.push(`  [${shortId(j.id)}] ${j.profile}${this.formatJobModelEffort(j)} — done in ${formatDurationSeconds(dur)} ${mark}${j.summary ? ` — ${j.summary}` : ""}`);
       }
     }
 

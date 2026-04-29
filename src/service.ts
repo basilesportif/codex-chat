@@ -195,7 +195,9 @@ export class ServiceSupervisor {
           await this.enqueueSynthetic(`Subagent ${job.id} (${job.profile}) completed.\n\nResult path: ${job.lastMessagePath ?? "unknown"}\n\n${result}`, {
             source: "subagent",
             jobId: job.id,
-            profile: job.profile
+            profile: job.profile,
+            originChatId: job.originChatId,
+            originMessageId: job.originMessageId
           });
         },
         onSendToUser: async (job: SubagentJob, result: string) => {
@@ -312,8 +314,16 @@ export class ServiceSupervisor {
   }
 
   async enqueueSynthetic(text: string, metadata?: Record<string, unknown>): Promise<void> {
+    const chatId = typeof metadata?.chatId === "number"
+      ? metadata.chatId
+      : typeof metadata?.originChatId === "number" ? metadata.originChatId : undefined;
+    const messageId = typeof metadata?.messageId === "number"
+      ? metadata.messageId
+      : typeof metadata?.originMessageId === "number" ? metadata.originMessageId : undefined;
     const event: UserEvent = {
       source: (metadata?.source as UserEvent["source"]) ?? "system",
+      chatId,
+      messageId,
       text,
       attachments: [],
       metadata,
@@ -484,7 +494,7 @@ export class ServiceSupervisor {
       if (hadError && !output.trim() && event.chatId) {
         const brief = errorMessage.split("\n")[0].slice(0, 100);
         await closeTurn({ id: turnId, status: "error", input: event, errorMessage, completedAt: nowIso() });
-        await this.telegram.sendText(event.chatId, `Codex encountered an error: ${brief}. Please try again.`);
+        await this.telegram.sendText(event.chatId, `Codex encountered an error: ${brief}. Please try again.`, event.messageId);
         return;
       }
       const parsed = parseDirectives(output);
@@ -536,9 +546,18 @@ export class ServiceSupervisor {
     await this.state.saveAction(stored);
     try {
       const defaultChatId = origin.chatId;
-      if (action.type === "send_text") await this.telegram.sendText(action.chatId ?? this.requireChat(defaultChatId), action.text, action.replyToMessageId, action.format);
-      if (action.type === "send_image") await this.telegram.sendImage(action.chatId ?? this.requireChat(defaultChatId), action);
-      if (action.type === "send_document") await this.telegram.sendDocument(action.chatId ?? this.requireChat(defaultChatId), action);
+      if (action.type === "send_text") {
+        const chatId = action.chatId ?? this.requireChat(defaultChatId);
+        await this.telegram.sendText(chatId, action.text, this.directiveReplyToMessageId(chatId, action.replyToMessageId, origin), action.format);
+      }
+      if (action.type === "send_image") {
+        const chatId = action.chatId ?? this.requireChat(defaultChatId);
+        await this.telegram.sendImage(chatId, { ...action, replyToMessageId: this.directiveReplyToMessageId(chatId, action.replyToMessageId, origin) });
+      }
+      if (action.type === "send_document") {
+        const chatId = action.chatId ?? this.requireChat(defaultChatId);
+        await this.telegram.sendDocument(chatId, { ...action, replyToMessageId: this.directiveReplyToMessageId(chatId, action.replyToMessageId, origin) });
+      }
       if (action.type === "dispatch_subagent") {
         if (origin.chatId) {
           await this.telegram.sendText(origin.chatId, this.formatDispatchSummary(action), origin.messageId);
@@ -700,7 +719,7 @@ export class ServiceSupervisor {
       this.logger.error({ component: "service", event: "turn_error", error }, "Turn processing failed");
       if (event.chatId) {
         try {
-          await this.telegram.sendText(event.chatId, `Codex encountered an error: ${brief}. Please try again.`);
+          await this.telegram.sendText(event.chatId, `Codex encountered an error: ${brief}. Please try again.`, event.messageId);
         } catch (sendError) {
           this.logger.error({ component: "service", event: "error_reply_failed", sendError }, "Failed to send error reply to Telegram");
         }
@@ -1029,6 +1048,12 @@ export class ServiceSupervisor {
   private requireChat(chatId?: number): number {
     if (!chatId) throw new Error("Directive did not include chatId and the origin event has no Telegram chat");
     return chatId;
+  }
+
+  private directiveReplyToMessageId(chatId: number, explicitReplyToMessageId: number | undefined, origin: UserEvent): number | undefined {
+    if (explicitReplyToMessageId !== undefined) return explicitReplyToMessageId;
+    if (origin.chatId === undefined || origin.messageId === undefined) return undefined;
+    return chatId === origin.chatId ? origin.messageId : undefined;
   }
 
   /**

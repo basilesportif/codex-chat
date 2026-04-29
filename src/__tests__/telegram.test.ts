@@ -8,6 +8,30 @@ import type { StateStore } from "../state.js";
 import type { FileStore } from "../file-store.js";
 import type { Transcriber } from "../transcription.js";
 
+function testGateway(overrides: { state?: Partial<StateStore>; files?: Partial<FileStore>; config?: Partial<AppConfig> } = {}): TelegramGateway {
+  return new TelegramGateway(
+    {
+      telegram: {
+        allowlist: { userIds: [9], chatIds: [100], adminUserIds: [] }
+      },
+      ...overrides.config
+    } as AppConfig,
+    {
+      listTelegramUsers: vi.fn().mockResolvedValue([]),
+      listTelegramChats: vi.fn().mockResolvedValue([]),
+      recordMessage: vi.fn().mockResolvedValue(undefined),
+      ...overrides.state
+    } as unknown as StateStore,
+    {
+      validateSendPath: vi.fn((path: string) => path),
+      ...overrides.files
+    } as unknown as FileStore,
+    {} as Transcriber,
+    createLogger("silent"),
+    { onUserEvent: vi.fn() }
+  );
+}
+
 describe("Telegram reply context extraction", () => {
   test("extracts same-chat reply, quote, and targeted reply identifiers", () => {
     const context = extractTelegramReplyContext({
@@ -134,6 +158,44 @@ describe("Telegram reply context extraction", () => {
       reply: expect.objectContaining({
         replyToMessage: expect.objectContaining({ chatId: 100, messageId: 20, snippet: "original context" })
       })
+    }));
+  });
+
+  test("sendText retries unthreaded when Telegram cannot find the reply target", async () => {
+    const recordMessage = vi.fn().mockResolvedValue(undefined);
+    const sendMessage = vi.fn()
+      .mockRejectedValueOnce({ error_code: 400, description: "Bad Request: message to be replied not found" })
+      .mockResolvedValueOnce({});
+    const gateway = testGateway({ state: { recordMessage } });
+    (gateway as unknown as { bot: { api: { sendMessage: typeof sendMessage } } }).bot = { api: { sendMessage } };
+
+    await gateway.sendText(100, "hello", 20, "text");
+
+    expect(sendMessage).toHaveBeenNthCalledWith(1, 100, "hello", expect.objectContaining({
+      reply_parameters: { message_id: 20 }
+    }));
+    expect(sendMessage).toHaveBeenNthCalledWith(2, 100, "hello", expect.objectContaining({
+      reply_parameters: undefined
+    }));
+    expect(recordMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test("sendDocument retries unthreaded when Telegram cannot find the reply target", async () => {
+    const sendDocument = vi.fn()
+      .mockRejectedValueOnce({ error_code: 400, description: "Bad Request: replied message not found" })
+      .mockResolvedValueOnce({});
+    const gateway = testGateway();
+    (gateway as unknown as { bot: { api: { sendDocument: typeof sendDocument } } }).bot = { api: { sendDocument } };
+
+    await gateway.sendDocument(100, { path: "/tmp/report.txt", caption: "report", replyToMessageId: 20 });
+
+    expect(sendDocument).toHaveBeenNthCalledWith(1, 100, expect.anything(), expect.objectContaining({
+      caption: "report",
+      reply_parameters: { message_id: 20 }
+    }));
+    expect(sendDocument).toHaveBeenNthCalledWith(2, 100, expect.anything(), expect.objectContaining({
+      caption: "report",
+      reply_parameters: undefined
     }));
   });
 });

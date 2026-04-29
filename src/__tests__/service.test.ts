@@ -409,7 +409,75 @@ describe("service supervisor", () => {
     await service.enqueueUserEvent(userEvent(503, "check my calendar today"));
     await waitForIdle(service);
 
-    expect(sendText).toHaveBeenCalledWith(253768951, "I checked your calendar.", undefined, undefined);
+    expect(sendText).toHaveBeenCalledWith(253768951, "I checked your calendar.", 503, undefined);
+  });
+
+  test("defaults same-chat send_text directives to reply to the origin message", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
+      yield {
+        type: "final",
+        text: `\`\`\`codex-chat
+{"version":1,"actions":[{"type":"send_text","idempotencyKey":"reply-default-1","text":"Same chat reply."},{"type":"send_text","idempotencyKey":"reply-other-chat-1","chatId":999,"text":"Different chat."},{"type":"send_text","idempotencyKey":"reply-explicit-1","text":"Explicit reply.","replyToMessageId":321}]}
+\`\`\``
+      };
+    });
+    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+
+    await service.enqueueUserEvent(userEvent(504, "directive reply defaults"));
+    await waitForIdle(service);
+
+    expect(sendText).toHaveBeenCalledWith(253768951, "Same chat reply.", 504, undefined);
+    expect(sendText).toHaveBeenCalledWith(999, "Different chat.", undefined, undefined);
+    expect(sendText).toHaveBeenCalledWith(253768951, "Explicit reply.", 321, undefined);
+  });
+
+  test("defaults same-chat send_image and send_document directives to reply to the origin message", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
+      yield {
+        type: "final",
+        text: `\`\`\`codex-chat
+{"version":1,"actions":[{"type":"send_image","idempotencyKey":"image-reply-default-1","path":"/tmp/image.png","caption":"image"},{"type":"send_document","idempotencyKey":"doc-reply-default-1","path":"/tmp/doc.txt","caption":"doc"}]}
+\`\`\``
+      };
+    });
+    const sendImage = vi.spyOn(service.telegram, "sendImage").mockResolvedValue();
+    const sendDocument = vi.spyOn(service.telegram, "sendDocument").mockResolvedValue();
+
+    await service.enqueueUserEvent(userEvent(505, "media directive reply defaults"));
+    await waitForIdle(service);
+
+    expect(sendImage).toHaveBeenCalledWith(253768951, expect.objectContaining({ replyToMessageId: 505 }));
+    expect(sendDocument).toHaveBeenCalledWith(253768951, expect.objectContaining({ replyToMessageId: 505 }));
+  });
+
+  test("subagent return_to_main final response replies to the original Telegram message", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
+      yield { type: "final", text: "Subagent result summary." };
+    });
+    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+
+    await service.enqueueSynthetic("Subagent job_123 completed.", {
+      source: "subagent",
+      jobId: "job_123",
+      profile: "implementer",
+      originChatId: 253768951,
+      originMessageId: 700
+    });
+    await waitForIdle(service);
+
+    expect(sendText).toHaveBeenCalledWith(253768951, "Subagent result summary.", 700);
   });
 
   test.each([

@@ -34,6 +34,28 @@ const TELEGRAM_CONTENT_FIELDS = [
   "venue"
 ] as const;
 
+function replyParameters(replyToMessageId?: number): { message_id: number } | undefined {
+  return replyToMessageId !== undefined ? { message_id: replyToMessageId } : undefined;
+}
+
+function telegramErrorText(error: unknown): string {
+  const record = error && typeof error === "object" ? error as Record<string, unknown> : undefined;
+  return [
+    record?.description,
+    record?.message,
+    record?.error_code,
+    record?.errorCode,
+    String(error)
+  ].filter((value) => value !== undefined).join(" ");
+}
+
+function isUnavailableReplyTargetError(error: unknown): boolean {
+  const text = telegramErrorText(error);
+  return /message\s+to\s+be\s+replied\s+not\s+found/i.test(text)
+    || /repl(?:y|ied).*message.*not\s+found/i.test(text)
+    || /message.*repl(?:y|ied).*not\s+found/i.test(text);
+}
+
 export interface TelegramAllowlistInput {
   userId?: number;
   chatId?: number;
@@ -247,12 +269,16 @@ export class TelegramGateway {
 
   async sendText(chatId: number, text: string, replyToMessageId?: number, format?: "text" | "markdown" | "markdownv2"): Promise<void> {
     if (!this.bot) throw new Error("Telegram bot is not started");
+    let currentReplyToMessageId = replyToMessageId;
     for (const rawChunk of chunkText(text || "(empty response)", 3200)) {
       const rendered = this.renderOutgoingText(rawChunk, format);
-      await this.bot.api.sendMessage(chatId, rendered.text, {
-        parse_mode: rendered.parseMode,
-        reply_parameters: replyToMessageId ? { message_id: replyToMessageId } : undefined
-      } as never);
+      const fellBack = await this.sendWithReplyFallback(chatId, currentReplyToMessageId, async (resolvedReplyToMessageId) => {
+        await this.bot!.api.sendMessage(chatId, rendered.text, {
+          parse_mode: rendered.parseMode,
+          reply_parameters: replyParameters(resolvedReplyToMessageId)
+        } as never);
+      });
+      if (fellBack) currentReplyToMessageId = undefined;
       await this.state.recordMessage({ direction: "outbound", chatId, text: rawChunk, sentAt: nowIso() });
     }
   }
@@ -290,20 +316,25 @@ export class TelegramGateway {
   async sendImage(chatId: number, input: { path?: string; fileId?: string; caption?: string; asDocument?: boolean; replyToMessageId?: number }): Promise<void> {
     if (!this.bot) throw new Error("Telegram bot is not started");
     const media = input.fileId ?? new InputFile(this.files.validateSendPath(input.path ?? ""));
-    const options = {
-      caption: input.caption,
-      reply_parameters: input.replyToMessageId ? { message_id: input.replyToMessageId } : undefined
-    } as never;
-    if (input.asDocument) await this.bot.api.sendDocument(chatId, media, options);
-    else await this.bot.api.sendPhoto(chatId, media, options);
+    await this.sendWithReplyFallback(chatId, input.replyToMessageId, async (resolvedReplyToMessageId) => {
+      const options = {
+        caption: input.caption,
+        reply_parameters: replyParameters(resolvedReplyToMessageId)
+      } as never;
+      if (input.asDocument) await this.bot!.api.sendDocument(chatId, media, options);
+      else await this.bot!.api.sendPhoto(chatId, media, options);
+    });
   }
 
   async sendDocument(chatId: number, input: { path: string; caption?: string; replyToMessageId?: number }): Promise<void> {
     if (!this.bot) throw new Error("Telegram bot is not started");
-    await this.bot.api.sendDocument(chatId, new InputFile(this.files.validateSendPath(input.path)), {
-      caption: input.caption,
-      reply_parameters: input.replyToMessageId ? { message_id: input.replyToMessageId } : undefined
-    } as never);
+    const file = new InputFile(this.files.validateSendPath(input.path));
+    await this.sendWithReplyFallback(chatId, input.replyToMessageId, async (resolvedReplyToMessageId) => {
+      await this.bot!.api.sendDocument(chatId, file, {
+        caption: input.caption,
+        reply_parameters: replyParameters(resolvedReplyToMessageId)
+      } as never);
+    });
   }
 
   async notifyOps(text: string): Promise<void> {
@@ -323,16 +354,16 @@ export class TelegramGateway {
     bot.command("pair", async (ctx) => this.handlePair(ctx));
     bot.command("health", async (ctx) => {
       if (!(await this.isAuthorized(ctx))) return;
-      await ctx.reply(this.callbacks.onHealthCommand ? await this.callbacks.onHealthCommand() : "ok");
+      await this.replyToContext(ctx, this.callbacks.onHealthCommand ? await this.callbacks.onHealthCommand() : "ok");
     });
     bot.command("jobs", async (ctx) => {
       if (!(await this.isAuthorized(ctx))) return;
-      await ctx.reply(this.callbacks.onJobsCommand ? await this.callbacks.onJobsCommand(ctx.chat.id) : "No job manager is configured.");
+      await this.replyToContext(ctx, this.callbacks.onJobsCommand ? await this.callbacks.onJobsCommand(ctx.chat.id) : "No job manager is configured.");
     });
     bot.command("cancel", async (ctx) => {
       if (!(await this.isAuthorized(ctx))) return;
       const jobId = (ctx.message?.text ?? "").split(/\s+/)[1];
-      await ctx.reply(jobId && this.callbacks.onCancelCommand ? await this.callbacks.onCancelCommand(ctx.chat.id, jobId) : "Usage: /cancel <jobId>");
+      await this.replyToContext(ctx, jobId && this.callbacks.onCancelCommand ? await this.callbacks.onCancelCommand(ctx.chat.id, jobId) : "Usage: /cancel <jobId>");
     });
     bot.on("message", async (ctx) => this.handleMessage(ctx));
     bot.catch((error) => this.logger.error({ component: "telegram", event: "handler_error", error }, "Telegram handler failed"));
@@ -359,13 +390,13 @@ export class TelegramGateway {
     const code = text.split(/\s+/)[1];
     if (!from || !chat) return;
     if (!this.pairingCode || code !== this.pairingCode) {
-      await ctx.reply("Pairing failed.");
+      await this.replyToContext(ctx, "Pairing failed.");
       return;
     }
     await this.state.addTelegramIdentity(from.id, chat.id, true);
     await this.state.deletePairingCode();
     this.pairingCode = undefined;
-    await ctx.reply(`Paired user ${from.id} and chat ${chat.id}.`);
+    await this.replyToContext(ctx, `Paired user ${from.id} and chat ${chat.id}.`);
     this.logger.info({ component: "telegram", event: "paired", userId: from.id, chatId: chat.id }, "Telegram user paired");
   }
 
@@ -412,7 +443,7 @@ export class TelegramGateway {
           `Audio path: ${attachment.localPath}`
         ].filter(Boolean).join("\n");
       } else {
-        await ctx.reply("Voice transcription is not enabled.");
+        await this.replyToContext(ctx, "Voice transcription is not enabled.");
         return;
       }
     } else if ("audio" in message && message.audio) {
@@ -425,7 +456,7 @@ export class TelegramGateway {
     }
 
     if (!text && attachments.length === 0) {
-      await ctx.reply("Unsupported message type.");
+      await this.replyToContext(ctx, "Unsupported message type.");
       return;
     }
 
@@ -523,6 +554,31 @@ export class TelegramGateway {
       username: ctx.from?.username,
       receivedAt: nowIso()
     });
+  }
+
+  private async sendWithReplyFallback(chatId: number, replyToMessageId: number | undefined, send: (replyToMessageId?: number) => Promise<void>): Promise<boolean> {
+    try {
+      await send(replyToMessageId);
+      return false;
+    } catch (error) {
+      if (replyToMessageId === undefined || !isUnavailableReplyTargetError(error)) throw error;
+      this.logger.warn({ component: "telegram", event: "reply_target_unavailable", chatId, replyToMessageId, error }, "Telegram reply target unavailable; retrying without reply");
+      await send(undefined);
+      return true;
+    }
+  }
+
+  private async replyToContext(ctx: Context, text: string): Promise<void> {
+    const messageId = ctx.message?.message_id;
+    try {
+      await ctx.reply(text, {
+        reply_parameters: replyParameters(messageId)
+      } as never);
+    } catch (error) {
+      if (messageId === undefined || !isUnavailableReplyTargetError(error)) throw error;
+      this.logger.warn({ component: "telegram", event: "reply_target_unavailable", chatId: ctx.chat?.id, replyToMessageId: messageId, error }, "Telegram reply target unavailable; retrying without reply");
+      await ctx.reply(text);
+    }
   }
 
   private async loadOrCreatePairingCode(): Promise<string> {

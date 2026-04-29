@@ -176,6 +176,7 @@ export class SubagentManager {
             failed.error = error instanceof Error ? error.message : String(error);
             failed.completedAt = nowIso();
             await this.state.saveJob(failed);
+            await this.deliverTerminalResult(failed, this.formatTerminalResult(failed, "", undefined, undefined));
           }
           this.logger.error({ component: "subagents", event: "start_failed", jobId: id, error }, "subagent start failed");
         }
@@ -263,14 +264,9 @@ export class SubagentManager {
     job.signal = signal;
     let result = "";
     if (job.lastMessagePath && await pathExists(job.lastMessagePath)) result = await readFile(job.lastMessagePath, "utf8");
-    if (!result && job.status === "failed") result = `Subagent ${job.id} failed with exit code ${code ?? "null"} signal ${signal ?? "null"}.`;
+    result = this.formatTerminalResult(job, result, code, signal);
     await this.state.saveJob(job);
-    try {
-      if (job.status === "completed" && job.route === "return_to_main") await this.callbacks.onReturnToMain(job, result);
-      if (job.status === "completed" && job.route === "send_to_user") await this.callbacks.onSendToUser(job, result);
-    } catch (error) {
-      this.logger.error({ component: "subagents", event: "callback_failed", jobId, route: job.route, error }, "subagent result delivery failed");
-    }
+    await this.deliverTerminalResult(job, result);
     // Clean up artifact directory for completed/cancelled jobs that
     // delivered successfully. We keep failed-job artifacts for postmortem.
     if (this.config.subagents.cleanupArtifacts && (job.status === "completed" || job.status === "cancelled")) {
@@ -279,6 +275,28 @@ export class SubagentManager {
       });
     }
     void this.drain();
+  }
+
+  private formatTerminalResult(job: SubagentJob, result: string, code: number | null | undefined, signal: NodeJS.Signals | null | undefined): string {
+    const trimmed = result.trim();
+    if (job.status === "failed") {
+      const detail = job.error ?? `exit code ${code ?? "null"} signal ${signal ?? "null"}`;
+      const header = `Subagent ${job.id} (${job.profile}) failed: ${detail}.`;
+      return trimmed ? `${header}\n\n${trimmed}` : header;
+    }
+    if (job.status === "completed" && !trimmed) {
+      return `Subagent ${job.id} (${job.profile}) completed but produced no final message.`;
+    }
+    return trimmed;
+  }
+
+  private async deliverTerminalResult(job: SubagentJob, result: string): Promise<void> {
+    try {
+      if ((job.status === "completed" || job.status === "failed") && job.route === "return_to_main") await this.callbacks.onReturnToMain(job, result);
+      if ((job.status === "completed" || job.status === "failed") && job.route === "send_to_user") await this.callbacks.onSendToUser(job, result);
+    } catch (error) {
+      this.logger.error({ component: "subagents", event: "callback_failed", jobId: job.id, route: job.route, error }, "subagent result delivery failed");
+    }
   }
 
   resolveModel(model?: string): string {

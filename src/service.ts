@@ -197,10 +197,12 @@ export class ServiceSupervisor {
       logger,
       {
         onReturnToMain: async (job: SubagentJob, result: string) => {
-          await this.enqueueSynthetic(`Subagent ${job.id} (${job.profile}) completed.\n\nResult path: ${job.lastMessagePath ?? "unknown"}\n\n${result}`, {
+          await this.enqueueSynthetic(this.formatSubagentCallbackText(job, result), {
             source: "subagent",
             jobId: job.id,
             profile: job.profile,
+            subagentStatus: job.status,
+            subagentResult: result,
             originChatId: job.originChatId,
             originMessageId: job.originMessageId
           });
@@ -455,6 +457,7 @@ export class ServiceSupervisor {
       let output = "";
       let hadError = false;
       let errorMessage = "";
+      let userFacingDelivered = false;
       // Track which directive actions have already been pre-executed during
       // streaming so the final pass can skip only those actions.
       const preExecutedActions = new Set<string>();
@@ -507,6 +510,7 @@ export class ServiceSupervisor {
       const parsed = parseDirectives(output);
       if (parsed.cleanText && event.chatId) {
         await this.telegram.sendText(event.chatId, parsed.cleanText, event.messageId);
+        userFacingDelivered = true;
       }
       // Final pass: execute any directive actions that were NOT already
       // pre-executed during streaming. The idempotency key system is an
@@ -523,6 +527,7 @@ export class ServiceSupervisor {
             const mergedAckText = this.dispatchFollowupAckText(nextAction, event);
             if (mergedAckText) {
               const status = await this.executeDirective(action, event, { dispatchStatusText: this.formatDispatchSummary(action, mergedAckText) });
+              if (this.isUserFacingSendDirective(action) && status === "completed") userFacingDelivered = true;
               if (status !== "failed") {
                 await this.skipDirective(nextAction, "merged_dispatch_ack");
                 actionIndex++;
@@ -530,12 +535,14 @@ export class ServiceSupervisor {
               continue;
             }
           }
-          await this.executeDirective(action, event);
+          const status = await this.executeDirective(action, event);
+          if (this.isUserFacingSendDirective(action) && status === "completed") userFacingDelivered = true;
         }
       }
       for (const error of parsed.errors) {
         void this.enqueueSynthetic(`The previous assistant output contained an invalid codex-chat directive: ${error}`, { source: "system", turnId });
       }
+      if (!userFacingDelivered) await this.deliverSubagentFallbackIfNeeded(event);
       await closeTurn({ id: turnId, status: "completed", input: event, outputText: output, completedAt: nowIso() });
     } catch (error) {
       if (!turnClosed) {
@@ -567,6 +574,39 @@ export class ServiceSupervisor {
     const compact = lines.join("\n");
     if (compact.length > DISPATCH_ACK_MAX_CHARS) return undefined;
     return compact;
+  }
+
+  private isUserFacingSendDirective(action: DirectiveAction): boolean {
+    return action.type === "send_text" || action.type === "send_image" || action.type === "send_document";
+  }
+
+  private formatSubagentCallbackText(job: SubagentJob, result: string): string {
+    const status = job.status === "failed" ? "failed" : job.status === "cancelled" ? "cancelled" : "completed";
+    return `Subagent ${job.id} (${job.profile}) ${status}.\n\nResult path: ${job.lastMessagePath ?? "unknown"}\n\n${result}`;
+  }
+
+  private async deliverSubagentFallbackIfNeeded(event: UserEvent): Promise<void> {
+    if (event.source !== "subagent" || event.chatId === undefined) return;
+    const text = this.subagentFallbackText(event);
+    if (!text) return;
+    this.logger.warn(
+      { component: "service", event: "subagent_callback_fallback", chatId: event.chatId, messageId: event.messageId, jobId: event.metadata?.jobId },
+      "Subagent callback turn produced no user-facing output; sending result directly"
+    );
+    await this.telegram.sendText(event.chatId, text, event.messageId);
+  }
+
+  private subagentFallbackText(event: UserEvent): string {
+    const metadataResult = typeof event.metadata?.subagentResult === "string" ? event.metadata.subagentResult.trim() : "";
+    if (metadataResult) return metadataResult;
+
+    const legacyResult = event.text.match(/\n\nResult path: .*\n\n([\s\S]*)$/)?.[1]?.trim();
+    if (legacyResult) return legacyResult;
+
+    const status = typeof event.metadata?.subagentStatus === "string" ? event.metadata.subagentStatus : "completed";
+    const jobId = typeof event.metadata?.jobId === "string" ? event.metadata.jobId : "unknown";
+    if (status === "failed") return `Subagent ${jobId} failed and produced no final message.`;
+    return event.text.trim();
   }
 
   private async skipDirective(action: DirectiveAction, reason: string): Promise<StoredAction["status"]> {

@@ -480,6 +480,31 @@ describe("service supervisor", () => {
     expect(sendText).toHaveBeenCalledWith(253768951, "Subagent result summary.", 700);
   });
 
+  test("subagent return_to_main falls back to direct result when main output is blank", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
+      yield { type: "final", text: "   " };
+    });
+    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+
+    await service.enqueueSynthetic("Subagent job_456 completed.", {
+      source: "subagent",
+      jobId: "job_456",
+      profile: "implementer",
+      subagentStatus: "completed",
+      subagentResult: "Direct subagent result.",
+      originChatId: 253768951,
+      originMessageId: 701
+    });
+    await waitForIdle(service);
+
+    expect(sendText).toHaveBeenCalledTimes(1);
+    expect(sendText).toHaveBeenCalledWith(253768951, "Direct subagent result.", 701);
+  });
+
   test.each([
     ["ping"],
     ["list todos"],

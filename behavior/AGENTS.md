@@ -224,6 +224,8 @@ Dispatch a subagent when work is bounded, parallelizable, or needs isolated inve
 
 Use `return_to_main` unless the user explicitly asked for direct progress output.
 
+When a `source=subagent` callback includes Telegram origin chat/message metadata, it is part of a user-originated request and must not be silent. Send a concise user-facing `send_text`, `send_image`, `send_document`, or clean-text reply that summarizes the result or failure for that original message. The service has a direct-result fallback for safety, but do not rely on fallback behavior as the normal response path.
+
 ### Model/effort disclosure and routing
 
 For every user-originated task, explicitly decide whether work stays in the main loop or is dispatched to a subagent.

@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -194,5 +194,59 @@ describe("subagents", () => {
     const args = spawn.mock.calls[0]?.[1] as string[];
     expect(args).toContain('experimental_feature="on"');
     expect(args.filter((arg) => arg.includes("model_reasoning_effort"))).toEqual(['model_reasoning_effort="xhigh"']);
+  });
+
+  test("failed return_to_main jobs are delivered to the callback", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
+    tempDirs.push(root);
+    const children: ReturnType<typeof fakeChild>[] = [];
+    const spawn = vi.fn(() => {
+      const child = fakeChild();
+      children.push(child);
+      return child;
+    });
+    vi.doMock("node:child_process", async () => {
+      const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+      return { ...actual, spawn };
+    });
+    const { SubagentManager } = await import("../subagents.js");
+    const config = makeConfig(root, 1);
+    const behavior = { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") };
+    const state = { saveJob: vi.fn().mockResolvedValue(undefined) };
+    const onReturnToMain = vi.fn().mockResolvedValue(undefined);
+    const manager = new SubagentManager(
+      config,
+      behavior as never,
+      state as never,
+      fakeLogger() as never,
+      { onReturnToMain, onSendToUser: vi.fn() }
+    );
+
+    await manager.dispatch({
+      profile: "x",
+      prompt: "a",
+      route: "return_to_main",
+      originChatId: 253768951,
+      originMessageId: 702
+    });
+    for (let i = 0; i < 20 && children.length === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    const job = manager.listJobs()[0]!;
+    await writeFile(join(job.artifactDir, "last-message.md"), "partial failure details");
+
+    children[0]!.emit("exit", 1, null);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(onReturnToMain).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: job.id,
+        status: "failed",
+        originChatId: 253768951,
+        originMessageId: 702
+      }),
+      expect.stringContaining("partial failure details")
+    );
+    expect(onReturnToMain.mock.calls[0]?.[1]).toContain("failed");
   });
 });

@@ -1,13 +1,38 @@
 import { Bot, InputFile, type Context } from "grammy";
+import type { Chat, Message, MessageOrigin, User } from "grammy/types";
 import type { Logger } from "pino";
 import { AppConfig } from "./config.js";
 import { FileStore } from "./file-store.js";
 import { StateStore } from "./state.js";
 import { Transcriber } from "./transcription.js";
-import { Attachment, UserEvent } from "./types.js";
+import { Attachment, TelegramReplyChatSummary, TelegramReplyContext, TelegramReplySenderSummary, UserEvent } from "./types.js";
 import { chunkText, makePairingCode, nowIso } from "./util.js";
 import { renderTelegramMarkdown } from "./telegram-format.js";
 
+const REPLY_SNIPPET_MAX_CHARS = 280;
+const REPLY_LABEL_MAX_CHARS = 120;
+const TELEGRAM_CONTENT_FIELDS = [
+  "animation",
+  "audio",
+  "document",
+  "photo",
+  "sticker",
+  "story",
+  "video",
+  "video_note",
+  "voice",
+  "contact",
+  "dice",
+  "game",
+  "giveaway",
+  "giveaway_winners",
+  "invoice",
+  "location",
+  "paid_media",
+  "poll",
+  "checklist",
+  "venue"
+] as const;
 
 export interface TelegramAllowlistInput {
   userId?: number;
@@ -20,6 +45,145 @@ export interface TelegramAllowlistInput {
 
 function normalizeTelegramUserId(userId: number | string): string {
   return String(userId).trim();
+}
+
+function compactTelegramText(value: unknown, maxChars: number): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const compact = value
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!compact) return undefined;
+  const chars = Array.from(compact);
+  if (chars.length <= maxChars) return compact;
+  return `${chars.slice(0, maxChars).join("")}...`;
+}
+
+function summarizeTelegramUser(user?: User): TelegramReplySenderSummary | undefined {
+  if (!user) return undefined;
+  const summary: TelegramReplySenderSummary = {
+    userId: user.id,
+    firstName: compactTelegramText(user.first_name, REPLY_LABEL_MAX_CHARS),
+    lastName: compactTelegramText(user.last_name, REPLY_LABEL_MAX_CHARS),
+    username: compactTelegramText(user.username, REPLY_LABEL_MAX_CHARS),
+    isBot: user.is_bot
+  };
+  return summary;
+}
+
+function summarizeTelegramChat(chat?: Chat): TelegramReplyChatSummary | undefined {
+  if (!chat) return undefined;
+  const raw = chat as unknown as Record<string, unknown>;
+  return {
+    id: chat.id,
+    type: chat.type,
+    title: compactTelegramText(raw.title, REPLY_LABEL_MAX_CHARS),
+    username: compactTelegramText(raw.username, REPLY_LABEL_MAX_CHARS),
+    firstName: compactTelegramText(raw.first_name, REPLY_LABEL_MAX_CHARS),
+    lastName: compactTelegramText(raw.last_name, REPLY_LABEL_MAX_CHARS)
+  };
+}
+
+function summarizeTelegramMessageSender(message: Message): TelegramReplySenderSummary | undefined {
+  const user = summarizeTelegramUser(message.from);
+  const senderChat = summarizeTelegramChat(message.sender_chat);
+  const senderTag = compactTelegramText(message.sender_tag, REPLY_LABEL_MAX_CHARS);
+  const authorSignature = compactTelegramText(message.author_signature, REPLY_LABEL_MAX_CHARS);
+  if (!user && !senderChat && !senderTag && !authorSignature) return undefined;
+  return {
+    ...user,
+    senderChat,
+    senderTag,
+    authorSignature
+  };
+}
+
+function detectTelegramContentType(value: Record<string, unknown>): string {
+  if (compactTelegramText(value.text, 1)) return "text";
+  for (const field of TELEGRAM_CONTENT_FIELDS) {
+    if (value[field] !== undefined) return field;
+  }
+  if (compactTelegramText(value.caption, 1)) return "caption";
+  if (value.link_preview_options !== undefined) return "link_preview";
+  return "unknown";
+}
+
+function summarizeTelegramOrigin(origin: MessageOrigin): NonNullable<TelegramReplyContext["externalReply"]>["origin"] {
+  const base = { type: origin.type, date: origin.date };
+  if (origin.type === "user") {
+    return { ...base, sender: summarizeTelegramUser(origin.sender_user) };
+  }
+  if (origin.type === "hidden_user") {
+    return { ...base, senderName: compactTelegramText(origin.sender_user_name, REPLY_LABEL_MAX_CHARS) };
+  }
+  if (origin.type === "chat") {
+    return {
+      ...base,
+      chat: summarizeTelegramChat(origin.sender_chat),
+      authorSignature: compactTelegramText(origin.author_signature, REPLY_LABEL_MAX_CHARS)
+    };
+  }
+  return {
+    ...base,
+    chat: summarizeTelegramChat(origin.chat),
+    messageId: origin.message_id,
+    authorSignature: compactTelegramText(origin.author_signature, REPLY_LABEL_MAX_CHARS)
+  };
+}
+
+export function extractTelegramReplyContext(message: Message): TelegramReplyContext | undefined {
+  const context: TelegramReplyContext = {};
+
+  if (message.reply_to_message) {
+    const replied = message.reply_to_message;
+    const snippet = compactTelegramText(replied.text ?? replied.caption, REPLY_SNIPPET_MAX_CHARS);
+    context.replyToMessage = {
+      chatId: replied.chat.id,
+      messageId: replied.message_id,
+      messageThreadId: replied.message_thread_id,
+      sender: summarizeTelegramMessageSender(replied),
+      snippet,
+      contentType: detectTelegramContentType(replied as unknown as Record<string, unknown>)
+    };
+  }
+
+  if (message.external_reply) {
+    const external = message.external_reply;
+    context.externalReply = {
+      origin: summarizeTelegramOrigin(external.origin),
+      chat: summarizeTelegramChat(external.chat),
+      messageId: external.message_id,
+      contentType: detectTelegramContentType(external as unknown as Record<string, unknown>),
+      hasMediaSpoiler: external.has_media_spoiler === true ? true : undefined
+    };
+  }
+
+  if (message.quote) {
+    const snippet = compactTelegramText(message.quote.text, REPLY_SNIPPET_MAX_CHARS);
+    if (snippet) {
+      context.quote = {
+        snippet,
+        position: message.quote.position,
+        isManual: message.quote.is_manual === true ? true : undefined
+      };
+    }
+  }
+
+  if (message.reply_to_story) {
+    context.replyToStory = {
+      chat: summarizeTelegramChat(message.reply_to_story.chat),
+      storyId: message.reply_to_story.id
+    };
+  }
+
+  if (typeof message.reply_to_checklist_task_id === "number") {
+    context.replyToChecklistTaskId = message.reply_to_checklist_task_id;
+  }
+  if (typeof message.reply_to_poll_option_id === "string") {
+    context.replyToPollOptionId = compactTelegramText(message.reply_to_poll_option_id, REPLY_LABEL_MAX_CHARS);
+  }
+
+  return Object.keys(context).length > 0 ? context : undefined;
 }
 
 export function isTelegramUserAllowed(input: TelegramAllowlistInput): boolean {
@@ -227,6 +391,7 @@ export class TelegramGateway {
     const attachments: Attachment[] = [];
     let text = "text" in message && typeof message.text === "string" ? message.text : "";
     if ("caption" in message && typeof message.caption === "string") text = message.caption;
+    const reply = extractTelegramReplyContext(message);
 
     if ("photo" in message && Array.isArray(message.photo) && message.photo.length > 0) {
       attachments.push(await this.downloadTelegramFile("image", message.photo.at(-1)));
@@ -269,6 +434,7 @@ export class TelegramGateway {
       chatId: ctx.chat.id,
       userId: ctx.from.id,
       messageId: message.message_id,
+      reply,
       text,
       attachments,
       receivedAt: nowIso()
@@ -280,6 +446,7 @@ export class TelegramGateway {
       userId: ctx.from.id,
       username: ctx.from.username,
       messageId: message.message_id,
+      reply,
       text,
       attachments,
       receivedAt: nowIso(),

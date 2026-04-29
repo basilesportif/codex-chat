@@ -20,12 +20,80 @@ export interface Attachment {
   sha256?: string;
 }
 
+export interface TelegramReplyChatSummary {
+  id?: number;
+  type?: string;
+  title?: string;
+  username?: string;
+  firstName?: string;
+  lastName?: string;
+}
+
+export interface TelegramReplySenderSummary {
+  userId?: number;
+  username?: string;
+  firstName?: string;
+  lastName?: string;
+  isBot?: boolean;
+  senderChat?: TelegramReplyChatSummary;
+  senderTag?: string;
+  authorSignature?: string;
+}
+
+export interface TelegramReplyOriginContext {
+  type: string;
+  date?: number;
+  sender?: TelegramReplySenderSummary;
+  senderName?: string;
+  chat?: TelegramReplyChatSummary;
+  messageId?: number;
+  authorSignature?: string;
+}
+
+export interface TelegramSameChatReplyContext {
+  chatId: number;
+  messageId: number;
+  messageThreadId?: number;
+  sender?: TelegramReplySenderSummary;
+  snippet?: string;
+  contentType?: string;
+}
+
+export interface TelegramExternalReplyContext {
+  origin?: TelegramReplyOriginContext;
+  chat?: TelegramReplyChatSummary;
+  messageId?: number;
+  contentType?: string;
+  hasMediaSpoiler?: boolean;
+}
+
+export interface TelegramReplyQuoteContext {
+  snippet: string;
+  position?: number;
+  isManual?: boolean;
+}
+
+export interface TelegramReplyStoryContext {
+  chat?: TelegramReplyChatSummary;
+  storyId: number;
+}
+
+export interface TelegramReplyContext {
+  replyToMessage?: TelegramSameChatReplyContext;
+  externalReply?: TelegramExternalReplyContext;
+  quote?: TelegramReplyQuoteContext;
+  replyToStory?: TelegramReplyStoryContext;
+  replyToChecklistTaskId?: number;
+  replyToPollOptionId?: string;
+}
+
 export interface UserEvent {
   source: "telegram" | "loop" | "monitor" | "subagent" | "system";
   chatId?: number;
   userId?: number;
   username?: string;
   messageId?: number;
+  reply?: TelegramReplyContext;
   text: string;
   transcript?: string;
   attachments: Attachment[];

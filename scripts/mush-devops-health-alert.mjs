@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
+import { pathToFileURL } from "node:url";
 
 const DEFAULT_HOST = "tim@89.167.72.52";
 const DEFAULT_REMOTE_DIR = "/home/tim/pkg/mush/mush-devops";
@@ -47,7 +48,7 @@ async function main() {
     process.exit(run.exitCode || 1);
   }
 
-  const findings = collectFindings(payload.value);
+  const findings = collectFindings(payload.value, { lowBalanceThreshold });
   if (findings.length === 0) {
     process.exit(0);
   }
@@ -55,7 +56,7 @@ async function main() {
   console.log(formatAlert({ checkedAt: payload.value.checkedAt, host, remoteDir, findings }));
 }
 
-function parsePositiveNumber(value, fallback) {
+export function parsePositiveNumber(value, fallback) {
   if (value == null || value === "") return fallback;
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
@@ -126,7 +127,12 @@ function jsonCandidates(value) {
   return candidates;
 }
 
-function collectFindings(payload) {
+export function collectFindings(payload, options = {}) {
+  const lowBalanceThreshold = parsePositiveNumber(
+    options.lowBalanceThreshold,
+    DEFAULT_LOW_BALANCE_THRESHOLD,
+  );
+
   if (!payload || !Array.isArray(payload.results)) {
     return ["Health check output was missing the expected results array."];
   }
@@ -135,7 +141,8 @@ function collectFindings(payload) {
   const checks = new Map(payload.results.map((result) => [result.key, result]));
 
   collectHttpFindings(checks.get("http"), findings);
-  collectVastStatusFindings(checks.get("vastStatus"), findings);
+  collectVastStatusFindings(checks.get("vastStatus"), findings, lowBalanceThreshold);
+  collectVastBalanceFallbackFindings(payload, checks, findings, lowBalanceThreshold);
   collectVastDriftFindings(checks.get("vastDrift"), findings);
 
   for (const check of payload.results) {
@@ -169,7 +176,7 @@ function collectHttpFindings(check, findings) {
   }
 }
 
-function collectVastStatusFindings(check, findings) {
+function collectVastStatusFindings(check, findings, lowBalanceThreshold) {
   if (!check) {
     findings.push("Vast status check did not run.");
     return;
@@ -182,16 +189,48 @@ function collectVastStatusFindings(check, findings) {
     return;
   }
 
+  const lowBalance = formatLowBalanceFinding(check.parsed, lowBalanceThreshold);
+  if (lowBalance) {
+    findings.push(lowBalance);
+    return;
+  }
+
   if (check.parsed.healthy === false) {
-    const balance = formatMoney(check.parsed.balance);
-    const threshold = formatMoney(check.parsed.lowBalanceThreshold);
-    const hours = Number.isFinite(check.parsed.estimatedHoursRemaining)
-      ? `, about ${Math.round(check.parsed.estimatedHoursRemaining)}h remaining`
+    const balance = Number.isFinite(parseFiniteNumber(check.parsed.balance))
+      ? ` balance ${formatMoney(check.parsed.balance)}.`
       : "";
-    findings.push(`Vast status failing: balance ${balance} is below threshold ${threshold}${hours}.`);
+    findings.push(`Vast status failing:${balance || ` ${preview(check.stderr || check.stdout)}`}`);
   } else if (Number(check.exitCode) !== 0) {
     findings.push(`Vast status exited ${check.exitCode}: ${preview(check.stderr || check.stdout)}`);
   }
+}
+
+function collectVastBalanceFallbackFindings(payload, checks, findings, lowBalanceThreshold) {
+  if (findings.some((finding) => finding.startsWith("Vast balance low:"))) return;
+
+  const candidates = [
+    payload.vastAi,
+    checks.get("http")?.parsed?.vastAi,
+    ...payload.results.map((result) => result.parsed?.vastAi),
+  ];
+  for (const candidate of candidates) {
+    const lowBalance = formatLowBalanceFinding(candidate, lowBalanceThreshold);
+    if (lowBalance) {
+      findings.push(lowBalance);
+      return;
+    }
+  }
+}
+
+function formatLowBalanceFinding(status, lowBalanceThreshold) {
+  const balance = parseFiniteNumber(status?.balance);
+  if (!Number.isFinite(balance) || balance >= lowBalanceThreshold) return null;
+
+  const hoursRemaining = parseFiniteNumber(status?.estimatedHoursRemaining);
+  const hours = Number.isFinite(hoursRemaining)
+    ? `, about ${Math.round(hoursRemaining)}h remaining`
+    : "";
+  return `Vast balance low: balance ${formatMoney(balance)} is below threshold ${formatMoney(lowBalanceThreshold)}${hours}.`;
 }
 
 function collectVastDriftFindings(check, findings) {
@@ -239,7 +278,17 @@ function formatDriftComparison(comparison) {
 }
 
 function formatMoney(value) {
-  return Number.isFinite(value) ? `$${Number(value).toFixed(2)}` : "unknown";
+  const parsed = parseFiniteNumber(value);
+  return Number.isFinite(parsed) ? `$${parsed.toFixed(2)}` : "unknown";
+}
+
+function parseFiniteNumber(value) {
+  if (typeof value === "number") return Number.isFinite(value) ? value : Number.NaN;
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : Number.NaN;
+  }
+  return Number.NaN;
 }
 
 function preview(value) {
@@ -272,7 +321,9 @@ function printCommandFailure({ host, remoteDir, timeoutSec, run, reason }) {
   console.error(details.join("\n"));
 }
 
-main().catch((error) => {
-  console.error(`Mush DevOps health check wrapper failed: ${error instanceof Error ? error.message : String(error)}`);
-  process.exit(1);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    console.error(`Mush DevOps health check wrapper failed: ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  });
+}

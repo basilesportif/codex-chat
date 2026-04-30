@@ -23,6 +23,22 @@
       "notifyOnFailure": true,
       "durable": true,
       "suppressEmptyOutput": true
+    },
+    {
+      "id": "mush-devops-health-check",
+      "enabled": true,
+      "description": "Run Mush DevOps health checks and notify admins only on actionable failures.",
+      "schedule": "*/15 * * * *",
+      "type": "command",
+      "command": "/home/tim/pkg/tim/codex-chat/scripts/mush-devops-health-alert.mjs",
+      "args": [],
+      "cwd": "/home/tim/pkg/tim/codex-chat",
+      "route": "send_to_admins",
+      "timeoutSec": 300,
+      "lock": true,
+      "notifyOnFailure": true,
+      "durable": true,
+      "suppressEmptyOutput": true
     }
   ]
 }

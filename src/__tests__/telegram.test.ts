@@ -32,6 +32,20 @@ function testGateway(overrides: { state?: Partial<StateStore>; files?: Partial<F
   );
 }
 
+function deferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((innerResolve, innerReject) => {
+    resolve = innerResolve;
+    reject = innerReject;
+  });
+  return { promise, resolve, reject };
+}
+
+async function flush(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 describe("Telegram reply context extraction", () => {
   test("extracts same-chat reply, quote, and targeted reply identifiers", () => {
     const context = extractTelegramReplyContext({
@@ -108,6 +122,63 @@ describe("Telegram reply context extraction", () => {
         authorSignature: "Editor",
         chat: expect.objectContaining({ id: -100, title: "Release Notes" })
       })
+    }));
+  });
+
+  test("fires immediate receipt reaction before recording and queueing the user event", async () => {
+    const recordGate = deferred();
+    const recordMessage = vi.fn().mockImplementation(async () => {
+      await recordGate.promise;
+    });
+    const onUserEvent = vi.fn().mockResolvedValue(undefined);
+    const gateway = new TelegramGateway(
+      {
+        telegram: {
+          allowlist: { userIds: [9], chatIds: [100], adminUserIds: [] }
+        }
+      } as AppConfig,
+      {
+        listTelegramUsers: vi.fn().mockResolvedValue([]),
+        listTelegramChats: vi.fn().mockResolvedValue([]),
+        recordMessage
+      } as unknown as StateStore,
+      {} as FileStore,
+      {} as Transcriber,
+      createLogger("silent"),
+      { onUserEvent }
+    );
+
+    const reactions: Array<{ chatId: number; messageId: number; emoji: string }> = [];
+    vi.spyOn(gateway, "sendReaction").mockImplementation(async (chatId, messageId, emoji) => {
+      reactions.push({ chatId, messageId, emoji });
+    });
+
+    const handlePromise = (gateway as unknown as { handleMessage(ctx: Context): Promise<void> }).handleMessage({
+      chat: { id: 100, type: "private", first_name: "Tim" },
+      from: { id: 9, is_bot: false, first_name: "Tim", username: "tim" },
+      message: {
+        message_id: 77,
+        date: 1_700_000_100,
+        chat: { id: 100, type: "private", first_name: "Tim" },
+        from: { id: 9, is_bot: false, first_name: "Tim", username: "tim" },
+        text: "hello"
+      }
+    } as Context);
+
+    await flush();
+
+    expect(reactions).toEqual([{ chatId: 100, messageId: 77, emoji: "👀" }]);
+    expect(recordMessage).toHaveBeenCalledTimes(1);
+    expect(onUserEvent).not.toHaveBeenCalled();
+
+    recordGate.resolve();
+    await handlePromise;
+
+    expect(onUserEvent).toHaveBeenCalledWith(expect.objectContaining({
+      source: "telegram",
+      chatId: 100,
+      messageId: 77,
+      text: "hello"
     }));
   });
 

@@ -39,6 +39,60 @@ codex-chat jobs list
 - Telegram downloads: `data/files/`
 - Subagent artifacts: `data/subagents/`
 
+## Child Vocab SRS JSON backups
+
+The repo includes a small app-level backup script for `child-vocab-srs` data:
+
+```bash
+DATA_DIR=/root/var/child-vocab-srs/data pnpm run backup:child-vocab-srs
+```
+
+The script reads `/etc/child-vocab-srs.env` by default and lets process env
+vars override file values. `DATA_DIR` is required and must contain `app.json`.
+`BACKUP_DIR` is optional and defaults to
+`/root/var/child-vocab-srs/backups`.
+
+Each run validates `DATA_DIR/app.json` with `JSON.parse`, hashes that file, and
+only writes a new `child-vocab-srs-<timestamp>-<hash>.tar.gz` snapshot when the
+hash changes. The backup directory also gets `latest.sha256` and
+`latest-backup.json`. Common temp files and temp directories are excluded from
+the tarball.
+
+Example systemd timer:
+
+```ini
+# /etc/systemd/system/child-vocab-srs-backup.service
+[Unit]
+Description=Back up child-vocab-srs JSON data
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/child-vocab-srs.env
+ExecStart=/usr/bin/node /home/tim/pkg/tim/codex-chat/scripts/child-vocab-srs-backup.mjs
+```
+
+```ini
+# /etc/systemd/system/child-vocab-srs-backup.timer
+[Unit]
+Description=Run child-vocab-srs JSON backups every 15 minutes
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=true
+Unit=child-vocab-srs-backup.service
+
+[Install]
+WantedBy=timers.target
+```
+
+Restore check:
+
+```bash
+mkdir -p /tmp/child-vocab-srs-restore
+tar -xzf /root/var/child-vocab-srs/backups/<backup>.tar.gz -C /tmp/child-vocab-srs-restore
+node -e 'JSON.parse(require("node:fs").readFileSync("/tmp/child-vocab-srs-restore/app.json", "utf8"))'
+```
+
 ## Main-loop routing policy
 
 The warm main Codex loop is intentionally narrow. It should only handle

@@ -13,6 +13,7 @@
     "build": "tsc -p tsconfig.json && chmod +x dist/main.js",
     "dev": "bun run src/main.ts",
     "test": "vitest run",
+    "backup:child-vocab-srs": "node scripts/child-vocab-srs-backup.mjs",
     "start": "bun dist/main.js start",
     "health": "bun dist/main.js health"
   },

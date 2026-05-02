@@ -319,9 +319,27 @@ export async function ensureConfiguredDirectories(config: AppConfig): Promise<vo
 }
 
 export async function writeDefaultConfigIfMissing(path = "config/codex-chat.toml"): Promise<boolean> {
+  return copyExampleIfMissing(path, "codex-chat.example.toml");
+}
+
+export interface DefaultConfigWriteResult {
+  configCreated: boolean;
+  loopsCreated: boolean;
+  monitorsCreated: boolean;
+}
+
+export async function writeDefaultConfigFilesIfMissing(path = "config/codex-chat.toml"): Promise<DefaultConfigWriteResult> {
+  const configCreated = await writeDefaultConfigIfMissing(path);
+  const config = await loadConfig(path);
+  const loopsCreated = await copyExampleIfMissing(resolveConfigPath(config, config.loops.path), "loops.example.json");
+  const monitorsCreated = await copyExampleIfMissing(resolveConfigPath(config, config.monitors.path), "monitors.example.json");
+  return { configCreated, loopsCreated, monitorsCreated };
+}
+
+async function copyExampleIfMissing(path: string, exampleName: string): Promise<boolean> {
   if (await pathExists(path)) return false;
   await ensureDir(dirname(path));
-  const sample = await readFile(new URL("../config/codex-chat.toml", import.meta.url), "utf8").catch(() => "");
+  const sample = await readFile(new URL(`../config/${exampleName}`, import.meta.url), "utf8");
   await writeFile(path, sample);
   return true;
 }

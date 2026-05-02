@@ -14,6 +14,11 @@ bun dist/main.js setup
 bun dist/main.js start
 ```
 
+`setup` creates local runtime config from committed examples when files are
+missing: `config/codex-chat.toml`, `config/loops.json`, and
+`config/monitors.json`. Those runtime files are intentionally gitignored; edit
+the local copies for deployment-specific paths, allowlists, loops, and monitors.
+
 If `telegram.allowlist` is empty, `start` prints a one-time `/pair <code>` command. Send that command to the bot from Telegram to authorize your numeric Telegram user ID and chat ID.
 
 ## CLI
@@ -31,9 +36,9 @@ codex-chat jobs list
 
 ## Runtime Paths
 
-- Config: `config/codex-chat.toml`
-- Loops: `config/loops.json`
-- Monitors: `config/monitors.json`
+- Config: `config/codex-chat.toml` from `config/codex-chat.example.toml`
+- Loops: `config/loops.json` from `config/loops.example.json`
+- Monitors: `config/monitors.json` from `config/monitors.example.json`
 - Behavior pack: `behavior/AGENTS.md`
 - JSON state: `data/state/`
 - Telegram downloads: `data/files/`

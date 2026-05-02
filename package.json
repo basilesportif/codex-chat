@@ -6,6 +6,14 @@
   "license": "UNLICENSED",
   "private": true,
   "packageManager": "pnpm@10.18.3",
+  "files": [
+    ".env.example",
+    "behavior/",
+    "config/*.example.json",
+    "config/*.example.toml",
+    "dist/",
+    "scripts/"
+  ],
   "bin": {
     "codex-chat": "dist/main.js"
   },

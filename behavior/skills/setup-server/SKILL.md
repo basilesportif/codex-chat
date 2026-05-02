@@ -236,7 +236,7 @@ chmod 600 config/codex-chat.env
 REMOTE
 ```
 
-Then configure `config/codex-chat.toml` for the deployment. If the repo already has a deployment config, preserve it and only update the allowlist/admin IDs. If not, copy the example/default config and set:
+Then configure `config/codex-chat.toml` for the deployment. Runtime config files are intentionally untracked; run `bun dist/main.js setup` or copy `config/codex-chat.example.toml`, `config/loops.example.json`, and `config/monitors.example.json` to their non-example runtime names. If the host already has a deployment config, preserve it and only update the allowlist/admin IDs. If not, set:
 
 - Telegram token is read from the environment, not TOML.
 - allowed Telegram user/chat IDs include the owner.

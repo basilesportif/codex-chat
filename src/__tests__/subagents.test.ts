@@ -138,6 +138,44 @@ describe("subagents", () => {
     expect(manager.listJobs()[0]).toMatchObject({ model: "gpt-5.5", effort: "xhigh", summary: "test task" });
   });
 
+  test("adds remote repo authority rules to subagent prompts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
+    tempDirs.push(root);
+    const children: ReturnType<typeof fakeChild>[] = [];
+    const spawn = vi.fn(() => {
+      const child = fakeChild();
+      children.push(child);
+      return child;
+    });
+    vi.doMock("node:child_process", async () => {
+      const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+      return { ...actual, spawn };
+    });
+    const { SubagentManager } = await import("../subagents.js");
+    const config = makeConfig(root, 1);
+    const behavior = { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") };
+    const state = { saveJob: vi.fn().mockResolvedValue(undefined) };
+    const manager = new SubagentManager(
+      config,
+      behavior as never,
+      state as never,
+      fakeLogger() as never,
+      { onReturnToMain: vi.fn(), onSendToUser: vi.fn() }
+    );
+
+    await manager.dispatch({ profile: "x", prompt: "verify dev server path", route: "return_to_main" });
+    for (let i = 0; i < 20 && children.length === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+
+    const prompt = children[0]!.stdin.end.mock.calls[0]?.[0] as string;
+    expect(prompt).toContain("Remote repo authority:");
+    expect(prompt).toContain("/home/tim/.assistant-claude/workspace/.claude/repo-registry/index.yaml");
+    expect(prompt).toContain("ssh <host>");
+    expect(prompt).toContain(".claude/repo-registry/repos/<alias>");
+    expect(prompt).toContain("Do not print or inspect secret values");
+  });
+
   test("rejects new dispatch when queue depth is exhausted", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
     tempDirs.push(root);

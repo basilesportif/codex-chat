@@ -11,6 +11,13 @@ import { ensureDir, killProcessTree, makeId, nowIso, pathExists } from "./util.j
 
 const SIGKILL_GRACE_MS = 5_000;
 const MAX_QUEUE_DEPTH = 200;
+const REMOTE_REPO_AUTHORITY_RULES = [
+  "Remote repo authority:",
+  "- When a task mentions repo-registry, a dev server, or a repo path that may be registered remotely, first resolve the authoritative location from `/home/tim/.assistant-claude/workspace/.claude/repo-registry/index.yaml`.",
+  "- In that registry, `host: local` or a missing host means local; any other `host` value, such as `tim@89.167.72.52`, is authoritative remote.",
+  "- For remote registry entries, verify files and git state over SSH on the registered host and path, for example `ssh <host> \"cd <path> && ...\"`. Do not substitute same-looking local paths such as `/home/tim/...`, and do not treat `.claude/repo-registry/repos/<alias>` as the repo checkout.",
+  "- For env files, credentials, and other likely secrets, verify only metadata such as existence, permissions, owner, size, line/key counts, git ignore status, and git tracking state. Do not print or inspect secret values."
+].join("\n");
 
 interface DispatchInput {
   id?: string;
@@ -194,6 +201,8 @@ export class SubagentManager {
     const profileContents = await this.behavior.readSubagentProfile(input.profile);
     const assembledPrompt = [
       profileContents.trim(),
+      "",
+      REMOTE_REPO_AUTHORITY_RULES,
       "",
       "Task:",
       input.prompt,

@@ -173,6 +173,45 @@ describe("dispatch_subagent status", () => {
   });
 });
 
+describe("cancel_job directive", () => {
+  test("fails and surfaces no-match cancellation attempts", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    const enqueueSynthetic = vi.spyOn(service, "enqueueSynthetic").mockResolvedValue();
+
+    const status = await (service as unknown as { executeDirective(action: unknown, origin: unknown): Promise<string> }).executeDirective(
+      { type: "cancel_job", idempotencyKey: "cancel-missing", jobId: "feedface" },
+      { source: "telegram", text: "x", attachments: [], receivedAt: new Date().toISOString(), chatId: 123, messageId: 456 }
+    );
+
+    expect(status).toBe("failed");
+    expect(enqueueSynthetic).toHaveBeenCalledWith(expect.stringContaining('Directive action cancel_job failed: No subagent job matched "feedface".'), { source: "system" });
+  });
+
+  test("fails and surfaces ambiguous cancellation attempts", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    const subagents = (service as unknown as { subagents: SubagentManager }).subagents;
+    subagents.addJobs([
+      { id: "job_dead1111000000000000000000000000", profile: "debugger", route: "return_to_main", status: "queued", promptPath: "/tmp/p", artifactDir: "/tmp/a" },
+      { id: "job_dead2222000000000000000000000000", profile: "reviewer", route: "return_to_main", status: "queued", promptPath: "/tmp/p", artifactDir: "/tmp/a" }
+    ]);
+    const enqueueSynthetic = vi.spyOn(service, "enqueueSynthetic").mockResolvedValue();
+
+    const status = await (service as unknown as { executeDirective(action: unknown, origin: unknown): Promise<string> }).executeDirective(
+      { type: "cancel_job", idempotencyKey: "cancel-ambiguous", jobId: "dead" },
+      { source: "telegram", text: "x", attachments: [], receivedAt: new Date().toISOString(), chatId: 123, messageId: 456 }
+    );
+
+    expect(status).toBe("failed");
+    expect(enqueueSynthetic).toHaveBeenCalledWith(expect.stringContaining('Directive action cancel_job failed: Ambiguous subagent job ref "dead" matches 2 jobs.'), { source: "system" });
+  });
+});
+
 // ---------------------------------------------------------------------------
 // formatJobsDetailed
 // ---------------------------------------------------------------------------
@@ -241,15 +280,17 @@ describe("formatJobsDetailed", () => {
     (service as unknown as { subagents: { listJobs(): SubagentJob[] } }).subagents.listJobs = () => jobs;
     const result = (service as unknown as { formatJobsDetailed(n: number): string }).formatJobsDetailed(0);
     expect(result).toContain("1 running");
+    expect(result).toContain("1 terminal");
     expect(result).toContain("1 completed");
-    expect(result).toContain("[job_ab]");
+    expect(result).toContain("[job_abc123de]");
     expect(result).toContain("researcher");
-    expect(result).toContain("[job_gh]");
+    expect(result).toContain("cancel: agent kill abc123de");
+    expect(result).toContain("[job_ghi789jk]");
     expect(result).toContain("debugger");
     expect(result).toContain("model=gpt-5.5");
     expect(result).toContain("effort=xhigh");
     expect(result).toContain("research task");
-    expect(result).toContain("✓");
+    expect(result).toContain("completed debugger");
   });
 
   test("formats running and finished durations as minutes and seconds", async () => {
@@ -268,10 +309,10 @@ describe("formatJobsDetailed", () => {
     ];
     (service as unknown as { subagents: { listJobs(): SubagentJob[] } }).subagents.listJobs = () => jobs;
     const result = (service as unknown as { formatJobsDetailed(n: number): string }).formatJobsDetailed(0);
-    expect(result).toContain("[job_ru] runner — 0:07");
-    expect(result).toContain("[job_do] finisher — done in 1:05 ✓");
-    expect(result).toContain("[job_fa] debugger — done in 62:05 ✗");
-    expect(result).toContain("[job_st] reviewer — done in 0:07 ⊘");
+    expect(result).toContain("[job_run007xx] running runner - 0:07");
+    expect(result).toContain("[job_done065x] completed finisher - done in 1:05");
+    expect(result).toContain("[job_fail3725] failed debugger - done in 62:05");
+    expect(result).toContain("[job_stop007x] cancelled reviewer - done in 0:07");
   });
 
   test("respects lastN parameter for completed jobs", async () => {
@@ -294,8 +335,27 @@ describe("formatJobsDetailed", () => {
     const result = (service as unknown as { formatJobsDetailed(n: number): string }).formatJobsDetailed(3);
     expect(result).toContain("last 3");
     // Only 3 job entries in recently completed section
-    const matches = result.match(/✓/g);
+    const matches = result.match(/completed researcher/g);
     expect(matches?.length).toBe(3);
+  });
+
+  test("agents output includes usable cancel refs", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    const jobs: SubagentJob[] = [
+      { id: "job_e98ad78ae0cf4549a5cf88f1c875c668", profile: "implementer", route: "return_to_main", status: "running", promptPath: "/tmp/p", artifactDir: "/tmp/a", startedAt: new Date().toISOString(), summary: "fix cancellation" },
+      { id: "job_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", profile: "reviewer", route: "return_to_main", status: "queued", promptPath: "/tmp/p", artifactDir: "/tmp/a", enqueuedAt: new Date().toISOString() }
+    ];
+    (service as unknown as { subagents: { listJobs(): SubagentJob[] } }).subagents.listJobs = () => jobs;
+
+    const detailed = (service as unknown as { formatJobsDetailed(n: number): string }).formatJobsDetailed(0);
+    const compact = service.formatJobs();
+
+    expect(detailed).toContain("[job_e98ad78a]");
+    expect(detailed).toContain("cancel: agent kill e98ad78a");
+    expect(compact).toContain("ref=e98ad78a");
+    expect(compact).toContain('cancel="agent kill e98ad78a"');
   });
 });
 
@@ -329,10 +389,10 @@ function makeSubagentConfig(rootDir: string) {
 function makeManager(rootDir: string) {
   const config = makeSubagentConfig(rootDir);
   const behavior = { readSubagentProfile: vi.fn().mockResolvedValue("profile") };
-  const state = { saveJob: vi.fn().mockResolvedValue(undefined) };
+  const state = { saveJob: vi.fn().mockResolvedValue(undefined), listJobs: vi.fn().mockResolvedValue([]) };
   const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
   const manager = new SubagentManager(config, behavior as never, state as never, logger as never, { onReturnToMain: vi.fn(), onSendToUser: vi.fn() });
-  return { manager, logger };
+  return { manager, logger, state };
 }
 
 describe("SubagentManager.addJobs and loadJobs", () => {
@@ -360,20 +420,26 @@ describe("SubagentManager.addJobs and loadJobs", () => {
     expect(manager.listJobs()).toHaveLength(0);
   });
 
-  test("loadJobs is a no-op stub that logs intent", async () => {
+  test("loadJobs hydrates persisted jobs and logs counts", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
     tempDirs.push(root);
-    const { manager, logger } = makeManager(root);
+    const { manager, logger, state } = makeManager(root);
+    state.listJobs.mockResolvedValue([
+      { id: "job_active", profile: "researcher", route: "return_to_main", status: "running", promptPath: "/tmp/p", artifactDir: "/tmp/a" },
+      { id: "job_done", profile: "debugger", route: "return_to_main", status: "completed", promptPath: "/tmp/p", artifactDir: "/tmp/a" }
+    ]);
 
-    // Should not throw
-    expect(() => manager.loadJobs()).not.toThrow();
-    // Should log "loadJobs: in-memory only"
+    const result = await manager.loadJobs();
+
+    expect(result).toEqual({ loaded: 2, abandoned: 1 });
     expect(logger.info).toHaveBeenCalledWith(
-      expect.objectContaining({ component: "subagents", event: "load_jobs" }),
-      "loadJobs: in-memory only"
+      expect.objectContaining({ component: "subagents", event: "load_jobs", loaded: 2, abandoned: 1 }),
+      "loaded persisted subagent jobs"
     );
-    // Jobs map should still be empty after load (no disk to hydrate from)
-    expect(manager.listJobs()).toHaveLength(0);
+    expect(manager.listJobs()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "job_active", status: "abandoned" }),
+      expect.objectContaining({ id: "job_done", status: "completed" })
+    ]));
   });
 
   test("listJobs returns jobs sorted by startedAt descending", async () => {
@@ -486,5 +552,23 @@ describe("service command routing", () => {
     expect(cancelJob).toHaveBeenCalledWith("abc123");
     expect(sendText).toHaveBeenCalledWith(253768951, "Cancelled job_abc123.", 3);
     expect(runTurn).not.toHaveBeenCalled();
+  });
+
+  test("cancelJob resolves prefixes and reports ambiguous, unknown, and terminal refs", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    const subagents = (service as unknown as { subagents: SubagentManager }).subagents;
+    subagents.addJobs([
+      { id: "job_abcd1111000000000000000000000000", profile: "researcher", route: "return_to_main", status: "queued", promptPath: "/tmp/p", artifactDir: "/tmp/a" },
+      { id: "job_dead1111000000000000000000000000", profile: "debugger", route: "return_to_main", status: "queued", promptPath: "/tmp/p", artifactDir: "/tmp/a" },
+      { id: "job_dead2222000000000000000000000000", profile: "reviewer", route: "return_to_main", status: "queued", promptPath: "/tmp/p", artifactDir: "/tmp/a" }
+    ]);
+
+    await expect(service.cancelJob("abcd1111")).resolves.toContain("Cancelled queued subagent job_abcd1111000000000000000000000000");
+    await expect(service.cancelJob("abcd1111")).resolves.toContain("already cancelled");
+    await expect(service.cancelJob("dead")).resolves.toContain("Ambiguous subagent ref");
+    await expect(service.cancelJob("feedface")).resolves.toContain('No subagent job matched "feedface"');
   });
 });

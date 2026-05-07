@@ -21,7 +21,7 @@ import { LocalIpcServer } from "./ipc.js";
 import { LoopManager, syncCron } from "./loops.js";
 import { MonitorManager } from "./monitors.js";
 import { StateStore } from "./state.js";
-import { SubagentManager } from "./subagents.js";
+import { SubagentManager, type CancelJobResult } from "./subagents.js";
 import { DisabledTranscriber, OpenAITranscriber, Transcriber } from "./transcription.js";
 import { isTelegramAdmin, TelegramGateway } from "./telegram.js";
 import { CodexClient, StoredAction, SubagentJob, UserEvent } from "./types.js";
@@ -134,10 +134,10 @@ export const HELP_TEXT = `Service commands (handled instantly, bypass Codex):
   logs [N]          — last N app-server log lines (default 50)
   logs raw [N]      — include raw/verbose events
   introspect [N]    — same as logs
-  agents            — subagent status (running/queued/completed)
+  agents            — subagent status and cancel refs
   subagents (sub)   — alias for agents
-  agents <N>        — last N completed jobs
-  agent kill <id>   — cancel a subagent by ID prefix
+  agents <N>        — last N terminal jobs
+  agent kill <ref>  — cancel a subagent by full ID, displayed ref, or hex prefix
   help              — this message
   update / deploy   — pull latest and restart service`;
 
@@ -245,6 +245,7 @@ export class ServiceSupervisor {
   async start(): Promise<void> {
     await ensureConfiguredDirectories(this.config);
     await this.state.init();
+    await this.subagents.loadJobs();
     await this.files.init();
     await this.behavior.loadBootstrapPrompt();
     await this.codex.start();
@@ -370,14 +371,24 @@ export class ServiceSupervisor {
   formatJobs(): string {
     const jobs = this.subagents.listJobs();
     if (jobs.length === 0) return "No subagent jobs.";
-    return jobs.slice(0, 20).map((job) => `${job.id} ${job.status} ${job.profile}${this.formatJobModelEffort(job)}${job.startedAt ? ` started=${job.startedAt}` : ""}`).join("\n");
+    return jobs.slice(0, 20).map((job) => {
+      const ref = this.formatJobCancelRef(job);
+      const cancel = job.status === "queued" || job.status === "running" ? ` cancel="agent kill ${ref}"` : "";
+      return `${job.id} ref=${ref} status=${job.status} profile=${job.profile}${this.formatJobModelEffort(job)}${job.enqueuedAt ? ` enqueued=${job.enqueuedAt}` : ""}${job.startedAt ? ` started=${job.startedAt}` : ""}${job.completedAt ? ` completed=${job.completedAt}` : ""}${cancel}`;
+    }).join("\n");
   }
 
   formatJobsDetailed(lastN = 0): string {
     const all = this.subagents.listJobs();
     const running = all.filter((j) => j.status === "running");
+    const cancelling = all.filter((j) => j.status === "cancelling");
     const queued = all.filter((j) => j.status === "queued");
-    const completed = all.filter((j) => j.status === "completed" || j.status === "failed" || j.status === "cancelled");
+    const terminal = all.filter((j) => this.isTerminalSubagentStatus(j.status));
+    const completed = terminal.filter((j) => j.status === "completed");
+    const failed = terminal.filter((j) => j.status === "failed");
+    const cancelled = terminal.filter((j) => j.status === "cancelled");
+    const timedOut = terminal.filter((j) => j.status === "timed_out");
+    const abandoned = terminal.filter((j) => j.status === "abandoned");
     const now = Date.now();
 
     function elapsedSec(iso?: string): number {
@@ -390,35 +401,40 @@ export class ServiceSupervisor {
       return Math.round((new Date(end).getTime() - new Date(start).getTime()) / 1000);
     }
 
-    function shortId(id: string): string {
-      return id.slice(0, 6);
-    }
-
     const lines: string[] = [];
-    lines.push(`Subagents: ${running.length} running, ${queued.length} queued, ${completed.length} completed`);
+    lines.push(`Subagents: ${running.length} running, ${cancelling.length} cancelling, ${queued.length} queued, ${terminal.length} terminal (${completed.length} completed, ${failed.length} failed, ${cancelled.length} cancelled, ${timedOut.length} timed_out, ${abandoned.length} abandoned)`);
 
     if (running.length > 0) {
       lines.push("\nRunning:");
       for (const j of running) {
-        lines.push(`  [${shortId(j.id)}] ${j.profile}${this.formatJobModelEffort(j)} — ${formatDurationSeconds(elapsedSec(j.startedAt))}${j.summary ? ` — ${j.summary}` : ""}`);
+        const ref = this.formatJobCancelRef(j);
+        lines.push(`  [${this.formatJobDisplayId(j)}] running ${j.profile}${this.formatJobModelEffort(j)} - ${formatDurationSeconds(elapsedSec(j.startedAt))} - cancel: agent kill ${ref}${j.pid ? ` - pid=${j.pid}` : ""}${j.summary ? ` - ${j.summary}` : ""}`);
+      }
+    }
+
+    if (cancelling.length > 0) {
+      lines.push("\nCancelling:");
+      for (const j of cancelling) {
+        lines.push(`  [${this.formatJobDisplayId(j)}] cancelling ${j.profile}${this.formatJobModelEffort(j)} - requested=${j.cancelRequestedAt ?? "unknown"} reason=${j.cancelReason ?? "user"}${j.termSentAt ? ` termSent=${j.termSentAt}` : ""}${j.killSentAt ? ` killSent=${j.killSentAt}` : ""}${j.summary ? ` - ${j.summary}` : ""}`);
       }
     }
 
     if (queued.length > 0) {
       lines.push("\nQueued:");
       for (const j of queued) {
-        lines.push(`  [${shortId(j.id)}] ${j.profile}${this.formatJobModelEffort(j)}${j.summary ? ` — ${j.summary}` : ""}`);
+        const ref = this.formatJobCancelRef(j);
+        lines.push(`  [${this.formatJobDisplayId(j)}] queued ${j.profile}${this.formatJobModelEffort(j)}${j.enqueuedAt ? ` - queued ${formatDurationSeconds(elapsedSec(j.enqueuedAt))} ago` : ""} - cancel: agent kill ${ref}${j.summary ? ` - ${j.summary}` : ""}`);
       }
     }
 
     const recentN = lastN > 0 ? lastN : 5;
-    const recent = completed.slice(0, recentN);
+    const recent = terminal.slice(0, recentN);
     if (recent.length > 0) {
-      lines.push(`\nRecently completed (last ${recentN}):`);
+      lines.push(`\nRecently terminal (last ${recentN}):`);
       for (const j of recent) {
         const dur = durationSec(j.startedAt, j.completedAt);
-        const mark = j.status === "completed" ? "✓" : j.status === "failed" ? "✗" : "⊘";
-        lines.push(`  [${shortId(j.id)}] ${j.profile}${this.formatJobModelEffort(j)} — done in ${formatDurationSeconds(dur)} ${mark}${j.summary ? ` — ${j.summary}` : ""}`);
+        const exit = j.exitCode !== undefined || j.signal !== undefined ? ` - exit=${j.exitCode ?? "null"} signal=${j.signal ?? "null"}` : "";
+        lines.push(`  [${this.formatJobDisplayId(j)}] ${j.status} ${j.profile}${this.formatJobModelEffort(j)} - done in ${formatDurationSeconds(dur)}${exit}${j.summary ? ` - ${j.summary}` : ""}`);
       }
     }
 
@@ -428,6 +444,19 @@ export class ServiceSupervisor {
   private formatJobModelEffort(job: SubagentJob): string {
     const parts = [job.model ? `model=${job.model}` : "", job.effort ? `effort=${job.effort}` : ""].filter(Boolean);
     return parts.length > 0 ? ` (${parts.join(" ")})` : "";
+  }
+
+  private isTerminalSubagentStatus(status: SubagentJob["status"]): boolean {
+    return status === "completed" || status === "failed" || status === "cancelled" || status === "timed_out" || status === "abandoned";
+  }
+
+  private formatJobCancelRef(job: SubagentJob): string {
+    const subagents = this.subagents as SubagentManager & { shortRef?: (id: string) => string };
+    return subagents.shortRef?.(job.id) ?? (job.id.startsWith("job_") ? job.id.slice(4, 12) : job.id.slice(0, 8));
+  }
+
+  private formatJobDisplayId(job: SubagentJob): string {
+    return job.id.startsWith("job_") ? `job_${this.formatJobCancelRef(job)}` : this.formatJobCancelRef(job);
   }
 
   private formatDispatchSummary(action: DispatchSubagentAction, followupText?: string): string {
@@ -440,7 +469,29 @@ export class ServiceSupervisor {
   }
 
   async cancelJob(jobId: string): Promise<string> {
-    return await this.subagents.cancel(jobId) ? `Cancelled ${jobId}.` : `No running job found: ${jobId}`;
+    return this.formatCancelJobResult(await this.subagents.requestCancel(jobId));
+  }
+
+  private formatCancelJobResult(result: CancelJobResult): string {
+    if (result.status === "success" && result.job) {
+      if (result.previousStatus === "queued") {
+        return `Cancelled queued subagent ${result.job.id} (${result.job.profile}).`;
+      }
+      return `Cancellation requested for running subagent ${result.job.id} (${result.job.profile}); status=cancelling, signal=SIGTERM.`;
+    }
+    if (result.status === "already_cancelling" && result.job) {
+      return `Subagent ${result.job.id} (${result.job.profile}) is already cancelling; requested=${result.job.cancelRequestedAt ?? "unknown"}.`;
+    }
+    if (result.status === "already_terminal" && result.job) {
+      return `Subagent ${result.job.id} (${result.job.profile}) is already ${result.job.status}; no cancellation sent.`;
+    }
+    if (result.status === "ambiguous") {
+      const candidates = (result.candidates ?? []).slice(0, 8).map((candidate) =>
+        `${candidate.id} ref=${candidate.ref} status=${candidate.status} profile=${candidate.profile}${candidate.summary ? ` summary=${candidate.summary}` : ""}`
+      );
+      return [`Ambiguous subagent ref "${result.ref}". Use a longer ref.`, ...candidates].join("\n");
+    }
+    return `No subagent job matched "${result.ref}". Use "agents" to list usable refs.`;
   }
 
   private async processEvent(event: UserEvent): Promise<void> {
@@ -581,7 +632,11 @@ export class ServiceSupervisor {
   }
 
   private formatSubagentCallbackText(job: SubagentJob, result: string): string {
-    const status = job.status === "failed" ? "failed" : job.status === "cancelled" ? "cancelled" : "completed";
+    const status = job.status === "failed"
+      ? "failed"
+      : job.status === "cancelled"
+        ? "cancelled"
+        : job.status === "timed_out" ? "timed out" : "completed";
     return `Subagent ${job.id} (${job.profile}) ${status}.\n\nResult path: ${job.lastMessagePath ?? "unknown"}\n\n${result}`;
   }
 
@@ -606,6 +661,8 @@ export class ServiceSupervisor {
     const status = typeof event.metadata?.subagentStatus === "string" ? event.metadata.subagentStatus : "completed";
     const jobId = typeof event.metadata?.jobId === "string" ? event.metadata.jobId : "unknown";
     if (status === "failed") return `Subagent ${jobId} failed and produced no final message.`;
+    if (status === "timed_out") return `Subagent ${jobId} timed out and produced no final message.`;
+    if (status === "cancelled") return `Subagent ${jobId} was cancelled and produced no final message.`;
     return event.text.trim();
   }
 
@@ -667,7 +724,10 @@ export class ServiceSupervisor {
         }
         await this.subagents.dispatchFromDirective(action, { chatId: origin.chatId, messageId: origin.messageId });
       }
-      if (action.type === "cancel_job") await this.subagents.cancel(action.jobId);
+      if (action.type === "cancel_job") {
+        const result = await this.subagents.requestCancel(action.jobId);
+        if (result.status !== "success") throw new Error(result.message);
+      }
       if (action.type === "notify_owner") await this.telegram.notifyOps(action.text);
       if (action.type === "react") await this.telegram.sendReaction(action.chatId ?? this.requireChat(defaultChatId), action.messageId, action.emoji);
       if (action.type === "enqueue_main") void this.enqueueSynthetic(action.text, action.metadata);

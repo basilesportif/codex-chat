@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { appendFile, mkdir, readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { AppConfig, resolveConfigPath } from "./config.js";
 import { LoopRun, MonitorEvent, StoredAction, SubagentJob } from "./types.js";
@@ -73,6 +73,21 @@ export class StateStore {
 
   async saveJob(job: SubagentJob): Promise<void> {
     await this.writeJson(`jobs/${job.id}.json`, job);
+  }
+
+  async listJobs(): Promise<SubagentJob[]> {
+    const dir = this.path("jobs");
+    const files = await readdir(dir).catch(() => []);
+    const jobs: SubagentJob[] = [];
+    for (const file of files) {
+      if (!file.endsWith(".json")) continue;
+      try {
+        jobs.push(JSON.parse(await readFile(join(dir, file), "utf8")) as SubagentJob);
+      } catch {
+        // Ignore malformed historical job files; callers can still hydrate the rest.
+      }
+    }
+    return jobs;
   }
 
   async saveLoopRun(run: LoopRun): Promise<void> {

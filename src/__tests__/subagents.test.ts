@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -18,6 +18,7 @@ function fakeChild() {
     stdin: { end: ReturnType<typeof vi.fn> };
     pid: number;
     exitCode: number | null;
+    signalCode: NodeJS.Signals | null;
     killed: boolean;
     kill: ReturnType<typeof vi.fn>;
   };
@@ -26,6 +27,7 @@ function fakeChild() {
   child.stdin = { end: vi.fn() };
   child.pid = Math.floor(Math.random() * 100000) + 1000;
   child.exitCode = null;
+  child.signalCode = null;
   child.killed = false;
   child.kill = vi.fn(() => {
     child.killed = true;
@@ -62,7 +64,15 @@ function makeConfig(rootDir: string, maxConcurrent = 2): AppConfig {
   } as AppConfig;
 }
 
+async function waitFor(predicate: () => boolean, attempts = 30): Promise<void> {
+  for (let i = 0; i < attempts; i++) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+}
+
 afterEach(async () => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.resetModules();
   vi.doUnmock("node:child_process");
@@ -138,6 +148,44 @@ describe("subagents", () => {
     expect(manager.listJobs()[0]).toMatchObject({ model: "gpt-5.5", effort: "xhigh", summary: "test task" });
   });
 
+  test("adds remote repo authority rules to subagent prompts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
+    tempDirs.push(root);
+    const children: ReturnType<typeof fakeChild>[] = [];
+    const spawn = vi.fn(() => {
+      const child = fakeChild();
+      children.push(child);
+      return child;
+    });
+    vi.doMock("node:child_process", async () => {
+      const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+      return { ...actual, spawn };
+    });
+    const { SubagentManager } = await import("../subagents.js");
+    const config = makeConfig(root, 1);
+    const behavior = { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") };
+    const state = { saveJob: vi.fn().mockResolvedValue(undefined) };
+    const manager = new SubagentManager(
+      config,
+      behavior as never,
+      state as never,
+      fakeLogger() as never,
+      { onReturnToMain: vi.fn(), onSendToUser: vi.fn() }
+    );
+
+    await manager.dispatch({ profile: "x", prompt: "verify dev server path", route: "return_to_main" });
+    for (let i = 0; i < 20 && children.length === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+
+    const prompt = children[0]!.stdin.end.mock.calls[0]?.[0] as string;
+    expect(prompt).toContain("Remote repo authority:");
+    expect(prompt).toContain("/home/tim/.assistant-claude/workspace/.claude/repo-registry/index.yaml");
+    expect(prompt).toContain("ssh <host>");
+    expect(prompt).toContain(".claude/repo-registry/repos/<alias>");
+    expect(prompt).toContain("Do not print or inspect secret values");
+  });
+
   test("rejects new dispatch when queue depth is exhausted", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
     tempDirs.push(root);
@@ -194,6 +242,193 @@ describe("subagents", () => {
     const args = spawn.mock.calls[0]?.[1] as string[];
     expect(args).toContain('experimental_feature="on"');
     expect(args.filter((arg) => arg.includes("model_reasoning_effort"))).toEqual(['model_reasoning_effort="xhigh"']);
+  });
+
+  test("resolves full job ids, displayed prefixes, and hex prefixes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
+    tempDirs.push(root);
+    const { SubagentManager } = await import("../subagents.js");
+    const config = makeConfig(root, 1);
+    const manager = new SubagentManager(
+      config,
+      { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") } as never,
+      { saveJob: vi.fn().mockResolvedValue(undefined) } as never,
+      fakeLogger() as never,
+      { onReturnToMain: vi.fn(), onSendToUser: vi.fn() }
+    );
+    manager.addJobs([
+      { id: "job_e98ad78ae0cf4549a5cf88f1c875c668", profile: "researcher", route: "return_to_main", status: "running", promptPath: "/tmp/p", artifactDir: "/tmp/a" },
+      { id: "job_abcd0000000000000000000000000000", profile: "debugger", route: "return_to_main", status: "queued", promptPath: "/tmp/p", artifactDir: "/tmp/a" }
+    ]);
+
+    expect(manager.resolveJobRef("job_e98ad78ae0cf4549a5cf88f1c875c668")).toMatchObject({ status: "matched", job: { id: "job_e98ad78ae0cf4549a5cf88f1c875c668" } });
+    expect(manager.resolveJobRef("job_e98ad78a")).toMatchObject({ status: "matched", job: { id: "job_e98ad78ae0cf4549a5cf88f1c875c668" } });
+    expect(manager.resolveJobRef("e98ad78a")).toMatchObject({ status: "matched", job: { id: "job_e98ad78ae0cf4549a5cf88f1c875c668" } });
+  });
+
+  test("returns ambiguous and unknown job ref resolutions with candidates", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
+    tempDirs.push(root);
+    const { SubagentManager } = await import("../subagents.js");
+    const config = makeConfig(root, 1);
+    const manager = new SubagentManager(
+      config,
+      { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") } as never,
+      { saveJob: vi.fn().mockResolvedValue(undefined) } as never,
+      fakeLogger() as never,
+      { onReturnToMain: vi.fn(), onSendToUser: vi.fn() }
+    );
+    manager.addJobs([
+      { id: "job_deadbeef000000000000000000000000", profile: "researcher", route: "return_to_main", status: "running", promptPath: "/tmp/p", artifactDir: "/tmp/a" },
+      { id: "job_deadbabe000000000000000000000000", profile: "debugger", route: "return_to_main", status: "queued", promptPath: "/tmp/p", artifactDir: "/tmp/a" }
+    ]);
+
+    const ambiguous = manager.resolveJobRef("dead");
+    expect(ambiguous.status).toBe("ambiguous");
+    if (ambiguous.status === "ambiguous") {
+      expect(ambiguous.candidates).toHaveLength(2);
+      expect(ambiguous.candidates[0]).toMatchObject({ id: expect.stringMatching(/^job_dead/), ref: expect.any(String), status: expect.any(String) });
+    }
+    expect(manager.resolveJobRef("feedface")).toEqual({ status: "not_found", ref: "feedface" });
+  });
+
+  test("cancels queued jobs by removing them from the dispatch queue", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
+    tempDirs.push(root);
+    const spawn = vi.fn(() => fakeChild());
+    vi.doMock("node:child_process", async () => {
+      const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+      return { ...actual, spawn };
+    });
+    const { SubagentManager } = await import("../subagents.js");
+    const config = makeConfig(root, 0);
+    const state = { saveJob: vi.fn().mockResolvedValue(undefined) };
+    const manager = new SubagentManager(
+      config,
+      { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") } as never,
+      state as never,
+      fakeLogger() as never,
+      { onReturnToMain: vi.fn(), onSendToUser: vi.fn() }
+    );
+
+    const id = await manager.dispatch({ profile: "x", prompt: "queued", route: "return_to_main" });
+    const result = await manager.requestCancel(id.slice(4, 12));
+
+    expect(result).toMatchObject({ status: "success", previousStatus: "queued", job: { id, status: "cancelled", cancelReason: "user" } });
+    expect((manager as unknown as { queue: unknown[] }).queue).toHaveLength(0);
+    expect(spawn).not.toHaveBeenCalled();
+    expect(state.saveJob.mock.calls.at(-1)?.[0]).toMatchObject({ id, status: "cancelled", completedAt: expect.any(String) });
+  });
+
+  test("running cancellation stays cancelling until the child exits", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
+    tempDirs.push(root);
+    const children: ReturnType<typeof fakeChild>[] = [];
+    const spawn = vi.fn(() => {
+      const child = fakeChild();
+      children.push(child);
+      return child;
+    });
+    vi.doMock("node:child_process", async () => {
+      const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+      return { ...actual, spawn };
+    });
+    const { SubagentManager } = await import("../subagents.js");
+    const config = makeConfig(root, 1);
+    const onReturnToMain = vi.fn().mockResolvedValue(undefined);
+    const manager = new SubagentManager(
+      config,
+      { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") } as never,
+      { saveJob: vi.fn().mockResolvedValue(undefined) } as never,
+      fakeLogger() as never,
+      { onReturnToMain, onSendToUser: vi.fn() }
+    );
+
+    const id = await manager.dispatch({ profile: "x", prompt: "running", route: "return_to_main" });
+    await waitFor(() => children.length === 1);
+
+    const result = await manager.requestCancel(id.slice(4, 12));
+
+    expect(result).toMatchObject({ status: "success", previousStatus: "running", job: { id, status: "cancelling" } });
+    expect((manager as unknown as { running: Map<string, unknown> }).running.has(id)).toBe(true);
+    expect(manager.listJobs()[0]).toMatchObject({ id, status: "cancelling", termSentAt: expect.any(String) });
+
+    children[0]!.signalCode = "SIGTERM";
+    children[0]!.emit("exit", null, "SIGTERM");
+    await waitFor(() => manager.listJobs()[0]?.status === "cancelled");
+    await waitFor(() => onReturnToMain.mock.calls.length === 1);
+
+    expect((manager as unknown as { running: Map<string, unknown> }).running.has(id)).toBe(false);
+    expect(manager.listJobs()[0]).toMatchObject({ id, status: "cancelled", exitCode: null, signal: "SIGTERM" });
+    expect(onReturnToMain).toHaveBeenCalledWith(expect.objectContaining({ id, status: "cancelled" }), expect.stringContaining("was cancelled"));
+  });
+
+  test("timeouts finalize as timed_out when the child exits", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
+    tempDirs.push(root);
+    const children: ReturnType<typeof fakeChild>[] = [];
+    const spawn = vi.fn(() => {
+      const child = fakeChild();
+      children.push(child);
+      return child;
+    });
+    vi.doMock("node:child_process", async () => {
+      const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+      return { ...actual, spawn };
+    });
+    const { SubagentManager } = await import("../subagents.js");
+    const config = makeConfig(root, 1);
+    const onReturnToMain = vi.fn().mockResolvedValue(undefined);
+    const manager = new SubagentManager(
+      config,
+      { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") } as never,
+      { saveJob: vi.fn().mockResolvedValue(undefined) } as never,
+      fakeLogger() as never,
+      { onReturnToMain, onSendToUser: vi.fn() }
+    );
+
+    const id = await manager.dispatch({ profile: "x", prompt: "timeout", route: "return_to_main", timeoutSec: 0 });
+    await waitFor(() => manager.listJobs()[0]?.status === "cancelling");
+    expect(manager.listJobs()[0]).toMatchObject({ id, status: "cancelling", cancelReason: "timeout" });
+
+    children[0]!.signalCode = "SIGTERM";
+    children[0]!.emit("exit", null, "SIGTERM");
+    await waitFor(() => manager.listJobs()[0]?.status === "timed_out");
+    await waitFor(() => onReturnToMain.mock.calls.length === 1);
+
+    expect(manager.listJobs()[0]).toMatchObject({ id, status: "timed_out", exitCode: null, signal: "SIGTERM" });
+    expect(onReturnToMain).toHaveBeenCalledWith(expect.objectContaining({ id, status: "timed_out" }), expect.stringContaining("timed out"));
+  });
+
+  test("loads persisted jobs and marks stale active jobs abandoned on startup", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
+    tempDirs.push(root);
+    const { StateStore } = await import("../state.js");
+    const { SubagentManager } = await import("../subagents.js");
+    const config = makeConfig(root, 1);
+    const state = new StateStore(config);
+    await state.init();
+    await state.saveJob({ id: "job_11111111111111111111111111111111", profile: "researcher", route: "return_to_main", status: "queued", promptPath: "/tmp/p", artifactDir: "/tmp/a", enqueuedAt: "2026-01-01T00:00:00.000Z" });
+    await state.saveJob({ id: "job_22222222222222222222222222222222", profile: "debugger", route: "return_to_main", status: "running", promptPath: "/tmp/p", artifactDir: "/tmp/a", startedAt: "2026-01-01T00:00:00.000Z", pid: 12345, pgid: 12345 });
+    await state.saveJob({ id: "job_33333333333333333333333333333333", profile: "reviewer", route: "return_to_main", status: "cancelling", promptPath: "/tmp/p", artifactDir: "/tmp/a", startedAt: "2026-01-01T00:00:00.000Z", cancelRequestedAt: "2026-01-01T00:01:00.000Z" });
+    await state.saveJob({ id: "job_44444444444444444444444444444444", profile: "implementer", route: "return_to_main", status: "completed", promptPath: "/tmp/p", artifactDir: "/tmp/a", startedAt: "2026-01-01T00:00:00.000Z", completedAt: "2026-01-01T00:02:00.000Z" });
+    const manager = new SubagentManager(
+      config,
+      { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") } as never,
+      state,
+      fakeLogger() as never,
+      { onReturnToMain: vi.fn(), onSendToUser: vi.fn() }
+    );
+
+    const result = await manager.loadJobs();
+
+    expect(result).toEqual({ loaded: 4, abandoned: 3 });
+    expect(manager.listJobs().filter((job) => job.status === "abandoned")).toHaveLength(3);
+    expect(manager.listJobs().find((job) => job.id === "job_44444444444444444444444444444444")).toMatchObject({ status: "completed" });
+    const stale = JSON.parse(await readFile(join(root, "state", "jobs", "job_22222222222222222222222222222222.json"), "utf8")) as { status: string; abandonedAt?: string; error?: string };
+    expect(stale.status).toBe("abandoned");
+    expect(stale.abandonedAt).toEqual(expect.any(String));
+    expect(stale.error).toContain("not safely recoverable");
   });
 
   test("failed return_to_main jobs are delivered to the callback", async () => {

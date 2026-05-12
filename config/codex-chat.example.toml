@@ -1,10 +1,11 @@
-# codex-chat production configuration.
+# codex-chat local configuration example.
+# Copy to config/codex-chat.toml and adjust for this machine.
 # Secrets are read from environment variables, not from this TOML file.
 version = 1
 
 [service]
 name = "codex-chat"
-workspace = "/home/tim/pkg/tim/codex-chat"
+workspace = "."
 stateDir = "data/state"
 logLevel = "info"
 timezone = "Etc/UTC"
@@ -27,7 +28,7 @@ keepAliveSec = 60
 extraConfig = [
   "model_reasoning_effort=\"medium\""
 ]
-addDirs = ["/home/tim/pkg/tim/assistant-agent-logic"]
+addDirs = []
 
 [telegram]
 mode = "polling"
@@ -36,12 +37,12 @@ parseMode = "plain"
 pairingEnabledOnEmptyAllowlist = true
 downloadMaxBytes = 52428800
 sendProgressUpdates = true
-opsChatId = 253768951
+opsChatId = 0
 
 [telegram.allowlist]
-userIds = [253768951]
+userIds = []
 chatIds = []
-adminUserIds = [253768951]
+adminUserIds = []
 
 [behavior]
 dir = "behavior"
@@ -50,7 +51,7 @@ reloadOnSighup = true
 
 [subagents]
 enabled = true
-maxConcurrent = 3
+maxConcurrent = 5
 defaultModel = ""
 defaultEffort = "medium"
 defaultTimeoutSec = 1800
@@ -58,6 +59,7 @@ maxTimeoutSec = 7200
 maxPromptBytes = 262144
 artifactDir = "data/subagents"
 allowedProfiles = []
+cleanupArtifacts = true
 
 [loops]
 enabled = true
@@ -75,17 +77,16 @@ dir = "data/files"
 artifactDir = "data/artifacts"
 allowedSendRoots = [
   "data",
-  "/home/tim/pkg/tim/codex-chat"
+  "."
 ]
 
 [transcription]
 enabled = true
 provider = "openai"
-model = "gpt-4o-transcribe"
+model = "gpt-4o-mini-transcribe"
 apiKeyEnv = "OPENAI_API_KEY"
 language = ""
-# Read fresh for every voice/audio transcription; missing or empty files are ignored.
-promptPath = "/home/tim/.assistant-claude/workspace/instructions/prompts/voice-transcription.md"
+promptPath = ""
 
 [security]
 redactSecretsInLogs = true

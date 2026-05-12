@@ -70,7 +70,7 @@ describe("workspace git push script", () => {
     expect(result.stderr).toBe("");
   });
 
-  test("prints one concise status after committing and pushing changes", async () => {
+  test("stays silent after committing and pushing changes", async () => {
     const workspace = await setupWorkspace();
     await writeFile(join(workspace, "README.md"), "initial\nupdated\n");
     await writeFile(join(workspace, "notes.txt"), "one\ntwo\n");
@@ -80,7 +80,7 @@ describe("workspace git push script", () => {
     const head = await run("git", ["rev-parse", "HEAD"], workspace);
     const remoteHead = await run("git", ["rev-parse", "origin/main"], workspace);
 
-    expect(result.stdout).toMatch(/^workspace-git-push ran: committed and pushed 2 files? changed, 3 insertions\(\+\)\n$/);
+    expect(result.stdout).toBe("");
     expect(result.stderr).toBe("");
     expect(status.stdout).toBe("");
     expect(head.stdout).toBe(remoteHead.stdout);

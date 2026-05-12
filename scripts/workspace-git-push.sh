@@ -41,9 +41,5 @@ if git diff --cached --quiet; then
   exit 0
 fi
 
-shortstat="$(git diff --cached --shortstat | sed 's/^[[:space:]]*//')"
-
 quiet_run git commit -m "chore: sync workspace changes $(ts)"
 quiet_run git push
-
-printf 'workspace-git-push ran: committed and pushed %s\n' "$shortstat"

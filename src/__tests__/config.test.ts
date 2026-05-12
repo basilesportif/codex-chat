@@ -2,7 +2,9 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { loadConfig } from "../config.js";
+import { loadConfig, writeDefaultConfigFilesIfMissing } from "../config.js";
+import { loadLoopsConfig } from "../loops.js";
+import { loadMonitorsConfig } from "../monitors.js";
 
 const tempDirs: string[] = [];
 const originalEnv = { ...process.env };
@@ -108,5 +110,46 @@ adminUserIds = [999]
 
     expect(config.telegram.allowlist.userIds).toEqual([111, 222, 333, "external-user"]);
     expect(config.telegram.allowlist.adminUserIds).toEqual([999, 444, 555]);
+  });
+
+  test("creates missing runtime config files from generic examples", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-setup-"));
+    tempDirs.push(root);
+    const configPath = join(root, "config", "codex-chat.toml");
+
+    const result = await writeDefaultConfigFilesIfMissing(configPath);
+    const config = await loadConfig(configPath);
+    const loops = await loadLoopsConfig(config);
+    const monitors = await loadMonitorsConfig(config);
+
+    expect(result).toEqual({ configCreated: true, loopsCreated: true, monitorsCreated: true });
+    expect(config.telegram.allowlist.userIds).toEqual([]);
+    expect(config.telegram.opsChatId).toBe(0);
+    expect(loops.loops).toEqual([]);
+    expect(monitors.monitors).toEqual([]);
+  });
+
+  test("preserves existing runtime config files during setup", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-setup-existing-"));
+    tempDirs.push(root);
+    const configDir = join(root, "config");
+    await mkdir(configDir, { recursive: true });
+    const configPath = join(configDir, "codex-chat.toml");
+    await writeFile(configPath, `
+version = 1
+
+[telegram]
+opsChatId = 123
+`);
+    await writeFile(join(configDir, "loops.json"), JSON.stringify({ version: 1, loops: [{ id: "local", enabled: true, schedule: "0 * * * *", type: "prompt", prompt: "Keep me" }] }));
+    await writeFile(join(configDir, "monitors.json"), JSON.stringify({ version: 1, monitors: [] }));
+
+    const result = await writeDefaultConfigFilesIfMissing(configPath);
+    const config = await loadConfig(configPath);
+    const loops = await loadLoopsConfig(config);
+
+    expect(result).toEqual({ configCreated: false, loopsCreated: false, monitorsCreated: false });
+    expect(config.telegram.opsChatId).toBe(123);
+    expect(loops.loops[0]?.id).toBe("local");
   });
 });

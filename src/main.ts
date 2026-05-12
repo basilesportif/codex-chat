@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Command } from "commander";
-import { loadConfig, ensureConfiguredDirectories, writeDefaultConfigIfMissing, resolveConfigPath } from "./config.js";
+import { loadConfig, ensureConfiguredDirectories, writeDefaultConfigFilesIfMissing, resolveConfigPath } from "./config.js";
 import { createLogger } from "./logger.js";
 import { runLoopCli, syncCron, validateLoops } from "./loops.js";
 import { validateMonitors } from "./monitors.js";
@@ -39,7 +39,7 @@ program.command("setup")
   .description("create default directories and print first-run setup guidance")
   .action(async () => {
     const configPath = program.opts().config as string;
-    await writeDefaultConfigIfMissing(configPath).catch(() => undefined);
+    await writeDefaultConfigFilesIfMissing(configPath);
     const config = await loadConfig(configPath);
     await ensureConfiguredDirectories(config);
     const logger = createLogger(config.service.logLevel, config.security.redactSecretsInLogs);

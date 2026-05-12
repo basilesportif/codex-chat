@@ -11,6 +11,13 @@ import { ensureDir, killProcessTree, makeId, nowIso, pathExists } from "./util.j
 
 const SIGKILL_GRACE_MS = 5_000;
 const MAX_QUEUE_DEPTH = 200;
+const REMOTE_REPO_AUTHORITY_RULES = [
+  "Remote repo authority:",
+  "- When a task mentions repo-registry, a dev server, or a repo path that may be registered remotely, first resolve the authoritative location from `/home/tim/.assistant-claude/workspace/.claude/repo-registry/index.yaml`.",
+  "- In that registry, `host: local` or a missing host means local; any other `host` value, such as `tim@89.167.72.52`, is authoritative remote.",
+  "- For remote registry entries, verify files and git state over SSH on the registered host and path, for example `ssh <host> \"cd <path> && ...\"`. Do not substitute same-looking local paths such as `/home/tim/...`, and do not treat `.claude/repo-registry/repos/<alias>` as the repo checkout.",
+  "- For env files, credentials, and other likely secrets, verify only metadata such as existence, permissions, owner, size, line/key counts, git ignore status, and git tracking state. Do not print or inspect secret values."
+].join("\n");
 
 interface DispatchInput {
   id?: string;
@@ -35,7 +42,40 @@ interface RunningJob {
   job: SubagentJob;
   child: ChildProcess;
   timeout: NodeJS.Timeout;
+  killTimer?: NodeJS.Timeout;
 }
+
+export interface JobRefCandidate {
+  id: string;
+  ref: string;
+  status: SubagentJob["status"];
+  profile: string;
+  summary?: string;
+}
+
+export type JobRefResolution =
+  | { status: "matched"; ref: string; job: SubagentJob }
+  | { status: "not_found"; ref: string }
+  | { status: "ambiguous"; ref: string; candidates: JobRefCandidate[] };
+
+export type CancelJobResultStatus =
+  | "success"
+  | "not_found"
+  | "ambiguous"
+  | "already_terminal"
+  | "already_cancelling";
+
+export interface CancelJobResult {
+  status: CancelJobResultStatus;
+  ref: string;
+  message: string;
+  job?: SubagentJob;
+  previousStatus?: SubagentJob["status"];
+  candidates?: JobRefCandidate[];
+}
+
+const ACTIVE_JOB_STATUSES = new Set<SubagentJob["status"]>(["queued", "running", "cancelling"]);
+const TERMINAL_JOB_STATUSES = new Set<SubagentJob["status"]>(["completed", "failed", "cancelled", "timed_out", "abandoned"]);
 
 export class SubagentManager {
   private queue: DispatchInput[] = [];
@@ -100,6 +140,7 @@ export class SubagentManager {
       model,
       effort,
       summary: input.summary,
+      enqueuedAt: nowIso(),
       originChatId: input.originChatId,
       originMessageId: input.originMessageId
     };
@@ -111,7 +152,7 @@ export class SubagentManager {
   }
 
   listJobs(): SubagentJob[] {
-    return [...this.jobs.values()].sort((a, b) => (b.startedAt ?? "").localeCompare(a.startedAt ?? ""));
+    return [...this.jobs.values()].sort((a, b) => this.jobSortTime(b).localeCompare(this.jobSortTime(a)));
   }
 
   /**
@@ -125,39 +166,148 @@ export class SubagentManager {
     }
   }
 
-  /**
-   * Stub for future disk-based job persistence.
-   * When disk support is added, this method will read stored jobs and call
-   * addJobs() so the in-memory map reflects the full historical record.
-   * For now it is a no-op that signals intent via a log line.
-   */
-  loadJobs(): void {
-    this.logger.info({ component: "subagents", event: "load_jobs" }, "loadJobs: in-memory only");
+  async loadJobs(): Promise<{ loaded: number; abandoned: number }> {
+    const persisted = await this.state.listJobs();
+    let abandoned = 0;
+    for (const job of persisted) {
+      if (ACTIVE_JOB_STATUSES.has(job.status)) {
+        job.status = "abandoned";
+        job.abandonedAt = nowIso();
+        job.completedAt ??= job.abandonedAt;
+        job.error = job.error ?? "Job was active in persisted state during service startup; not safely recoverable.";
+        abandoned++;
+        await this.state.saveJob(job);
+      }
+      this.jobs.set(job.id, job);
+    }
+    this.logger.info({ component: "subagents", event: "load_jobs", loaded: persisted.length, abandoned }, "loaded persisted subagent jobs");
+    return { loaded: persisted.length, abandoned };
+  }
+
+  resolveJobRef(ref: string): JobRefResolution {
+    const normalized = this.normalizeJobRef(ref);
+    const jobs = [...this.jobs.values()];
+    const exact = jobs.find((job) => job.id.toLowerCase() === normalized.toLowerCase());
+    if (exact) return { status: "matched", ref, job: exact };
+
+    const isJobPrefix = /^job_[0-9a-f]+$/i.test(normalized);
+    const isHexPrefix = /^[0-9a-f]+$/i.test(normalized);
+    const candidates = jobs.filter((job) => {
+      const id = job.id.toLowerCase();
+      const hex = id.startsWith("job_") ? id.slice(4) : id;
+      if (isJobPrefix) return id.startsWith(normalized.toLowerCase());
+      if (isHexPrefix) return hex.startsWith(normalized.toLowerCase());
+      return false;
+    });
+
+    if (candidates.length === 0) return { status: "not_found", ref };
+    if (candidates.length === 1 && candidates[0]) return { status: "matched", ref, job: candidates[0] };
+    return { status: "ambiguous", ref, candidates: this.candidatesFor(candidates) };
+  }
+
+  async requestCancel(ref: string, options: { reason?: string } = {}): Promise<CancelJobResult> {
+    const resolution = this.resolveJobRef(ref);
+    if (resolution.status === "not_found") {
+      return { status: "not_found", ref, message: `No subagent job matched "${ref}".` };
+    }
+    if (resolution.status === "ambiguous") {
+      return {
+        status: "ambiguous",
+        ref,
+        candidates: resolution.candidates,
+        message: `Ambiguous subagent job ref "${ref}" matches ${resolution.candidates.length} jobs.`
+      };
+    }
+
+    const job = resolution.job;
+    const previousStatus = job.status;
+    const reason = options.reason ?? "user";
+    if (TERMINAL_JOB_STATUSES.has(job.status)) {
+      return {
+        status: "already_terminal",
+        ref,
+        job,
+        previousStatus,
+        message: `Subagent job ${job.id} is already ${job.status}.`
+      };
+    }
+    if (job.status === "cancelling") {
+      return {
+        status: "already_cancelling",
+        ref,
+        job,
+        previousStatus,
+        message: `Subagent job ${job.id} is already cancelling.`
+      };
+    }
+    if (job.status === "queued") {
+      this.queue = this.queue.filter((input) => input.id !== job.id);
+      job.status = "cancelled";
+      job.cancelRequestedAt = nowIso();
+      job.cancelReason = reason;
+      job.completedAt = job.cancelRequestedAt;
+      await this.state.saveJob(job);
+      void this.drain();
+      return {
+        status: "success",
+        ref,
+        job,
+        previousStatus,
+        message: `Cancelled queued subagent job ${job.id}.`
+      };
+    }
+
+    const running = this.running.get(job.id);
+    if (!running) {
+      job.status = "abandoned";
+      job.abandonedAt = nowIso();
+      job.completedAt ??= job.abandonedAt;
+      job.error = job.error ?? "Job was marked running in memory but no child process was tracked.";
+      await this.state.saveJob(job);
+      return {
+        status: "already_terminal",
+        ref,
+        job,
+        previousStatus,
+        message: `Subagent job ${job.id} had no tracked process and was marked abandoned.`
+      };
+    }
+
+    clearTimeout(running.timeout);
+    job.status = "cancelling";
+    job.cancelRequestedAt = nowIso();
+    job.cancelReason = reason;
+    job.termSentAt = nowIso();
+    await this.state.saveJob(job);
+    killProcessTree(running.child, "SIGTERM");
+    if (running.killTimer) clearTimeout(running.killTimer);
+    running.killTimer = setTimeout(() => {
+      if (!this.running.has(job.id)) return;
+      const signalCode = (running.child as ChildProcess & { signalCode?: NodeJS.Signals | null }).signalCode;
+      if (running.child.exitCode !== null || signalCode !== null && signalCode !== undefined) return;
+      job.killSentAt = nowIso();
+      void this.state.saveJob(job);
+      this.logger.warn({ component: "subagents", event: "sigkill_after_grace", jobId: job.id, pid: running.child.pid }, "subagent ignored SIGTERM; sending SIGKILL");
+      killProcessTree(running.child, "SIGKILL");
+    }, SIGKILL_GRACE_MS);
+    running.killTimer.unref?.();
+
+    return {
+      status: "success",
+      ref,
+      job,
+      previousStatus,
+      message: `Cancellation requested for running subagent job ${job.id}.`
+    };
   }
 
   async cancel(jobId: string): Promise<boolean> {
-    const running = this.running.get(jobId);
-    if (!running) return false;
-    running.job.status = "cancelled";
-    running.job.completedAt = nowIso();
-    await this.state.saveJob(running.job);
-    clearTimeout(running.timeout);
-    const child = running.child;
-    killProcessTree(child, "SIGTERM");
-    // Escalate to SIGKILL if the process ignores SIGTERM. Without this a
-    // misbehaving subagent can cling to its slot indefinitely, starving the
-    // dispatch queue.
-    setTimeout(() => {
-      if (child.exitCode !== null || child.killed) return;
-      this.logger.warn({ component: "subagents", event: "sigkill_after_grace", jobId, pid: child.pid }, "subagent ignored SIGTERM; sending SIGKILL");
-      killProcessTree(child, "SIGKILL");
-    }, SIGKILL_GRACE_MS).unref?.();
-    this.running.delete(jobId);
-    return true;
+    const result = await this.requestCancel(jobId);
+    return result.status === "success";
   }
 
   async shutdown(): Promise<void> {
-    await Promise.all([...this.running.keys()].map((id) => this.cancel(id)));
+    await Promise.all([...this.running.keys()].map((id) => this.requestCancel(id, { reason: "shutdown" })));
   }
 
   private async drain(): Promise<void> {
@@ -195,6 +345,8 @@ export class SubagentManager {
     const assembledPrompt = [
       profileContents.trim(),
       "",
+      REMOTE_REPO_AUTHORITY_RULES,
+      "",
       "Task:",
       input.prompt,
       "",
@@ -212,11 +364,24 @@ export class SubagentManager {
     const timeoutSec = Math.min(input.timeoutSec ?? this.config.subagents.defaultTimeoutSec, this.config.subagents.maxTimeoutSec);
     const model = this.resolveModel(input.model);
     const effort = this.resolveEffort(input.effort);
-    const job: SubagentJob = {
+    const job: SubagentJob = this.jobs.get(id) ?? {
       id,
       profile: input.profile,
       route: input.route,
-      status: "running",
+      status: "queued",
+      promptPath,
+      artifactDir,
+      model,
+      effort,
+      summary: input.summary,
+      enqueuedAt: nowIso(),
+      originChatId: input.originChatId,
+      originMessageId: input.originMessageId
+    };
+    Object.assign(job, {
+      profile: input.profile,
+      route: input.route,
+      status: "running" as const,
       promptPath,
       artifactDir,
       startedAt: nowIso(),
@@ -226,7 +391,7 @@ export class SubagentManager {
       summary: input.summary,
       originChatId: input.originChatId,
       originMessageId: input.originMessageId
-    };
+    });
     this.jobs.set(id, job);
     await this.state.saveJob(job);
 
@@ -239,17 +404,26 @@ export class SubagentManager {
       stdio: ["pipe", "pipe", "pipe"],
       detached: true
     });
+    if (child.pid) {
+      job.pid = child.pid;
+      job.pgid = child.pid;
+    }
     child.stdin?.end(assembledPrompt);
     child.stdout?.on("data", (chunk) => appendFile(stdoutPath, chunk).catch((error) => this.logger.error({ component: "subagents", jobId: id, error })));
     child.stderr?.on("data", (chunk) => appendFile(stderrPath, chunk).catch((error) => this.logger.error({ component: "subagents", jobId: id, error })));
     const timeout = setTimeout(() => {
       this.logger.warn({ component: "subagents", event: "timeout", jobId: id }, "subagent timed out");
-      void this.cancel(id);
+      void this.requestCancel(id, { reason: "timeout" });
     }, timeoutSec * 1000);
     this.running.set(id, { job, child, timeout });
+    child.on("error", (error) => {
+      job.error = error instanceof Error ? error.message : String(error);
+      void this.finishJob(id, null, null);
+    });
     child.on("exit", (code, signal) => {
       void this.finishJob(id, code, signal);
     });
+    if (child.pid) void this.state.saveJob(job);
   }
 
   private async finishJob(jobId: string, code: number | null, signal: NodeJS.Signals | null): Promise<void> {
@@ -257,8 +431,10 @@ export class SubagentManager {
     if (!running) return;
     this.running.delete(jobId);
     clearTimeout(running.timeout);
+    if (running.killTimer) clearTimeout(running.killTimer);
     const job = running.job;
-    if (job.status !== "cancelled") job.status = code === 0 ? "completed" : "failed";
+    if (job.status === "cancelling") job.status = job.cancelReason === "timeout" ? "timed_out" : "cancelled";
+    else job.status = code === 0 ? "completed" : "failed";
     job.completedAt = nowIso();
     job.exitCode = code;
     job.signal = signal;
@@ -267,9 +443,9 @@ export class SubagentManager {
     result = this.formatTerminalResult(job, result, code, signal);
     await this.state.saveJob(job);
     await this.deliverTerminalResult(job, result);
-    // Clean up artifact directory for completed/cancelled jobs that
+    // Clean up artifact directory for completed/cancelled/timed_out jobs that
     // delivered successfully. We keep failed-job artifacts for postmortem.
-    if (this.config.subagents.cleanupArtifacts && (job.status === "completed" || job.status === "cancelled")) {
+    if (this.config.subagents.cleanupArtifacts && (job.status === "completed" || job.status === "cancelled" || job.status === "timed_out")) {
       void rm(job.artifactDir ?? "", { recursive: true, force: true }).catch((error) => {
         this.logger.warn({ component: "subagents", event: "artifact_cleanup_failed", jobId, error }, "subagent artifact cleanup failed");
       });
@@ -284,6 +460,14 @@ export class SubagentManager {
       const header = `Subagent ${job.id} (${job.profile}) failed: ${detail}.`;
       return trimmed ? `${header}\n\n${trimmed}` : header;
     }
+    if (job.status === "timed_out") {
+      const header = `Subagent ${job.id} (${job.profile}) timed out: exit code ${code ?? "null"} signal ${signal ?? "null"}.`;
+      return trimmed ? `${header}\n\n${trimmed}` : header;
+    }
+    if (job.status === "cancelled") {
+      const header = `Subagent ${job.id} (${job.profile}) was cancelled: exit code ${code ?? "null"} signal ${signal ?? "null"}.`;
+      return trimmed ? `${header}\n\n${trimmed}` : header;
+    }
     if (job.status === "completed" && !trimmed) {
       return `Subagent ${job.id} (${job.profile}) completed but produced no final message.`;
     }
@@ -292,11 +476,44 @@ export class SubagentManager {
 
   private async deliverTerminalResult(job: SubagentJob, result: string): Promise<void> {
     try {
-      if ((job.status === "completed" || job.status === "failed") && job.route === "return_to_main") await this.callbacks.onReturnToMain(job, result);
-      if ((job.status === "completed" || job.status === "failed") && job.route === "send_to_user") await this.callbacks.onSendToUser(job, result);
+      if (!["completed", "failed", "cancelled", "timed_out"].includes(job.status)) return;
+      if (job.route === "return_to_main") await this.callbacks.onReturnToMain(job, result);
+      if (job.route === "send_to_user") await this.callbacks.onSendToUser(job, result);
     } catch (error) {
       this.logger.error({ component: "subagents", event: "callback_failed", jobId: job.id, route: job.route, error }, "subagent result delivery failed");
     }
+  }
+
+  private jobSortTime(job: SubagentJob): string {
+    return job.startedAt ?? job.enqueuedAt ?? job.completedAt ?? job.abandonedAt ?? "";
+  }
+
+  private normalizeJobRef(ref: string): string {
+    return ref.trim().replace(/^[[(<]+/, "").replace(/[\])>.,;:]+$/, "");
+  }
+
+  private candidatesFor(jobs: SubagentJob[]): JobRefCandidate[] {
+    return jobs.map((job) => ({
+      id: job.id,
+      ref: this.shortRef(job.id),
+      status: job.status,
+      profile: job.profile,
+      summary: job.summary
+    }));
+  }
+
+  shortRef(id: string, minHexLength = 8): string {
+    const hex = id.startsWith("job_") ? id.slice(4) : id;
+    const jobs = [...this.jobs.values()];
+    for (let length = Math.min(minHexLength, hex.length); length <= hex.length; length++) {
+      const candidate = hex.slice(0, length);
+      const matches = jobs.filter((job) => {
+        const other = job.id.startsWith("job_") ? job.id.slice(4) : job.id;
+        return other.startsWith(candidate);
+      });
+      if (matches.length <= 1) return candidate;
+    }
+    return hex;
   }
 
   resolveModel(model?: string): string {

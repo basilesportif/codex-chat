@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "namespace": "codex-chat",
+  "defaults": {
+    "timezone": "Etc/UTC",
+    "timeoutSec": 1800,
+    "route": "return_to_main",
+    "lock": true
+  },
+  "loops": []
+}

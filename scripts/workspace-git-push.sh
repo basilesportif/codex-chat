@@ -15,35 +15,24 @@ quiet_run() {
   fi
 }
 
-rebase_in_progress() {
-  [[ -d "$(git rev-parse --git-path rebase-merge)" || -d "$(git rev-parse --git-path rebase-apply)" ]]
-}
-
-stashed=0
-if [[ -n "$(git status --porcelain)" ]]; then
-  quiet_run git stash push --include-untracked -m "workspace-git-push autostash $(ts)"
-  stashed=1
-fi
-
-restore_stash_after_failed_pull() {
-  if (( stashed == 0 )); then
-    return 0
-  fi
-
-  if rebase_in_progress; then
-    quiet_run git rebase --abort || return 1
-  fi
-
-  quiet_run git stash pop
-}
-
-if ! quiet_run git pull --rebase; then
-  restore_stash_after_failed_pull || true
+current_branch="$(git symbolic-ref --quiet --short HEAD || true)"
+if [[ -z "$current_branch" ]]; then
+  printf 'workspace-git-push failed: HEAD is detached; refusing to auto-commit and push\n' >&2
   exit 1
 fi
 
-if (( stashed == 1 )); then
-  quiet_run git stash pop
+upstream="$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)"
+if [[ -z "$upstream" ]]; then
+  printf 'workspace-git-push failed: branch %s has no upstream; set one before using this loop\n' "$current_branch" >&2
+  exit 1
+fi
+
+quiet_run git fetch --quiet
+
+read -r ahead behind < <(git rev-list --left-right --count HEAD..."$upstream")
+if (( behind > 0 )); then
+  printf 'workspace-git-push failed: branch %s is %s commit(s) ahead and %s commit(s) behind %s; reconcile manually before pushing\n' "$current_branch" "$ahead" "$behind" "$upstream" >&2
+  exit 1
 fi
 
 git add -A

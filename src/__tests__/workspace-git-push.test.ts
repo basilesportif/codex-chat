@@ -8,7 +8,11 @@ import { afterEach, describe, expect, test } from "vitest";
 const tempDirs: string[] = [];
 const scriptPath = fileURLToPath(new URL("../../scripts/workspace-git-push.sh", import.meta.url));
 
-function run(command: string, args: string[], cwd: string): Promise<{ stdout: string; stderr: string }> {
+function runWithExit(
+  command: string,
+  args: string[],
+  cwd: string
+): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
@@ -20,10 +24,16 @@ function run(command: string, args: string[], cwd: string): Promise<{ stdout: st
       stderr += chunk.toString();
     });
     child.on("exit", (code) => {
-      if (code === 0) resolve({ stdout, stderr });
-      else reject(new Error(`${command} ${args.join(" ")} exited with ${code}\n${stderr || stdout}`));
+      if (code === null) reject(new Error(`${command} ${args.join(" ")} exited without a code\n${stderr || stdout}`));
+      else resolve({ code, stdout, stderr });
     });
   });
+}
+
+async function run(command: string, args: string[], cwd: string): Promise<{ stdout: string; stderr: string }> {
+  const result = await runWithExit(command, args, cwd);
+  if (result.code === 0) return { stdout: result.stdout, stderr: result.stderr };
+  throw new Error(`${command} ${args.join(" ")} exited with ${result.code}\n${result.stderr || result.stdout}`);
 }
 
 async function setupWorkspace(): Promise<string> {
@@ -76,7 +86,7 @@ describe("workspace git push script", () => {
     expect(head.stdout).toBe(remoteHead.stdout);
   });
 
-  test("pulls remote changes before committing local dirty worktree changes", async () => {
+  test("fails without pulling when upstream has new commits", async () => {
     const workspace = await setupWorkspace();
     const root = join(workspace, "..");
     const external = join(root, "external");
@@ -93,18 +103,18 @@ describe("workspace git push script", () => {
     await writeFile(join(workspace, "README.md"), "initial\nlocal\n");
     await writeFile(join(workspace, "local-notes.txt"), "local\n");
 
-    const result = await run(scriptPath, [], workspace);
+    const result = await runWithExit(scriptPath, [], workspace);
     const status = await run("git", ["status", "--short"], workspace);
-    const log = await run("git", ["log", "--format=%s", "-2"], workspace);
-    const remoteFile = await run("git", ["show", "HEAD~1:assistant-agent-data/dictionary.txt"], workspace);
+    const log = await run("git", ["log", "--format=%s", "-1"], workspace);
+    const remoteFile = await run("git", ["show", "origin/main:assistant-agent-data/dictionary.txt"], workspace);
 
-    expect(result.stdout).toMatch(/^workspace-git-push ran: committed and pushed 2 files? changed, 2 insertions\(\+\)\n$/);
-    expect(result.stderr).toBe("");
-    expect(status.stdout).toBe("");
-    expect(log.stdout.split("\n").filter(Boolean)).toEqual([
-      expect.stringMatching(/^chore: sync workspace changes /),
-      "external dictionary update"
-    ]);
+    expect(result.code).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe(
+      "workspace-git-push failed: branch main is 0 commit(s) ahead and 1 commit(s) behind origin/main; reconcile manually before pushing\n"
+    );
+    expect(status.stdout.split("\n").filter(Boolean).sort()).toEqual([" M README.md", "?? local-notes.txt"]);
+    expect(log.stdout).toBe("initial\n");
     expect(remoteFile.stdout).toBe("remote\n");
   });
 });

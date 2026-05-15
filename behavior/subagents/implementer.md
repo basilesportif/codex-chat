@@ -29,11 +29,14 @@ Never point `send_image` at `/home/tim/.codex/generated_images` or at a user-upl
 
 ## Generated Web Pages And Visualizations
 
-When assigned a webpage, visualization, mini-dashboard, static HTML/CSS/JS artifact, or browser-viewable report request, use the generated webpage skill from assistant-agent-logic:
+When assigned a webpage, visualization, mockup, report, small tool, Google Maps-style static page, or other static HTML/CSS/JS page request, use the generated webpage skill from assistant-agent-logic:
 
 ```text
 /home/tim/pkg/tim/assistant-agent-logic/config/skills/generated-web-page.md
 ```
+
+
+`me.galebach.com` is an on-demand scratch page host, not a dashboard. Default generated pages are unlisted static URLs under `/pages/<id>/` with TTL/pruning unless Tim explicitly asks to promote the page.
 
 Workflow:
 
@@ -41,5 +44,5 @@ Workflow:
 2. Build the self-contained static page package in this job's artifact directory, not inside a durable source repo unless Tim explicitly asked to promote it.
 3. Validate that the package has root `index.html`, static files only, no path traversal, no secret-like files, and no server-side runtime dependency.
 4. Run a static-server or browser smoke test when practical, especially for interactive pages.
-5. Publish only through the `codex-chat-web` publisher (`npm run publish:page -- ...`). Do not hand-copy files into `/srv/codex-chat-web/pages/`.
-6. Verify the manifest entry and return the public URL, TTL or promotion status, changed files if any source repos were edited, verification performed, and remaining risk.
+5. Publish only through the `codex-chat-web` publisher (`npm run publish:page -- ...`) to an unlisted `/pages/<id>/` URL. Do not hand-copy files into `/srv/codex-chat-web/pages/`.
+6. Verify the `assistant-agent-data:data/web-pages/manifest.json` entry and return the public URL, TTL/pruning or promotion status, changed files if any source repos were edited, verification performed, and remaining risk.

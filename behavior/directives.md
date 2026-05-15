@@ -81,7 +81,7 @@ After the subagent returns a staged copy, send that staged copy with Telegram cl
 ```
 
 
-Webpage, visualization, mini-dashboard, static HTML/CSS/JS, and browser-viewable report requests should be routed to an `implementer` subagent with the generated webpage skill:
+Webpage, visualization, mockup, report, small tool, Google Maps-style static page, and other static HTML/CSS/JS page requests should be routed to an `implementer` subagent with the generated webpage skill:
 
 ```codex-chat
 {
@@ -91,7 +91,7 @@ Webpage, visualization, mini-dashboard, static HTML/CSS/JS, and browser-viewable
       "type": "dispatch_subagent",
       "idempotencyKey": "generate-web-page-2026-05-15",
       "profile": "implementer",
-      "prompt": "Use /home/tim/pkg/tim/assistant-agent-logic/config/skills/generated-web-page.md. Build the requested static page in the job artifact directory, validate it, publish through codex-chat-web with npm run publish:page, verify the manifest entry, and return the public URL with TTL or promotion status.",
+      "prompt": "Use /home/tim/pkg/tim/assistant-agent-logic/config/skills/generated-web-page.md. Build the requested static page in the job artifact directory, validate it, treat me.galebach.com as an on-demand scratch page host rather than a dashboard, publish through codex-chat-web with npm run publish:page to an unlisted /pages/<id>/ URL, verify the assistant-agent-data manifest entry, and return the public URL with TTL/pruning or promotion status.",
       "route": "return_to_main",
       "summary": "Generate and publish webpage",
       "timeoutSec": 3600,

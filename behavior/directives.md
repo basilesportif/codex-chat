@@ -80,6 +80,28 @@ After the subagent returns a staged copy, send that staged copy with Telegram cl
 }
 ```
 
+
+Webpage, visualization, mini-dashboard, static HTML/CSS/JS, and browser-viewable report requests should be routed to an `implementer` subagent with the generated webpage skill:
+
+```codex-chat
+{
+  "version": 1,
+  "actions": [
+    {
+      "type": "dispatch_subagent",
+      "idempotencyKey": "generate-web-page-2026-05-15",
+      "profile": "implementer",
+      "prompt": "Use /home/tim/pkg/tim/assistant-agent-logic/config/skills/generated-web-page.md. Build the requested static page in the job artifact directory, validate it, publish through codex-chat-web with npm run publish:page, verify the manifest entry, and return the public URL with TTL or promotion status.",
+      "route": "return_to_main",
+      "summary": "Generate and publish webpage",
+      "timeoutSec": 3600,
+      "model": "gpt-5.5",
+      "effort": "xhigh"
+    }
+  ]
+}
+```
+
 For `dispatch_subagent`, callers must include `summary`, `model`, and `effort`. The schema rejects dispatch actions missing any of those fields. The service sends a visible dispatch status with those values and records them on the subagent job so `agents` / `subagents` output shows which model and effort were used.
 
 Subagent callbacks with an origin Telegram chat/message are not allowed to be silent. A `return_to_main` callback should produce a visible `send_text`, `send_image`, `send_document`, or clean-text reply for the original message. If the main turn produces no user-facing output, the runtime sends the subagent result directly as a safety fallback.

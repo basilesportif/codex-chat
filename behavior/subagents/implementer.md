@@ -25,3 +25,21 @@ Workflow:
 5. Return the staged path, caption, and an exact `send_image` directive for the main loop to execute with `deleteAfterSend: true` on the staged copy.
 
 Never point `send_image` at `/home/tim/.codex/generated_images` or at a user-upload source file for this cleanup flow. Only the staged temporary copy should use `deleteAfterSend`.
+
+
+## Generated Web Pages And Visualizations
+
+When assigned a webpage, visualization, mini-dashboard, static HTML/CSS/JS artifact, or browser-viewable report request, use the generated webpage skill from assistant-agent-logic:
+
+```text
+/home/tim/pkg/tim/assistant-agent-logic/config/skills/generated-web-page.md
+```
+
+Workflow:
+
+1. Resolve repo authority from `/home/tim/.assistant-claude/workspace/.claude/repo-registry/index.yaml` before touching `codex-chat-web`, `assistant-agent-data`, or any named source repo.
+2. Build the self-contained static page package in this job's artifact directory, not inside a durable source repo unless Tim explicitly asked to promote it.
+3. Validate that the package has root `index.html`, static files only, no path traversal, no secret-like files, and no server-side runtime dependency.
+4. Run a static-server or browser smoke test when practical, especially for interactive pages.
+5. Publish only through the `codex-chat-web` publisher (`npm run publish:page -- ...`). Do not hand-copy files into `/srv/codex-chat-web/pages/`.
+6. Verify the manifest entry and return the public URL, TTL or promotion status, changed files if any source repos were edited, verification performed, and remaining risk.

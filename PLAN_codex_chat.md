@@ -579,7 +579,13 @@ Implementation details:
 - Support captions and reply-to message ID.
 - Store Telegram response metadata so file IDs can be reused.
 
-Generated images from `$imagegen` or similar Codex workflows should be copied into the service file store or workspace before sending. The service should not depend on temporary paths that may disappear.
+Generated images from imagegen are governed by the current behavior pack, not
+this planning note. See `behavior/AGENTS.md`, `behavior/directives.md`, and
+`behavior/subagents/implementer.md`: user image generation/editing requests
+dispatch an `implementer` subagent, stage the selected
+`/home/tim/.codex/generated_images` output under
+`data/artifacts/generated-images/...`, and send only that staged copy with
+`deleteAfterSend: true`.
 
 ### Audio Receive and Transcription
 

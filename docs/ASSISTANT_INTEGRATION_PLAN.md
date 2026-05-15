@@ -1,6 +1,12 @@
 # Assistant-Claude Integration Plan
 
 This document is the runbook for integrating Tim's personal assistant capabilities into `codex-chat`.
+It is a historical integration plan, not the canonical behavior specification
+for the running assistant.
+
+For current image generation and editing behavior, use `behavior/AGENTS.md`,
+`behavior/directives.md`, and `behavior/subagents/implementer.md` as the source
+of truth.
 
 ## Architecture
 

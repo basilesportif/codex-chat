@@ -43,6 +43,7 @@ codex-chat jobs list
 - JSON state: `data/state/`
 - Telegram downloads: `data/files/`
 - Subagent artifacts: `data/subagents/`
+- Disposable generated-image staging: `data/artifacts/generated-images/`
 
 ## Child Vocab SRS JSON backups
 
@@ -115,6 +116,15 @@ replies. The main Codex loop must choose the route up front, then either reply
 directly or emit a `dispatch_subagent` directive. Service-level guardrails are
 reserved for malformed directive blocks, leaked directive fragments, and other
 transport safety cases.
+
+User image generation and image-editing requests are also routed work. The
+current canonical behavior lives in `behavior/AGENTS.md`,
+`behavior/directives.md`, and `behavior/subagents/implementer.md`: dispatch an
+`implementer` subagent, let it use imagegen, copy the selected output from
+`/home/tim/.codex/generated_images` into an allowed temporary path under
+`data/artifacts/generated-images/...`, then send that staged copy with
+`deleteAfterSend: true`. The service deletes the staged copy only after
+Telegram accepts the upload.
 
 ## Voice Transcription Prompt and Dictionary
 

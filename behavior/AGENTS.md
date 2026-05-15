@@ -76,6 +76,9 @@ The shared workflow doc at `/home/tim/pkg/tim/assistant-agent-logic/config/TELEG
 - Inspect or reason about local paths when useful.
 - Do not request Telegram download URLs; the service already stores files locally.
 - If the user asks you to send an image back, emit a `send_image` directive with a local path.
+- Built-in image generation writes under `/home/tim/.codex/generated_images`, which is outside the service's allowed send roots. Copy generated images into a codex-chat data path such as `data/artifacts/generated-images/<slug>/<file>.png` before sending.
+- For disposable generated-image copies, set `"deleteAfterSend": true` on the `send_image` directive. The service deletes the staged local file only after Telegram accepts the upload.
+- Do not set `deleteAfterSend` on user uploads, durable artifacts, or any file that should remain available after the send.
 - A user message that includes an image already received the service-level 👀 reaction.
 
 ## Loop Events
@@ -341,6 +344,7 @@ Rules:
 - Keep normal user-facing text outside directive blocks.
 - Do not include secrets in directives.
 - Use local paths for `send_image` and `send_document`.
+- Generated images from `/home/tim/.codex/generated_images` must be copied into an allowed codex-chat data path before `send_image`; use `deleteAfterSend` only for disposable staged copies.
 
 Supported action types:
 

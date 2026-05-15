@@ -21,6 +21,25 @@ Common examples:
 }
 ```
 
+Generated images from built-in image generation are created under `/home/tim/.codex/generated_images`, which is not an allowed send root. Copy the generated file into a codex-chat data path first, then send that staged copy:
+
+```codex-chat
+{
+  "version": 1,
+  "actions": [
+    {
+      "type": "send_image",
+      "idempotencyKey": "send-generated-pink-giraffe-2026-05-15",
+      "path": "data/artifacts/generated-images/pink-giraffe/pink-giraffe.png",
+      "caption": "Pink giraffe",
+      "deleteAfterSend": true
+    }
+  ]
+}
+```
+
+`deleteAfterSend` is only for disposable staged copies. When true and `path` is used, the service deletes the validated local file after Telegram accepts the upload; failed sends leave the file in place for inspection or retry.
+
 ```codex-chat
 {
   "version": 1,

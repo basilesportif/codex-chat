@@ -1,3 +1,6 @@
+import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, test, vi } from "vitest";
 import type { Context } from "grammy";
 import type { Message } from "grammy/types";
@@ -268,5 +271,40 @@ describe("Telegram reply context extraction", () => {
       caption: "report",
       reply_parameters: undefined
     }));
+  });
+
+  test("sendImage deletes local path after a successful send when requested", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "codex-chat-image-"));
+    const imagePath = join(dir, "image.png");
+    await writeFile(imagePath, Buffer.from("fake image"));
+    const sendPhoto = vi.fn().mockResolvedValue({});
+    const gateway = testGateway();
+    (gateway as unknown as { bot: { api: { sendPhoto: typeof sendPhoto } } }).bot = { api: { sendPhoto } };
+
+    try {
+      await gateway.sendImage(100, { path: imagePath, caption: "generated", deleteAfterSend: true });
+
+      expect(sendPhoto).toHaveBeenCalledTimes(1);
+      await expect(stat(imagePath)).rejects.toHaveProperty("code", "ENOENT");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("sendImage keeps local path when the send fails", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "codex-chat-image-"));
+    const imagePath = join(dir, "image.png");
+    await writeFile(imagePath, Buffer.from("fake image"));
+    const sendPhoto = vi.fn().mockRejectedValue(new Error("upload failed"));
+    const gateway = testGateway();
+    (gateway as unknown as { bot: { api: { sendPhoto: typeof sendPhoto } } }).bot = { api: { sendPhoto } };
+
+    try {
+      await expect(gateway.sendImage(100, { path: imagePath, deleteAfterSend: true })).rejects.toThrow("upload failed");
+
+      await expect(stat(imagePath)).resolves.toBeTruthy();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

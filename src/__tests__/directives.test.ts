@@ -132,6 +132,19 @@ Done`;
   });
 });
 
+describe("send_image directive", () => {
+  test("accepts deleteAfterSend cleanup option", () => {
+    const parsed = parseDirectives(`\`\`\`codex-chat
+{"version":1,"actions":[{"type":"send_image","idempotencyKey":"generated-image-1","path":"data/artifacts/generated-images/pink-giraffe.png","deleteAfterSend":true}]}
+\`\`\``);
+
+    expect(parsed.errors).toEqual([]);
+    const action = parsed.blocks[0]?.actions[0];
+    expect(action?.type).toBe("send_image");
+    if (action?.type === "send_image") expect(action.deleteAfterSend).toBe(true);
+  });
+});
+
 describe("send_text format", () => {
   test("accepts format: markdownv2", () => {
     const parsed = parseDirectives(`\`\`\`codex-chat

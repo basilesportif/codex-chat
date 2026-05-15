@@ -1,3 +1,4 @@
+import { unlink } from "node:fs/promises";
 import { Bot, InputFile, type Context } from "grammy";
 import type { Chat, Message, MessageOrigin, User } from "grammy/types";
 import type { Logger } from "pino";
@@ -313,9 +314,10 @@ export class TelegramGateway {
     }
   }
 
-  async sendImage(chatId: number, input: { path?: string; fileId?: string; caption?: string; asDocument?: boolean; replyToMessageId?: number }): Promise<void> {
+  async sendImage(chatId: number, input: { path?: string; fileId?: string; caption?: string; asDocument?: boolean; replyToMessageId?: number; deleteAfterSend?: boolean }): Promise<void> {
     if (!this.bot) throw new Error("Telegram bot is not started");
-    const media = input.fileId ?? new InputFile(this.files.validateSendPath(input.path ?? ""));
+    let sendPath: string | undefined;
+    const media = input.fileId ?? new InputFile((sendPath = this.files.validateSendPath(input.path ?? "")));
     await this.sendWithReplyFallback(chatId, input.replyToMessageId, async (resolvedReplyToMessageId) => {
       const options = {
         caption: input.caption,
@@ -324,6 +326,7 @@ export class TelegramGateway {
       if (input.asDocument) await this.bot!.api.sendDocument(chatId, media, options);
       else await this.bot!.api.sendPhoto(chatId, media, options);
     });
+    if (input.deleteAfterSend && sendPath) await this.deleteFileAfterSend(sendPath);
   }
 
   async sendDocument(chatId: number, input: { path: string; caption?: string; replyToMessageId?: number }): Promise<void> {
@@ -335,6 +338,14 @@ export class TelegramGateway {
         reply_parameters: replyParameters(resolvedReplyToMessageId)
       } as never);
     });
+  }
+
+  private async deleteFileAfterSend(path: string): Promise<void> {
+    try {
+      await unlink(path);
+    } catch (error) {
+      this.logger.warn({ component: "telegram", event: "delete_after_send_failed", path, error }, "failed to delete sent file");
+    }
   }
 
   async notifyOps(text: string): Promise<void> {

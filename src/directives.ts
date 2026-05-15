@@ -22,6 +22,7 @@ const sendImageAction = baseAction.extend({
   fileId: z.string().optional(),
   caption: z.string().optional(),
   asDocument: z.boolean().optional(),
+  deleteAfterSend: z.boolean().optional(),
   replyToMessageId: z.number().int().optional()
 }).refine((value) => value.path || value.fileId, "send_image requires path or fileId");
 

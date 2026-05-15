@@ -234,7 +234,8 @@ describe("service supervisor", () => {
 
     await service.enqueueUserEvent(userEvent(1));
     await service.enqueueUserEvent(userEvent(2));
-    await (service as unknown as { forceAbortStuckTurn(): Promise<void> }).forceAbortStuckTurn();
+    const abortPromise = (service as unknown as { forceAbortStuckTurn(): Promise<void> }).forceAbortStuckTurn();
+    await flush();
     await service.enqueueUserEvent(userEvent(3));
     firstTurn.resolve();
     await flush();
@@ -242,6 +243,7 @@ describe("service supervisor", () => {
     expect(calls).toEqual([1]);
 
     restartGate.resolve();
+    await abortPromise;
     await flush();
     expect(calls).toEqual([1, 2]);
     secondTurn.resolve();
@@ -269,6 +271,41 @@ describe("service supervisor", () => {
     expect(restartCodex).toHaveBeenCalledWith(expect.stringContaining("Watchdog force-aborted a stuck turn"));
     expect((service as unknown as { turnRunning: boolean }).turnRunning).toBe(false);
     blockedTurn.resolve();
+  });
+
+  test("watchdog abort ignores late directives from the stale Codex turn", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+    vi.spyOn(service.telegram, "notifyOps").mockResolvedValue();
+    vi.spyOn(service as unknown as { restartCodex(reason: string): Promise<void> }, "restartCodex").mockResolvedValue();
+    const releaseTurn = deferred();
+    vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
+      await releaseTurn.promise;
+      yield {
+        type: "final",
+        text: `\`\`\`codex-chat
+{"version":1,"actions":[{"type":"send_text","idempotencyKey":"late-stale-turn","chatId":253768951,"text":"late directive should not send"}]}
+\`\`\``
+      };
+    });
+
+    await service.enqueueUserEvent(userEvent(81, "slow request"));
+    await flush();
+    (service as unknown as { turnStartedAt: Date }).turnStartedAt = new Date(Date.now() - 80_001);
+
+    await (service as unknown as { checkTurnTimeout(): Promise<void> }).checkTurnTimeout();
+    releaseTurn.resolve();
+    await flush();
+
+    expect(sendText).toHaveBeenCalledWith(253768951, "⚠️ Your previous request timed out after 80 seconds. Please resend your message.", 81);
+    expect(sendText).not.toHaveBeenCalledWith(253768951, "late directive should not send", 81, undefined);
+    const files = await readdir(join(config.rootDir, "state", "turns"));
+    const turn = JSON.parse(await readFile(join(config.rootDir, "state", "turns", files[0] as string), "utf8")) as { status: string; outputText?: string };
+    expect(turn.status).toBe("aborted");
+    expect(turn.outputText).toBeUndefined();
   });
 
   test("restartCodex retries with backoff and notifies ops on exhaustion without draining queue", async () => {

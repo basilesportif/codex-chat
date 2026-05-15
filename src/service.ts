@@ -494,11 +494,15 @@ export class ServiceSupervisor {
     return `No subagent job matched "${result.ref}". Use "agents" to list usable refs.`;
   }
 
-  private async processEvent(event: UserEvent): Promise<void> {
+  private async processEvent(event: UserEvent, turnToken: number): Promise<void> {
     const prompt = this.formatEventForCodex(event);
     const turnId = makeId("turn");
     let turnClosed = false;
     const closeTurn = async (value: Record<string, unknown>): Promise<boolean> => {
+      if (this.isStaleTurnToken(turnToken)) {
+        turnClosed = true;
+        return false;
+      }
       const current = await this.state.readJson<Record<string, unknown> | undefined>(`turns/${turnId}.json`, undefined);
       if (current?.status === "aborted") {
         turnClosed = true;
@@ -520,6 +524,7 @@ export class ServiceSupervisor {
       const preExecutedActions = new Set<string>();
       try {
         for await (const codexEvent of this.codex.sendTurn({ text: prompt, attachments: event.attachments, source: event.source, turnId })) {
+          if (this.isStaleTurnToken(turnToken)) return;
           if (codexEvent.type === "delta") {
             output += codexEvent.text;
             // Incremental directive execution: scan for newly-complete fences
@@ -547,6 +552,7 @@ export class ServiceSupervisor {
           }
         }
       } catch (error) {
+        if (this.isStaleTurnToken(turnToken)) return;
         this.logger.error({ component: "codex", event: "turn_unavailable", turnId, error }, "Codex turn failed");
         const closed = await closeTurn({ id: turnId, status: "error", input: event, errorMessage: error instanceof Error ? error.message : String(error), completedAt: nowIso() });
         if (!closed) return;
@@ -561,10 +567,12 @@ export class ServiceSupervisor {
       }
       if (hadError && !output.trim() && event.chatId) {
         const brief = errorMessage.split("\n")[0].slice(0, 100);
-        await closeTurn({ id: turnId, status: "error", input: event, errorMessage, completedAt: nowIso() });
+        const closed = await closeTurn({ id: turnId, status: "error", input: event, errorMessage, completedAt: nowIso() });
+        if (!closed) return;
         await this.telegram.sendText(event.chatId, `Codex encountered an error: ${brief}. Please try again.`, event.messageId);
         return;
       }
+      if (this.isStaleTurnToken(turnToken)) return;
       const parsed = parseDirectives(output);
       if (parsed.cleanText && event.chatId) {
         await this.telegram.sendText(event.chatId, parsed.cleanText, event.messageId);
@@ -576,6 +584,7 @@ export class ServiceSupervisor {
       for (let blockIndex = 0; blockIndex < parsed.blocks.length; blockIndex++) {
         const block = parsed.blocks[blockIndex]!;
         for (let actionIndex = 0; actionIndex < block.actions.length; actionIndex++) {
+          if (this.isStaleTurnToken(turnToken)) return;
           const action = block.actions[actionIndex]!;
           const actionKey = this.directiveActionKey(action, blockIndex, actionIndex);
           if (preExecutedActions.has(actionKey)) continue;
@@ -598,11 +607,14 @@ export class ServiceSupervisor {
         }
       }
       for (const error of parsed.errors) {
+        if (this.isStaleTurnToken(turnToken)) return;
         void this.enqueueSynthetic(`The previous assistant output contained an invalid codex-chat directive: ${error}`, { source: "system", turnId });
       }
+      if (this.isStaleTurnToken(turnToken)) return;
       if (!userFacingDelivered) await this.deliverSubagentFallbackIfNeeded(event);
       await closeTurn({ id: turnId, status: "completed", input: event, outputText: output, completedAt: nowIso() });
     } catch (error) {
+      if (this.isStaleTurnToken(turnToken)) return;
       if (!turnClosed) {
         await closeTurn({ id: turnId, status: "error", input: event, errorMessage: error instanceof Error ? error.message : String(error), completedAt: nowIso() });
       }
@@ -857,7 +869,7 @@ export class ServiceSupervisor {
     const token = ++this.activeTurnToken;
     this.turnStartedAt = new Date();
     this.activeTurnEvent = event;
-    void this.processEventSafe(event).finally(() => {
+    void this.processEventSafe(event, token).finally(() => {
       if (this.activeTurnToken !== token) return;
       this.turnRunning = false;
       this.turnStartedAt = undefined;
@@ -881,10 +893,11 @@ export class ServiceSupervisor {
     this.drainingQueue = false;
   }
 
-  private async processEventSafe(event: UserEvent): Promise<void> {
+  private async processEventSafe(event: UserEvent, turnToken: number): Promise<void> {
     try {
-      await this.processEvent(event);
+      await this.processEvent(event, turnToken);
     } catch (error) {
+      if (this.isStaleTurnToken(turnToken)) return;
       await this.removePersistedQueuedEvent(event);
       const brief = error instanceof Error ? error.message.split("\n")[0].slice(0, 100) : String(error).slice(0, 100);
       this.logger.error({ component: "service", event: "turn_error", error }, "Turn processing failed");
@@ -896,6 +909,10 @@ export class ServiceSupervisor {
         }
       }
     }
+  }
+
+  private isStaleTurnToken(turnToken: number): boolean {
+    return this.activeTurnToken !== turnToken;
   }
 
   private async recoverAbandonedWork(): Promise<void> {
@@ -1102,9 +1119,9 @@ export class ServiceSupervisor {
 
     // Hard abort: if a turn has been running longer than TURN_ABORT_MS,
     // something below us (sendTurn iterator, codex process, websocket) has
-    // failed to terminate even though we expect it to. Forcibly clear the
-    // turnRunning flag, notify the user, and drain the queue so the service
-    // does not stay wedged for the rest of its uptime.
+    // failed to terminate even though we expect it to. Mark the turn stale,
+    // notify the user, restart Codex to cancel the underlying app-server work,
+    // then drain the queue after restart recovery.
     if (this.turnStartedAt && Date.now() - this.turnStartedAt.getTime() > TURN_ABORT_MS) {
       await this.forceAbortStuckTurn();
       return;
@@ -1150,10 +1167,12 @@ export class ServiceSupervisor {
       { component: "service", event: "turn_force_abort", chatId: event?.chatId, startedAt, ageMs },
       `Force-aborting stuck turn after ${TURN_ABORT_MS}ms — something below sendTurn never resolved`
     );
-    // Clear watchdog state synchronously so concurrent enqueues do not
-    // observe turnRunning=true and silently re-queue.
+    // Clear watchdog state synchronously and mark restart-in-progress before
+    // any awaits. This prevents queued Telegram messages from starting a new
+    // turn while the old Codex app-server turn is still being torn down.
     this.turnRunning = false;
     this.activeTurnToken++;
+    this.restartingCodex = true;
     this.turnStartedAt = undefined;
     this.activeTurnEvent = undefined;
     await this.markActiveTurnAborted(event);
@@ -1170,7 +1189,8 @@ export class ServiceSupervisor {
     await this.telegram.notifyOps(
       `Watchdog: aborted a turn that had been running for ${ageMs ?? "?"}ms (chat=${event?.chatId ?? "n/a"}, source=${event?.source ?? "n/a"}).`
     ).catch(() => undefined);
-    void this.restartCodex(
+    this.restartingCodex = false;
+    await this.restartCodex(
       `Watchdog force-aborted a stuck turn after ${ageMs ?? TURN_ABORT_MS}ms; restarting Codex before draining queued work.`
     ).catch((error) => {
       this.logger.error({ component: "service", event: "turn_abort_restart_failed", error }, "Failed to restart Codex after watchdog abort");

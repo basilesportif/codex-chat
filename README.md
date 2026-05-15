@@ -165,4 +165,6 @@ The behavior pack includes `behavior/skills/setup-server/SKILL.md`, a deployment
 
 In this architecture, `codex-chat` supplies the runtime while `assistant-agent-logic` supplies reusable workflows and `assistant-agent-data` supplies user-specific state. Other deployments can replace the logic and data layers while keeping `codex-chat` as the Telegram/Codex service.
 
+A separate future web UI repo, `codex-chat-web`, lives at `tim@89.167.72.52:~/pkg/tim/codex-chat-web`. It is not part of the three-repo runtime service yet; it is reserved for a browser UI targeting `codex-chat-assistant-1` / `me.galebach.com`, with Caddy/systemd deployment docs to be added once the UI runtime is chosen.
+
 The canonical documentation for this deployment's repo relationships lives in `assistant-agent-data` at `docs/assistant-system-architecture.md`.

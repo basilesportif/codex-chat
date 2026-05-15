@@ -7,3 +7,4 @@ config/loops.json
 config/monitors.json
 *.log
 *.tmp
+test-results/

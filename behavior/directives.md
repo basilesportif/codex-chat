@@ -21,7 +21,28 @@ Common examples:
 }
 ```
 
-Generated images from built-in image generation are created under `/home/tim/.codex/generated_images`, which is not an allowed send root. Copy the generated file into a codex-chat data path first, then send that staged copy:
+Do not use the main loop to call built-in imagegen for user image generation or editing requests. Dispatch an `implementer` subagent; for edits, include the source local paths in `images`. The subagent must use imagegen, copy the selected output from `/home/tim/.codex/generated_images` into an allowed temporary path under `data/artifacts/generated-images/...` or another codex-chat data artifact root, and return the staged path, caption, and send directive. Original `/home/tim/.codex/generated_images` files may remain unless the user explicitly asks to delete them.
+
+```codex-chat
+{
+  "version": 1,
+  "actions": [
+    {
+      "type": "dispatch_subagent",
+      "idempotencyKey": "generate-image-2026-05-15",
+      "profile": "implementer",
+      "prompt": "Use imagegen for the requested image. Copy the selected output into data/artifacts/generated-images/<slug>/<file>.png, leave the original /home/tim/.codex/generated_images file in place unless explicitly asked to delete it, and return the staged path, caption, and a send_image directive with deleteAfterSend true.",
+      "route": "return_to_main",
+      "summary": "Generate requested image",
+      "timeoutSec": 3600,
+      "model": "gpt-5.5",
+      "effort": "medium"
+    }
+  ]
+}
+```
+
+After the subagent returns a staged copy, send that staged copy with Telegram cleanup enabled:
 
 ```codex-chat
 {
@@ -38,7 +59,7 @@ Generated images from built-in image generation are created under `/home/tim/.co
 }
 ```
 
-`deleteAfterSend` is only for disposable staged copies. When true and `path` is used, the service deletes the validated local file after Telegram accepts the upload; failed sends leave the file in place for inspection or retry.
+`deleteAfterSend` is required for disposable staged generated-image copies. When true and `path` is used, the service deletes the validated local file after Telegram accepts the upload; failed sends leave the file in place for inspection or retry. Do not use `deleteAfterSend` for user uploads, durable artifacts, or original files under `/home/tim/.codex/generated_images`.
 
 ```codex-chat
 {

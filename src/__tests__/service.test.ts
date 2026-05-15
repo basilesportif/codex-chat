@@ -216,6 +216,13 @@ describe("service supervisor", () => {
     await service.state.init();
     vi.spyOn(service.telegram, "sendText").mockResolvedValue();
     vi.spyOn(service.telegram, "notifyOps").mockResolvedValue();
+    const restartGate = deferred();
+    vi.spyOn(service as unknown as { restartCodex(reason: string): Promise<void> }, "restartCodex").mockImplementation(async () => {
+      (service as unknown as { restartingCodex: boolean }).restartingCodex = true;
+      await restartGate.promise;
+      (service as unknown as { restartingCodex: boolean }).restartingCodex = false;
+      (service as unknown as { drainQueue(): void }).drainQueue();
+    });
     const firstTurn = deferred();
     const secondTurn = deferred();
     const calls: number[] = [];
@@ -232,8 +239,11 @@ describe("service supervisor", () => {
     firstTurn.resolve();
     await flush();
 
-    expect(calls).toEqual([1, 2]);
+    expect(calls).toEqual([1]);
 
+    restartGate.resolve();
+    await flush();
+    expect(calls).toEqual([1, 2]);
     secondTurn.resolve();
     await flush();
     expect(calls).toEqual([1, 2, 3]);
@@ -246,6 +256,7 @@ describe("service supervisor", () => {
     await service.state.init();
     const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
     vi.spyOn(service.telegram, "notifyOps").mockResolvedValue();
+    const restartCodex = vi.spyOn(service as unknown as { restartCodex(reason: string): Promise<void> }, "restartCodex").mockResolvedValue();
     const blockedTurn = deferred();
     vi.spyOn(service as unknown as { processEvent(event: UserEvent): Promise<void> }, "processEvent").mockReturnValue(blockedTurn.promise);
 
@@ -255,6 +266,7 @@ describe("service supervisor", () => {
     await (service as unknown as { checkTurnTimeout(): Promise<void> }).checkTurnTimeout();
 
     expect(sendText).toHaveBeenCalledWith(253768951, "⚠️ Your previous request timed out after 80 seconds. Please resend your message.", 80);
+    expect(restartCodex).toHaveBeenCalledWith(expect.stringContaining("Watchdog force-aborted a stuck turn"));
     expect((service as unknown as { turnRunning: boolean }).turnRunning).toBe(false);
     blockedTurn.resolve();
   });

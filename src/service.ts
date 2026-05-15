@@ -498,9 +498,15 @@ export class ServiceSupervisor {
     const prompt = this.formatEventForCodex(event);
     const turnId = makeId("turn");
     let turnClosed = false;
-    const closeTurn = async (value: Record<string, unknown>): Promise<void> => {
+    const closeTurn = async (value: Record<string, unknown>): Promise<boolean> => {
+      const current = await this.state.readJson<Record<string, unknown> | undefined>(`turns/${turnId}.json`, undefined);
+      if (current?.status === "aborted") {
+        turnClosed = true;
+        return false;
+      }
       await this.state.writeJson(`turns/${turnId}.json`, value);
       turnClosed = true;
+      return true;
     };
     await this.state.writeJson(`turns/${turnId}.json`, { id: turnId, status: "running", input: event, startedAt: nowIso() });
     try {
@@ -542,7 +548,8 @@ export class ServiceSupervisor {
         }
       } catch (error) {
         this.logger.error({ component: "codex", event: "turn_unavailable", turnId, error }, "Codex turn failed");
-        await closeTurn({ id: turnId, status: "error", input: event, errorMessage: error instanceof Error ? error.message : String(error), completedAt: nowIso() });
+        const closed = await closeTurn({ id: turnId, status: "error", input: event, errorMessage: error instanceof Error ? error.message : String(error), completedAt: nowIso() });
+        if (!closed) return;
         if (event.chatId) {
           try {
             await this.telegram.sendText(event.chatId, this.codexUnavailableMessage(error), event.messageId);
@@ -1163,7 +1170,11 @@ export class ServiceSupervisor {
     await this.telegram.notifyOps(
       `Watchdog: aborted a turn that had been running for ${ageMs ?? "?"}ms (chat=${event?.chatId ?? "n/a"}, source=${event?.source ?? "n/a"}).`
     ).catch(() => undefined);
-    this.drainQueue();
+    void this.restartCodex(
+      `Watchdog force-aborted a stuck turn after ${ageMs ?? TURN_ABORT_MS}ms; restarting Codex before draining queued work.`
+    ).catch((error) => {
+      this.logger.error({ component: "service", event: "turn_abort_restart_failed", error }, "Failed to restart Codex after watchdog abort");
+    });
   }
 
   private async markActiveTurnAborted(event?: UserEvent): Promise<void> {

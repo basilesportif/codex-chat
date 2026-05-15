@@ -75,7 +75,8 @@ The shared workflow doc at `/home/tim/pkg/tim/assistant-agent-logic/config/TELEG
 - Images and image documents arrive as local file paths.
 - Inspect or reason about local paths when useful.
 - Do not request Telegram download URLs; the service already stores files locally.
-- If the user asks you to send an image back, emit a `send_image` directive with a local path.
+- If the user asks you to send an existing local image back, emit a `send_image` directive with a local path.
+- If the user asks you to generate, create, edit, transform, or render an image, dispatch a subagent first. Do not run image generation in the main loop; it can exceed the main-loop watchdog. Ask the subagent to use imagegen, stage the result under `data/artifacts/generated-images/...`, and return the staged path and caption so the main loop can send it.
 - Built-in image generation writes under `/home/tim/.codex/generated_images`, which is outside the service's allowed send roots. Copy generated images into a codex-chat data path such as `data/artifacts/generated-images/<slug>/<file>.png` before sending.
 - For disposable generated-image copies, set `"deleteAfterSend": true` on the `send_image` directive. The service deletes the staged local file only after Telegram accepts the upload.
 - Do not set `deleteAfterSend` on user uploads, durable artifacts, or any file that should remain available after the send.

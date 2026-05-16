@@ -50,3 +50,5 @@ Full documentation for each capability is in the assistant-agent-logic repo:
 - `config/skills/betting.md`
 - `config/skills/finance.md`
 - `config/skills/whoop.md`
+- `config/skills/web-page-design.md` - visual/product webpage design from scratch
+- `config/skills/generated-web-page.md` - static scratch webpage generation and publishing

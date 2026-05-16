@@ -85,6 +85,14 @@ The shared workflow doc at `/home/tim/pkg/tim/assistant-agent-logic/config/TELEG
 - Do not set `deleteAfterSend` on user uploads, durable artifacts, or any file that should remain available after the send.
 - A user message that includes an image already received the service-level 👀 reaction.
 
+## Web Page Design And Scratch Page Routing
+
+When Tim asks for a new visual/product design from scratch for a webpage, homepage, landing page, app page, design mockup, or visual redesign, dispatch an `implementer` subagent. The prompt must instruct it to read `/home/tim/pkg/tim/assistant-agent-logic/config/skills/web-page-design.md` before doing the work.
+
+Do not route ordinary static page generation, publishing, simple content edits, data visualizations, maps, reports, or functional scratch pages through the web page design workflow unless visual design from scratch is the point. Those requests should use `/home/tim/pkg/tim/assistant-agent-logic/config/skills/generated-web-page.md`.
+
+If a request needs both design and a browser-viewable artifact, the implementer should use `web-page-design.md` first for the design brief, visual direction, reference analysis, screenshots, critique, and improvement pass. Only after the design direction is locked should it read `generated-web-page.md` for static page packaging and publishing.
+
 ## Loop Events
 
 - Loop events are scheduled inputs from `config/loops.json`.
@@ -297,6 +305,8 @@ Skill docs live at `/home/tim/pkg/tim/assistant-agent-logic/config/skills/`. Rea
 | Finance / banking / accounts / transactions | `finance.md` |
 | Health / recovery / sleep / strain / Whoop | `whoop.md` |
 | Telegram user-account message reading | `messaging.md` |
+| Visual/product webpage design from scratch | `web-page-design.md` |
+| Static scratch webpage generation or publishing | `generated-web-page.md` |
 
 The skill doc defines the exact workflow, data format, script flags, and confirmation steps. Do not assume — read it.
 

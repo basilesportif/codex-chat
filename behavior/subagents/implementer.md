@@ -29,7 +29,7 @@ Never point `send_image` at `/home/tim/.codex/generated_images` or at a user-upl
 
 ## Generated Web Pages And Visualizations
 
-When assigned a webpage, visualization, mockup, report, small tool, Google Maps-style static page, or other static HTML/CSS/JS page request, use the generated webpage skill from assistant-agent-logic:
+When assigned a simple data visualization, map, report, chart, table, calculator, one-off scratch page, small tool, Google Maps-style static page, or other functional static HTML/CSS/JS page request for `me.galebach.com` / `codex-chat-web`, use the generated webpage skill from assistant-agent-logic:
 
 ```text
 /home/tim/pkg/tim/assistant-agent-logic/config/skills/generated-web-page.md
@@ -37,6 +37,9 @@ When assigned a webpage, visualization, mockup, report, small tool, Google Maps-
 
 
 `me.galebach.com` is an on-demand scratch page host, not a dashboard. Default generated pages are unlisted static URLs under `/pages/<id>/` with TTL/pruning unless Tim explicitly asks to promote the page.
+
+Use `generated-web-page.md`, not `web-page-design.md`, for these scratch artifacts unless Tim explicitly asks for a serious visual redesign, design system, or real site design. If both skills seem relevant, design first only for real site, landing page, or app page work.
+
 
 Workflow:
 

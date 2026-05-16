@@ -77,7 +77,7 @@ The shared workflow doc at `/home/tim/pkg/tim/assistant-agent-logic/config/TELEG
 - Do not request Telegram download URLs; the service already stores files locally.
 - If the user asks you to send an existing local image back, emit a `send_image` directive with a local path.
 - If the user asks you to generate, create, edit, transform, or render an image, dispatch an `implementer` subagent first. The main loop must never call built-in imagegen for user image requests or generate the image itself.
-- If the user asks you to create, publish, or share a webpage, visualization, mockup, report, small tool, Google Maps-style static page, or other static HTML/CSS/JS artifact, dispatch an `implementer` subagent. Tell it to use `/home/tim/pkg/tim/assistant-agent-logic/config/skills/generated-web-page.md`, build the page in its artifact directory, treat `me.galebach.com` as an on-demand scratch page host rather than a dashboard, publish through `codex-chat-web`'s publisher to an unlisted `/pages/<id>/` URL, and return the public URL plus TTL/pruning or promotion status.
+- If the user asks you to create, publish, or share a simple data visualization, map, report, chart, table, calculator, one-off scratch page, small tool, Google Maps-style static page, or other functional static HTML/CSS/JS artifact for `me.galebach.com` / `codex-chat-web`, dispatch an `implementer` subagent with `/home/tim/pkg/tim/assistant-agent-logic/config/skills/generated-web-page.md`. Use `generated-web-page.md`, not `web-page-design.md`, unless Tim explicitly asks for a serious visual redesign, design system, or real site design. The subagent should build the page in its artifact directory, treat `me.galebach.com` as an on-demand scratch page host rather than a dashboard, publish through `codex-chat-web`'s publisher to an unlisted `/pages/<id>/` URL, and return the public URL plus TTL/pruning or promotion status.
 - For image edits, pass the received local image paths to the dispatch in `images` and mention them in the prompt. The implementer subagent owns the imagegen call.
 - The implementer subagent must generate/edit the image, choose the final output, copy it into an allowed temporary codex-chat data path such as `data/artifacts/generated-images/<slug>/<file>.png`, and return the staged path, caption, and ready-to-use `send_image` directive.
 - Built-in image generation writes under `/home/tim/.codex/generated_images`, which is outside the service's allowed send roots. The original generated files may remain there unless the user explicitly asks to delete them.
@@ -87,11 +87,11 @@ The shared workflow doc at `/home/tim/pkg/tim/assistant-agent-logic/config/TELEG
 
 ## Web Page Design And Scratch Page Routing
 
-When Tim asks for a new visual/product design from scratch for a webpage, homepage, landing page, app page, design mockup, or visual redesign, dispatch an `implementer` subagent. The prompt must instruct it to read `/home/tim/pkg/tim/assistant-agent-logic/config/skills/web-page-design.md` before doing the work.
+When Tim asks for real site or page visual design work, such as a new visual/product design from scratch for a webpage, homepage, landing page, app page, design system, design mockup, or visual redesign, dispatch an `implementer` subagent. The prompt must instruct it to read `/home/tim/pkg/tim/assistant-agent-logic/config/skills/web-page-design.md` before doing the work.
 
-Do not route ordinary static page generation, publishing, simple content edits, data visualizations, maps, reports, or functional scratch pages through the web page design workflow unless visual design from scratch is the point. Those requests should use `/home/tim/pkg/tim/assistant-agent-logic/config/skills/generated-web-page.md`.
+If Tim asks for a simple data visualization, map, report, chart, table, calculator, or one-off scratch page to view on `me.galebach.com` through `codex-chat-web`, use `/home/tim/pkg/tim/assistant-agent-logic/config/skills/generated-web-page.md`, not `web-page-design.md`, unless he explicitly asks for a serious visual redesign, design system, or real site design.
 
-If a request needs both design and a browser-viewable artifact, the implementer should use `web-page-design.md` first for the design brief, visual direction, reference analysis, screenshots, critique, and improvement pass. Only after the design direction is locked should it read `generated-web-page.md` for static page packaging and publishing.
+If a request needs both design and a browser-viewable artifact, use `web-page-design.md` first only for real site, landing page, or app page work. The implementer should complete the design brief, visual direction, reference analysis, screenshots, critique, and improvement pass before reading `generated-web-page.md` for static page packaging and publishing.
 
 ## Loop Events
 
@@ -305,8 +305,8 @@ Skill docs live at `/home/tim/pkg/tim/assistant-agent-logic/config/skills/`. Rea
 | Finance / banking / accounts / transactions | `finance.md` |
 | Health / recovery / sleep / strain / Whoop | `whoop.md` |
 | Telegram user-account message reading | `messaging.md` |
-| Visual/product webpage design from scratch | `web-page-design.md` |
-| Static scratch webpage generation or publishing | `generated-web-page.md` |
+| Real site/page visual design, visual redesign, design systems | `web-page-design.md` |
+| Scratch pages, simple visualizations, maps, reports, charts, tables, calculators | `generated-web-page.md` |
 
 The skill doc defines the exact workflow, data format, script flags, and confirmation steps. Do not assume — read it.
 

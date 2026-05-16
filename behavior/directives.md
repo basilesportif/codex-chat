@@ -81,7 +81,7 @@ After the subagent returns a staged copy, send that staged copy with Telegram cl
 ```
 
 
-Webpage, visualization, mockup, report, small tool, Google Maps-style static page, and other static HTML/CSS/JS page requests should be routed to an `implementer` subagent with the generated webpage skill:
+Simple data visualization, map, report, chart, table, calculator, one-off scratch page, small tool, Google Maps-style static page, and other functional static HTML/CSS/JS page requests for `me.galebach.com` / `codex-chat-web` should be routed to an `implementer` subagent with the generated webpage skill. Use `generated-web-page`, not `web-page-design`, unless Tim explicitly asks for a serious visual redesign, design system, or real site design:
 
 ```codex-chat
 {
@@ -91,7 +91,7 @@ Webpage, visualization, mockup, report, small tool, Google Maps-style static pag
       "type": "dispatch_subagent",
       "idempotencyKey": "generate-web-page-2026-05-15",
       "profile": "implementer",
-      "prompt": "Use /home/tim/pkg/tim/assistant-agent-logic/config/skills/generated-web-page.md. Build the requested static page in the job artifact directory, validate it, treat me.galebach.com as an on-demand scratch page host rather than a dashboard, publish through codex-chat-web with npm run publish:page to an unlisted /pages/<id>/ URL, verify the assistant-agent-data manifest entry, and return the public URL with TTL/pruning or promotion status.",
+      "prompt": "Use /home/tim/pkg/tim/assistant-agent-logic/config/skills/generated-web-page.md, not web-page-design.md, for simple data visualizations, maps, reports, charts, tables, calculators, or one-off scratch pages unless Tim explicitly asked for serious visual redesign, a design system, or real site design. Build the requested static page in the job artifact directory, validate it, treat me.galebach.com as an on-demand scratch page host rather than a dashboard, publish through codex-chat-web with npm run publish:page to an unlisted /pages/<id>/ URL, verify the assistant-agent-data manifest entry, and return the public URL with TTL/pruning or promotion status.",
       "route": "return_to_main",
       "summary": "Generate and publish webpage",
       "timeoutSec": 3600,

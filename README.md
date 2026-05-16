@@ -45,6 +45,22 @@ codex-chat jobs list
 - Subagent artifacts: `data/subagents/`
 - Disposable generated-image staging: `data/artifacts/generated-images/`
 
+## Browser Verification
+
+`codex-chat` includes Playwright as a development dependency so subagents that
+run from this workspace can do lightweight Chromium checks and screenshots when
+they inspect or publish pages. After installing dependencies on a new host, run:
+
+```bash
+pnpm exec playwright install chromium
+```
+
+Minimal smoke test:
+
+```bash
+pnpm exec node -e 'const { chromium } = require("playwright"); (async () => { const browser = await chromium.launch({ headless: true }); const page = await browser.newPage(); await page.setContent("<main>ok</main>"); console.log(await page.textContent("main")); await browser.close(); })();'
+```
+
 ## Child Vocab SRS JSON backups
 
 The repo includes a small app-level backup script for `child-vocab-srs` data:

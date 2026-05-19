@@ -124,6 +124,8 @@ Subagent callbacks with an origin Telegram chat/message are not allowed to be si
 
 Jobs launched with the safe `codex_exec` backend are not steerable; the service reports that explicitly.
 
+When a Codex turn prompt includes an `Active subagent jobs` snapshot, natural-language steering must use that snapshot. Emit `steer_subagent` only if exactly one job in the snapshot both matches the user's request and has `steerable=true`. If no job or multiple jobs match, ask which job to steer or tell the user to run `agent steer <ref> <text>`. Use the full `job_...` id from the snapshot in the directive, not just the short ref.
+
 ## Service-Level Subagent Commands
 
 These Telegram commands are handled before Codex sees the message:

@@ -412,6 +412,58 @@ describe("service supervisor", () => {
     expect(prompt.indexOf("Telegram reply context")).toBeLessThan(prompt.indexOf("User content:"));
   });
 
+  test("injects compact active subagent steering context before user content", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    (service as unknown as {
+      subagents: {
+        activeJobSnapshots(limit?: number): unknown;
+      };
+    }).subagents.activeJobSnapshots = vi.fn().mockReturnValue({
+      jobs: [
+        {
+          ref: "0b8020bf",
+          id: "job_0b8020bf704f422fbb82c9bcf3cde3aa",
+          status: "running",
+          profile: "implementer",
+          backend: "codex_app_server",
+          steerable: true,
+          summary: "Implement steering snapshot",
+          createdAt: "2026-05-19T12:00:00.000Z",
+          elapsedSec: 185,
+          originChatId: 253768951,
+          originMessageId: 700,
+          model: "gpt-5.5",
+          effort: "medium"
+        },
+        {
+          ref: "abcd1234",
+          id: "job_abcd1234000000000000000000000000",
+          status: "queued",
+          profile: "researcher",
+          backend: "codex_exec",
+          steerable: false,
+          summary: "Research docs",
+          createdAt: "2026-05-19T12:02:00.000Z",
+          elapsedSec: 65
+        }
+      ],
+      omitted: 0
+    });
+
+    const prompt = (service as unknown as { formatEventForCodex(event: UserEvent): string }).formatEventForCodex(
+      userEvent(701, "tell the implementer to focus on the prompt context test")
+    );
+
+    expect(prompt).toContain("Active subagent jobs (compact routing snapshot; active/queued only):");
+    expect(prompt).toContain("emit steer_subagent only when exactly one steerable=true job matches");
+    expect(prompt).toContain("agent steer <ref> <text>");
+    expect(prompt).toContain("ref=0b8020bf id=job_0b8020bf704f422fbb82c9bcf3cde3aa status=running profile=implementer backend=codex_app_server steerable=true elapsed=3:05 created=2026-05-19T12:00:00.000Z model=gpt-5.5 effort=medium origin_chat_id=253768951 origin_message_id=700 summary=\"Implement steering snapshot\"");
+    expect(prompt).toContain("ref=abcd1234 id=job_abcd1234000000000000000000000000 status=queued profile=researcher backend=codex_exec steerable=false elapsed=1:05 created=2026-05-19T12:02:00.000Z summary=\"Research docs\"");
+    expect(prompt.indexOf("Active subagent jobs")).toBeLessThan(prompt.indexOf("User content:"));
+  });
+
   test.each([
     ["research", "research codex-chat routing"],
     ["debug", "debug the failing service test"],

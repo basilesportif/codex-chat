@@ -21,7 +21,7 @@ import { LocalIpcServer } from "./ipc.js";
 import { LoopManager, syncCron } from "./loops.js";
 import { MonitorManager } from "./monitors.js";
 import { StateStore } from "./state.js";
-import { SubagentManager, type CancelJobResult, type SteerJobResult, type SubagentBackendStatus } from "./subagents.js";
+import { SubagentManager, type ActiveSubagentJobSnapshot, type CancelJobResult, type SteerJobResult, type SubagentBackendStatus } from "./subagents.js";
 import { DisabledTranscriber, OpenAITranscriber, Transcriber } from "./transcription.js";
 import { isTelegramAdmin, TelegramGateway } from "./telegram.js";
 import { CodexClient, StoredAction, SubagentBackendKind, SubagentJob, UserEvent } from "./types.js";
@@ -63,6 +63,7 @@ const SUBAGENT_BACKEND_DENIED_MESSAGE =
 const DEPLOY_DRAIN_MS = 30_000;
 const DISPATCH_ACK_MAX_CHARS = 360;
 const DISPATCH_ACK_MAX_LINES = 4;
+const ACTIVE_SUBAGENT_SNAPSHOT_LIMIT = 20;
 
 type QueuedEvent = {
   event: UserEvent;
@@ -1325,7 +1326,44 @@ export class ServiceSupervisor {
         JSON.stringify(event.reply, null, 2)
       ].join("\n")
       : "";
-    return `${header}${replyContext ? `\n\n${replyContext}` : ""}\n\nUser content:\n${event.text}${attachments}`;
+    const activeSubagents = this.formatActiveSubagentSnapshot();
+    return `${header}${replyContext ? `\n\n${replyContext}` : ""}${activeSubagents ? `\n\n${activeSubagents}` : ""}\n\nUser content:\n${event.text}${attachments}`;
+  }
+
+  private formatActiveSubagentSnapshot(): string {
+    const snapshot = this.subagents.activeJobSnapshots(ACTIVE_SUBAGENT_SNAPSHOT_LIMIT);
+    if (snapshot.jobs.length === 0) return "";
+    const lines = [
+      "Active subagent jobs (compact routing snapshot; active/queued only):",
+      "Use for natural-language steering: emit steer_subagent only when exactly one steerable=true job matches the user's request. If none or multiple match, ask which job or tell the user to run `agent steer <ref> <text>`."
+    ];
+    for (const job of snapshot.jobs) lines.push(this.formatActiveSubagentSnapshotLine(job));
+    if (snapshot.omitted > 0) lines.push(`- ${snapshot.omitted} more active job(s) omitted; use the service-level \`agents\` command for full status.`);
+    return lines.join("\n");
+  }
+
+  private formatActiveSubagentSnapshotLine(job: ActiveSubagentJobSnapshot): string {
+    const parts = [
+      `ref=${job.ref}`,
+      `id=${job.id}`,
+      `status=${job.status}`,
+      `profile=${job.profile}`,
+      `backend=${job.backend}`,
+      `steerable=${job.steerable}`,
+      `elapsed=${formatDurationSeconds(job.elapsedSec)}`,
+      `created=${job.createdAt ?? "unknown"}`
+    ];
+    if (job.model) parts.push(`model=${job.model}`);
+    if (job.effort) parts.push(`effort=${job.effort}`);
+    if (job.originChatId !== undefined) parts.push(`origin_chat_id=${job.originChatId}`);
+    if (job.originMessageId !== undefined) parts.push(`origin_message_id=${job.originMessageId}`);
+    if (job.summary) parts.push(`summary=${JSON.stringify(this.compactSnapshotText(job.summary))}`);
+    return `- ${parts.join(" ")}`;
+  }
+
+  private compactSnapshotText(text: string, maxLength = 160): string {
+    const compact = text.replace(/\s+/g, " ").trim();
+    return compact.length > maxLength ? `${compact.slice(0, maxLength - 3)}...` : compact;
   }
 
   private requireChat(chatId?: number): number {

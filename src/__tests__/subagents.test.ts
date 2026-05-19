@@ -354,6 +354,90 @@ describe("subagents", () => {
     expect(manager.resolveJobRef("feedface")).toEqual({ status: "not_found", ref: "feedface" });
   });
 
+  test("active job snapshots include only queued/running/cancelling jobs with compact refs", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
+    tempDirs.push(root);
+    const { SubagentManager } = await import("../subagents.js");
+    const config = makeConfig(root, 1);
+    const manager = new SubagentManager(
+      config,
+      { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") } as never,
+      { saveJob: vi.fn().mockResolvedValue(undefined) } as never,
+      fakeLogger() as never,
+      { onReturnToMain: vi.fn(), onSendToUser: vi.fn() }
+    );
+    manager.addJobs([
+      {
+        id: "job_11111111111111111111111111111111",
+        profile: "implementer",
+        route: "return_to_main",
+        status: "running",
+        promptPath: "/tmp/p",
+        artifactDir: "/tmp/a",
+        backend: "codex_app_server",
+        activeTurnId: "turn_1",
+        startedAt: "2026-05-19T12:00:00.000Z",
+        enqueuedAt: "2026-05-19T11:59:00.000Z",
+        summary: "Implement snapshot",
+        originChatId: 253768951,
+        originMessageId: 701
+      },
+      {
+        id: "job_22222222222222222222222222222222",
+        profile: "researcher",
+        route: "return_to_main",
+        status: "queued",
+        promptPath: "/tmp/p",
+        artifactDir: "/tmp/a",
+        backend: "codex_exec",
+        enqueuedAt: "2026-05-19T12:02:00.000Z",
+        summary: "Research"
+      },
+      {
+        id: "job_33333333333333333333333333333333",
+        profile: "debugger",
+        route: "return_to_main",
+        status: "cancelling",
+        promptPath: "/tmp/p",
+        artifactDir: "/tmp/a",
+        backend: "codex_exec",
+        startedAt: "2026-05-19T12:01:00.000Z",
+        summary: "Cancel"
+      },
+      {
+        id: "job_44444444444444444444444444444444",
+        profile: "reviewer",
+        route: "return_to_main",
+        status: "completed",
+        promptPath: "/tmp/p",
+        artifactDir: "/tmp/a",
+        backend: "codex_exec",
+        startedAt: "2026-05-19T12:00:00.000Z",
+        completedAt: "2026-05-19T12:03:00.000Z",
+        summary: "Done"
+      }
+    ]);
+
+    const snapshot = manager.activeJobSnapshots(2, new Date("2026-05-19T12:03:05.000Z").getTime());
+
+    expect(snapshot.omitted).toBe(1);
+    expect(snapshot.jobs).toHaveLength(2);
+    expect(snapshot.jobs.map((job) => job.id)).toEqual([
+      "job_22222222222222222222222222222222",
+      "job_33333333333333333333333333333333"
+    ]);
+    expect(snapshot.jobs[0]).toMatchObject({
+      ref: "22222222",
+      status: "queued",
+      backend: "codex_exec",
+      steerable: false,
+      createdAt: "2026-05-19T12:02:00.000Z",
+      elapsedSec: 65,
+      summary: "Research"
+    });
+    expect(snapshot.jobs.some((job) => job.id === "job_44444444444444444444444444444444")).toBe(false);
+  });
+
   test("cancels queued jobs by removing them from the dispatch queue", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
     tempDirs.push(root);

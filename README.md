@@ -63,6 +63,19 @@ backend. `agent backend config` clears the runtime override.
 Running jobs are not changed by the backend command. Use `agent kill <ref>` for
 any already-running bad child job, then dispatch again after rollback.
 
+## Active Subagent Snapshot and Steering
+
+Every Codex turn includes a compact `Active subagent jobs` snapshot when there
+are queued, running, or cancelling subagent jobs. The snapshot is intentionally
+short and omits terminal history; use `agents` for the full operator view.
+
+Each active line includes the short ref, full `job_...` id, status, profile,
+backend, `steerable` boolean, elapsed and created times, summary, model/effort,
+and origin Telegram chat/message ids when available. Natural-language steering
+works from this context: the main loop emits `steer_subagent` only when exactly
+one `steerable=true` job matches the user's request. Otherwise it asks which job
+to steer or tells the user to run `agent steer <ref> <text>`.
+
 ## Browser Verification
 
 `codex-chat` includes Playwright as a development dependency so subagents that

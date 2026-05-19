@@ -104,6 +104,27 @@ export interface SubagentBackendStatus {
   effective: SubagentBackendKind;
 }
 
+export interface ActiveSubagentJobSnapshot {
+  ref: string;
+  id: string;
+  status: "queued" | "running" | "cancelling";
+  profile: string;
+  backend: SubagentBackendKind;
+  steerable: boolean;
+  summary?: string;
+  createdAt?: string;
+  elapsedSec: number;
+  originChatId?: number;
+  originMessageId?: number;
+  model?: string;
+  effort?: string;
+}
+
+export interface ActiveSubagentSnapshot {
+  jobs: ActiveSubagentJobSnapshot[];
+  omitted: number;
+}
+
 const ACTIVE_JOB_STATUSES = new Set<SubagentJob["status"]>(["queued", "running", "cancelling"]);
 const TERMINAL_JOB_STATUSES = new Set<SubagentJob["status"]>(["completed", "failed", "cancelled", "timed_out", "abandoned"]);
 
@@ -191,6 +212,16 @@ export class SubagentManager {
 
   listJobs(): SubagentJob[] {
     return [...this.jobs.values()].sort((a, b) => this.jobSortTime(b).localeCompare(this.jobSortTime(a)));
+  }
+
+  activeJobSnapshots(limit = 20, nowMs = Date.now()): ActiveSubagentSnapshot {
+    const active = this.listJobs().filter((job): job is SubagentJob & { status: "queued" | "running" | "cancelling" } =>
+      ACTIVE_JOB_STATUSES.has(job.status)
+    );
+    return {
+      jobs: active.slice(0, limit).map((job) => this.toActiveSnapshot(job, nowMs)),
+      omitted: Math.max(0, active.length - limit)
+    };
   }
 
   /**
@@ -595,6 +626,34 @@ export class SubagentManager {
 
   private jobSortTime(job: SubagentJob): string {
     return job.startedAt ?? job.enqueuedAt ?? job.completedAt ?? job.abandonedAt ?? "";
+  }
+
+  private toActiveSnapshot(job: SubagentJob & { status: "queued" | "running" | "cancelling" }, nowMs: number): ActiveSubagentJobSnapshot {
+    const createdAt = job.enqueuedAt ?? job.startedAt ?? job.cancelRequestedAt;
+    const elapsedSince = job.status === "queued" ? job.enqueuedAt : job.startedAt ?? job.enqueuedAt ?? job.cancelRequestedAt;
+    const elapsedMs = elapsedSince ? nowMs - new Date(elapsedSince).getTime() : 0;
+    return {
+      ref: this.shortRef(job.id),
+      id: job.id,
+      status: job.status,
+      profile: job.profile,
+      backend: this.normalizeBackend(job.backend ?? this.effectiveBackend()),
+      steerable: this.isJobCurrentlySteerable(job),
+      summary: job.summary,
+      createdAt,
+      elapsedSec: Number.isFinite(elapsedMs) ? Math.max(0, Math.round(elapsedMs / 1000)) : 0,
+      originChatId: job.originChatId,
+      originMessageId: job.originMessageId,
+      model: job.model,
+      effort: job.effort
+    };
+  }
+
+  private isJobCurrentlySteerable(job: SubagentJob): boolean {
+    if (job.status !== "running") return false;
+    if (this.normalizeBackend(job.backend ?? this.effectiveBackend()) !== "codex_app_server") return false;
+    if (!job.activeTurnId) return false;
+    return this.running.get(job.id)?.child.isAlive() === true;
   }
 
   private normalizeJobRef(ref: string): string {

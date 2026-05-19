@@ -29,6 +29,12 @@ The steerable-subagents foundation is implemented behind a safe backend flag:
   - Telegram: `agent steer <ref> <text>` / `subagent steer <ref> <text>`.
   - Directive: `steer_subagent`.
   - IPC: `{ "type": "subagent_steer", "jobId": "job_...", "text": "..." }`.
+- Main-loop Codex turns now receive a compact `Active subagent jobs` snapshot
+  when queued/running/cancelling jobs exist. It includes short refs, full ids,
+  status, profile, backend, steerability, summary, timing, model/effort, and
+  Telegram origin ids when available. This enables natural-language steering:
+  emit `steer_subagent` only for one matching `steerable=true` job; otherwise
+  ask for clarification or point the user to `agent steer <ref> <text>`.
 
 The app-server backend is intentionally opt-in and minimal: one child app-server process per active job over a loopback WebSocket. Factors runtime remains deferred.
 

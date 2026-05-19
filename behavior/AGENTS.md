@@ -241,6 +241,13 @@ Use `return_to_main` unless the user explicitly asked for direct progress output
 
 When a `source=subagent` callback includes Telegram origin chat/message metadata, it is part of a user-originated request and must not be silent. Send a concise user-facing `send_text`, `send_image`, `send_document`, or clean-text reply that summarizes the result or failure for that original message. The service has a direct-result fallback for safety, but do not rely on fallback behavior as the normal response path.
 
+Codex turn prompts may include an `Active subagent jobs` snapshot. Use it to handle natural-language steering requests such as "tell the implementer to focus on tests":
+
+- Only jobs with `steerable=true` can receive a `steer_subagent` directive.
+- Emit `steer_subagent` only when exactly one steerable job matches the user's request by ref, full id, profile, summary, or other snapshot fields.
+- If no steerable job matches, or if multiple steerable jobs match, ask for clarification or tell the user to run `agent steer <ref> <text>`.
+- Do not guess, and do not try to steer queued, cancelling, terminal, `codex_exec`, or `steerable=false` jobs.
+
 ### Model/effort disclosure and routing
 
 For every user-originated task, explicitly decide whether work stays in the main loop or is dispatched to a subagent.

@@ -105,3 +105,34 @@ Simple data visualization, map, report, chart, table, calculator, one-off scratc
 For `dispatch_subagent`, callers must include `summary`, `model`, and `effort`. The schema rejects dispatch actions missing any of those fields. The service sends a visible dispatch status with those values and records them on the subagent job so `agents` / `subagents` output shows which model and effort were used.
 
 Subagent callbacks with an origin Telegram chat/message are not allowed to be silent. A `return_to_main` callback should produce a visible `send_text`, `send_image`, `send_document`, or clean-text reply for the original message. If the main turn produces no user-facing output, the runtime sends the subagent result directly as a safety fallback.
+
+`steer_subagent` can steer an already-running app-server-backed subagent without creating a new job:
+
+```codex-chat
+{
+  "version": 1,
+  "actions": [
+    {
+      "type": "steer_subagent",
+      "idempotencyKey": "steer-<msgId>-1",
+      "jobId": "job_...",
+      "text": "New steering text"
+    }
+  ]
+}
+```
+
+Jobs launched with the safe `codex_exec` backend are not steerable; the service reports that explicitly.
+
+## Service-Level Subagent Commands
+
+These Telegram commands are handled before Codex sees the message:
+
+| Command | What the service does |
+|---|---|
+| `agent steer <id> <text>` | Steer a running app-server-backed subagent. |
+| `subagent steer <id> <text>` | Alias for `agent steer`. |
+| `agent backend` | Show configured, runtime override, and effective subagent backend. |
+| `agent backend exec` | Recovery command: force new and queued subagents back to the safe `codex_exec` backend. |
+| `agent backend app-server` | Opt in new and queued subagents to the app-server child backend. |
+| `agent backend config` | Clear the runtime override and use the configured backend. |

@@ -108,6 +108,20 @@ Two
     expect(parsed.cleanText).toBe("One\nTwo");
   });
 
+  test("accepts steer_subagent directive", () => {
+    const parsed = parseDirectives(`\`\`\`codex-chat
+{"version":1,"actions":[{"type":"steer_subagent","idempotencyKey":"steer-1","jobId":"job_deadbeef","text":"Please summarize what you have and stop."}]}
+\`\`\``);
+
+    expect(parsed.errors).toEqual([]);
+    const action = parsed.blocks[0]?.actions[0];
+    expect(action?.type).toBe("steer_subagent");
+    if (action?.type === "steer_subagent") {
+      expect(action.jobId).toBe("job_deadbeef");
+      expect(action.text).toContain("summarize");
+    }
+  });
+
   test("rejects unknown directive types", () => {
     const parsed = parseDirectives(`\`\`\`codex-chat
 { "version": 1, "actions": [ { "type": "get_logs", "idempotencyKey": "logs-old" } ] }

@@ -8,6 +8,7 @@ const effortSchema = z.enum(["none", "minimal", "low", "medium", "high", "xhigh"
 const sandboxSchema = z.enum(["read-only", "workspace-write", "danger-full-access"]);
 const approvalSchema = z.enum(["untrusted", "on-failure", "on-request", "never"]);
 const telegramUserIdSchema = z.union([z.number().int(), z.string().min(1)]);
+const subagentBackendSchema = z.enum(["codex_exec", "codex_app_server"]);
 
 const configSchema = z.object({
   version: z.literal(1).default(1),
@@ -60,6 +61,7 @@ const configSchema = z.object({
   }),
   subagents: z.object({
     enabled: z.boolean().default(true),
+    backend: subagentBackendSchema.default("codex_exec"),
     maxConcurrent: z.number().int().positive().default(5),
     defaultModel: z.string().default(""),
     defaultEffort: effortSchema.default("medium"),
@@ -67,6 +69,9 @@ const configSchema = z.object({
     maxTimeoutSec: z.number().int().positive().default(7200),
     maxPromptBytes: z.number().int().positive().default(262_144),
     artifactDir: z.string().default("data/subagents"),
+    childSocketDir: z.string().default("data/run/subagents"),
+    childStartupTimeoutSec: z.number().int().positive().default(60),
+    childInterruptGraceMs: z.number().int().positive().default(5000),
     allowedProfiles: z.array(z.string()).default([]),
     cleanupArtifacts: z.boolean().default(true)
   }),
@@ -155,6 +160,7 @@ const defaultConfig = configSchema.parse({
   },
   subagents: {
     enabled: true,
+    backend: "codex_exec",
     maxConcurrent: 5,
     defaultModel: "",
     defaultEffort: "medium",
@@ -162,6 +168,9 @@ const defaultConfig = configSchema.parse({
     maxTimeoutSec: 7200,
     maxPromptBytes: 262_144,
     artifactDir: "data/subagents",
+    childSocketDir: "data/run/subagents",
+    childStartupTimeoutSec: 60,
+    childInterruptGraceMs: 5000,
     allowedProfiles: [],
     cleanupArtifacts: true
   },
@@ -263,6 +272,7 @@ function collectEnvOverrides(env: NodeJS.ProcessEnv = process.env): Record<strin
     { name: "CODEX_CHAT_CODEX_EFFORT", path: ["codex", "effort"] },
     { name: "CODEX_CHAT_CODEX_SANDBOX", path: ["codex", "sandbox"] },
     { name: "CODEX_CHAT_CODEX_APPROVAL_POLICY", path: ["codex", "approvalPolicy"] },
+    { name: "CODEX_CHAT_SUBAGENTS_BACKEND", path: ["subagents", "backend"] },
     { name: "CODEX_CHAT_TELEGRAM_MODE", path: ["telegram", "mode"] },
     { name: "CODEX_CHAT_LOOPS_PATH", path: ["loops", "path"] },
     { name: "CODEX_CHAT_MONITORS_PATH", path: ["monitors", "path"] },
@@ -310,6 +320,7 @@ export async function ensureConfiguredDirectories(config: AppConfig): Promise<vo
     config.files.dir,
     config.files.artifactDir,
     config.subagents.artifactDir,
+    config.subagents.childSocketDir,
     "data/logs",
     "data/run",
     "data/spool/loops",

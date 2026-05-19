@@ -367,6 +367,7 @@ Supported action types:
 - `send_document`
 - `dispatch_subagent`
 - `cancel_job`
+- `steer_subagent`
 - `notify_owner`
 - `enqueue_main`
 - `react` only when explicitly changing a reaction after receipt
@@ -386,6 +387,12 @@ The following commands are intercepted by the service **before** they reach Code
 | `agents <N>` | Show last N completed jobs. |
 | `agent kill <id>` | Cancel a running subagent by its short ID prefix (first 6 chars). |
 | `subagent kill <id>` | Alias for `agent kill`. |
+| `agent steer <id> <text>` | Steer a running app-server-backed subagent. |
+| `subagent steer <id> <text>` | Alias for `agent steer`. |
+| `agent backend` | Show configured, runtime override, and effective subagent backend. |
+| `agent backend exec` | Recovery command: force new and queued subagents back to the safe `codex_exec` backend. |
+| `agent backend app-server` | Opt in new and queued subagents to the app-server child backend. |
+| `agent backend config` | Clear the runtime override and use the configured backend. |
 | `help` | List all service-level commands. |
 | `update` / `deploy` | Pull latest and restart the service. |
 

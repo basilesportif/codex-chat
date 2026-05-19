@@ -9,6 +9,8 @@ export type Route =
   | "store_only"
   | "silent";
 
+export type SubagentBackendKind = "codex_exec" | "codex_app_server";
+
 export interface Attachment {
   kind: "image" | "document" | "voice" | "audio";
   localPath: string;
@@ -167,6 +169,14 @@ export interface SubagentJob {
   lastMessagePath?: string;
   originChatId?: number;
   originMessageId?: number;
+  backend?: SubagentBackendKind;
+  backendThreadId?: string;
+  activeTurnId?: string;
+  socketPath?: string;
+  transport?: "stdio" | "ws" | "unix";
+  interruptRequestedAt?: string;
+  lastSteeredAt?: string;
+  steerCount?: number;
 }
 
 export interface LoopRun {

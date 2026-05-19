@@ -5,6 +5,8 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   parseAgentsCommand,
   parseAgentKillCommand,
+  parseAgentSteerCommand,
+  parseSubagentBackendCommand,
   parseHelpCommand,
   HELP_TEXT,
   ServiceSupervisor,
@@ -103,6 +105,34 @@ describe("parseAgentKillCommand", () => {
   });
 });
 
+describe("parseAgentSteerCommand", () => {
+  test("matches steering commands with free-form text", () => {
+    expect(parseAgentSteerCommand("agent steer abc123 please focus on tests")).toEqual({
+      isSteer: true,
+      jobId: "abc123",
+      text: "please focus on tests"
+    });
+    expect(parseAgentSteerCommand("subagent tell job_deadbeef add more logging")).toEqual({
+      isSteer: true,
+      jobId: "job_deadbeef",
+      text: "add more logging"
+    });
+  });
+
+  test("does not match incomplete steering commands", () => {
+    expect(parseAgentSteerCommand("agent steer abc123")).toEqual({ isSteer: false, jobId: "", text: "" });
+  });
+});
+
+describe("parseSubagentBackendCommand", () => {
+  test("parses status, recovery, app-server opt-in, and clear commands", () => {
+    expect(parseSubagentBackendCommand("agent backend")).toEqual({ isBackend: true, action: "status" });
+    expect(parseSubagentBackendCommand("agent backend exec")).toEqual({ isBackend: true, action: "set", backend: "codex_exec" });
+    expect(parseSubagentBackendCommand("subagent backend app-server")).toEqual({ isBackend: true, action: "set", backend: "codex_app_server" });
+    expect(parseSubagentBackendCommand("agents backend config")).toEqual({ isBackend: true, action: "clear" });
+  });
+});
+
 // ---------------------------------------------------------------------------
 // parseHelpCommand
 // ---------------------------------------------------------------------------
@@ -137,6 +167,8 @@ describe("HELP_TEXT", () => {
     expect(HELP_TEXT).toContain("agents");
     expect(HELP_TEXT).toContain("subagents (sub)");
     expect(HELP_TEXT).toContain("agent kill");
+    expect(HELP_TEXT).toContain("agent steer");
+    expect(HELP_TEXT).toContain("agent backend exec");
     expect(HELP_TEXT).toContain("help");
     expect(HELP_TEXT).toContain("update");
     expect(HELP_TEXT).toContain("deploy");
@@ -551,6 +583,54 @@ describe("service command routing", () => {
 
     expect(cancelJob).toHaveBeenCalledWith("abc123");
     expect(sendText).toHaveBeenCalledWith(253768951, "Cancelled job_abc123.", 3);
+    expect(runTurn).not.toHaveBeenCalled();
+  });
+
+  test("'agent steer <id> <text>' command is intercepted and calls steerJob", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+    const steerJob = vi.spyOn(service, "steerJob").mockResolvedValue("Steered subagent job_abc123 (debugger).");
+    const runTurn = vi.spyOn(service as unknown as { runTurn(e: unknown): void }, "runTurn");
+
+    await service.enqueueUserEvent({
+      source: "telegram",
+      chatId: 253768951,
+      userId: 253768951,
+      messageId: 4,
+      text: "agent steer abc123 please stop and summarize",
+      attachments: [],
+      receivedAt: new Date().toISOString()
+    });
+
+    expect(steerJob).toHaveBeenCalledWith("abc123", "please stop and summarize");
+    expect(sendText).toHaveBeenCalledWith(253768951, "Steered subagent job_abc123 (debugger).", 4);
+    expect(runTurn).not.toHaveBeenCalled();
+  });
+
+  test("'agent backend exec' is an admin Telegram rollback path", async () => {
+    const config = await loadTestConfig();
+    config.telegram.allowlist.adminUserIds = [253768951];
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+    const runTurn = vi.spyOn(service as unknown as { runTurn(e: unknown): void }, "runTurn");
+
+    await service.enqueueUserEvent({
+      source: "telegram",
+      chatId: 253768951,
+      userId: 253768951,
+      messageId: 5,
+      text: "agent backend exec",
+      attachments: [],
+      receivedAt: new Date().toISOString()
+    });
+
+    expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("Recovery active"), 5);
+    expect((service as unknown as { subagents: SubagentManager }).subagents.backendStatus()).toMatchObject({ effective: "codex_exec", override: "codex_exec" });
     expect(runTurn).not.toHaveBeenCalled();
   });
 

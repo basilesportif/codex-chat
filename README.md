@@ -45,6 +45,24 @@ codex-chat jobs list
 - Subagent artifacts: `data/subagents/`
 - Disposable generated-image staging: `data/artifacts/generated-images/`
 
+## Subagent Backend Flag
+
+`subagents.backend` controls new subagent jobs:
+
+- `codex_exec` is the production-safe default and preserves the historical
+  `codex exec` child behavior.
+- `codex_app_server` enables the experimental steerable app-server child
+  backend for new jobs.
+
+Telegram recovery path: send `agent backend exec` from an admin account. That
+sets a persisted runtime override in `data/state/subagent_runtime.json` so new
+and queued subagents use `codex_exec` even if config still says
+`codex_app_server`. `agent backend` shows configured, override, and effective
+backend. `agent backend config` clears the runtime override.
+
+Running jobs are not changed by the backend command. Use `agent kill <ref>` for
+any already-running bad child job, then dispatch again after rollback.
+
 ## Browser Verification
 
 `codex-chat` includes Playwright as a development dependency so subagents that

@@ -51,6 +51,7 @@ function makeConfig(rootDir: string, maxConcurrent = 2): AppConfig {
     },
     subagents: {
       enabled: true,
+      backend: "codex_exec",
       maxConcurrent,
       defaultModel: "",
       defaultEffort: "medium",
@@ -58,6 +59,9 @@ function makeConfig(rootDir: string, maxConcurrent = 2): AppConfig {
       maxTimeoutSec: 60,
       maxPromptBytes: 1_000_000,
       artifactDir: "data/subagents",
+      childSocketDir: "data/run/subagents",
+      childStartupTimeoutSec: 60,
+      childInterruptGraceMs: 5000,
       allowedProfiles: [],
       cleanupArtifacts: false
     }
@@ -242,6 +246,64 @@ describe("subagents", () => {
     const args = spawn.mock.calls[0]?.[1] as string[];
     expect(args).toContain('experimental_feature="on"');
     expect(args.filter((arg) => arg.includes("model_reasoning_effort"))).toEqual(['model_reasoning_effort="xhigh"']);
+  });
+
+  test("uses codex_exec backend by default and records it on jobs", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
+    tempDirs.push(root);
+    const spawn = vi.fn(() => fakeChild());
+    vi.doMock("node:child_process", async () => {
+      const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+      return { ...actual, spawn };
+    });
+    const { SubagentManager } = await import("../subagents.js");
+    const config = makeConfig(root, 1);
+    const manager = new SubagentManager(
+      config,
+      { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") } as never,
+      { saveJob: vi.fn().mockResolvedValue(undefined) } as never,
+      fakeLogger() as never,
+      { onReturnToMain: vi.fn(), onSendToUser: vi.fn() }
+    );
+
+    await manager.dispatch({ profile: "x", prompt: "a", route: "return_to_main" });
+    await waitFor(() => spawn.mock.calls.length === 1);
+
+    expect(spawn.mock.calls[0]?.[1]?.[0]).toBe("exec");
+    expect(manager.listJobs()[0]).toMatchObject({ backend: "codex_exec", status: "running" });
+  });
+
+  test("runtime backend rollback forces queued and new jobs back to codex_exec", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
+    tempDirs.push(root);
+    const spawn = vi.fn(() => fakeChild());
+    vi.doMock("node:child_process", async () => {
+      const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+      return { ...actual, spawn };
+    });
+    const { SubagentManager } = await import("../subagents.js");
+    const config = makeConfig(root, 0);
+    config.subagents.backend = "codex_app_server";
+    const state = {
+      saveJob: vi.fn().mockResolvedValue(undefined),
+      setSubagentBackendOverride: vi.fn().mockResolvedValue(undefined)
+    };
+    const manager = new SubagentManager(
+      config,
+      { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") } as never,
+      state as never,
+      fakeLogger() as never,
+      { onReturnToMain: vi.fn(), onSendToUser: vi.fn() }
+    );
+
+    const queuedId = await manager.dispatch({ profile: "x", prompt: "queued", route: "return_to_main" });
+    expect(manager.listJobs()[0]).toMatchObject({ id: queuedId, backend: "codex_app_server", status: "queued" });
+
+    await manager.setBackendOverride("codex_exec", "test");
+
+    expect(state.setSubagentBackendOverride).toHaveBeenCalledWith("codex_exec", "test");
+    expect(manager.backendStatus()).toMatchObject({ configured: "codex_app_server", override: "codex_exec", effective: "codex_exec" });
+    expect(manager.listJobs()[0]).toMatchObject({ id: queuedId, backend: "codex_exec", status: "queued" });
   });
 
   test("resolves full job ids, displayed prefixes, and hex prefixes", async () => {

@@ -51,6 +51,10 @@ reloadOnSighup = true
 
 [subagents]
 enabled = true
+# Production-safe default. Use Telegram command `agent backend app-server` or
+# set this to "codex_app_server" only after testing; recover with
+# `agent backend exec`.
+backend = "codex_exec"
 maxConcurrent = 5
 defaultModel = ""
 defaultEffort = "medium"
@@ -58,6 +62,9 @@ defaultTimeoutSec = 1800
 maxTimeoutSec = 7200
 maxPromptBytes = 262144
 artifactDir = "data/subagents"
+childSocketDir = "data/run/subagents"
+childStartupTimeoutSec = 60
+childInterruptGraceMs = 5000
 allowedProfiles = []
 cleanupArtifacts = true
 

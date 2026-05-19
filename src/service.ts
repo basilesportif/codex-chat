@@ -21,10 +21,10 @@ import { LocalIpcServer } from "./ipc.js";
 import { LoopManager, syncCron } from "./loops.js";
 import { MonitorManager } from "./monitors.js";
 import { StateStore } from "./state.js";
-import { SubagentManager, type CancelJobResult } from "./subagents.js";
+import { SubagentManager, type CancelJobResult, type SteerJobResult, type SubagentBackendStatus } from "./subagents.js";
 import { DisabledTranscriber, OpenAITranscriber, Transcriber } from "./transcription.js";
 import { isTelegramAdmin, TelegramGateway } from "./telegram.js";
-import { CodexClient, StoredAction, SubagentJob, UserEvent } from "./types.js";
+import { CodexClient, StoredAction, SubagentBackendKind, SubagentJob, UserEvent } from "./types.js";
 import { makeId, nowIso } from "./util.js";
 
 export const INJECT_TELEGRAM_USER_ID = 253768951;
@@ -58,6 +58,8 @@ const DEPLOY_ACK_MESSAGE =
   "Deploying — pulling latest and rebuilding. Will message you when ready.";
 const DEPLOY_DENIED_MESSAGE =
   "Deploy is admin-only. Ask Tim to add you to telegram.allowlist.adminUserIds.";
+const SUBAGENT_BACKEND_DENIED_MESSAGE =
+  "Subagent backend changes are admin-only. Ask Tim to add you to telegram.allowlist.adminUserIds.";
 const DEPLOY_DRAIN_MS = 30_000;
 const DISPATCH_ACK_MAX_CHARS = 360;
 const DISPATCH_ACK_MAX_LINES = 4;
@@ -123,6 +125,36 @@ export function parseAgentKillCommand(text: string): { isKill: boolean; jobId: s
 }
 
 /**
+ * Parses "agent steer <id> <text>" / "subagent steer <id> <text>" commands.
+ */
+export function parseAgentSteerCommand(text: string): { isSteer: boolean; jobId: string; text: string } {
+  const match = text.trim().match(/^(?:agents?|subagents?)\s+(?:steer|tell)\s+(\S+)\s+([\s\S]+)$/i);
+  if (!match) return { isSteer: false, jobId: "", text: "" };
+  return { isSteer: true, jobId: match[1] as string, text: (match[2] as string).trim() };
+}
+
+export type SubagentBackendCommand =
+  | { isBackend: false }
+  | { isBackend: true; action: "status" | "set" | "clear"; backend?: SubagentBackendKind };
+
+/**
+ * Parses "agent backend [status|exec|app-server|config]" commands.
+ * "agent backend exec" is the Telegram recovery path for the safe exec backend.
+ */
+export function parseSubagentBackendCommand(text: string): SubagentBackendCommand {
+  const match = text.trim().match(/^(?:agents?|subagents?)\s+backend(?:\s+(\S+))?$/i);
+  if (!match) return { isBackend: false };
+  const value = (match[1] ?? "status").toLowerCase();
+  if (value === "status") return { isBackend: true, action: "status" };
+  if (value === "config" || value === "clear" || value === "default") return { isBackend: true, action: "clear" };
+  if (value === "exec" || value === "codex_exec") return { isBackend: true, action: "set", backend: "codex_exec" };
+  if (value === "app-server" || value === "app_server" || value === "codex_app_server") {
+    return { isBackend: true, action: "set", backend: "codex_app_server" };
+  }
+  return { isBackend: false };
+}
+
+/**
  * Returns true when the message is a "help" command (service-level).
  */
 export function parseHelpCommand(text: string): boolean {
@@ -138,6 +170,9 @@ export const HELP_TEXT = `Service commands (handled instantly, bypass Codex):
   subagents (sub)   — alias for agents
   agents <N>        — last N terminal jobs
   agent kill <ref>  — cancel a subagent by full ID, displayed ref, or hex prefix
+  agent steer <ref> <text> — steer a running app-server subagent
+  agent backend     — show effective subagent backend
+  agent backend exec — recovery: force new/queued subagents back to safe codex_exec
   help              — this message
   update / deploy   — pull latest and restart service`;
 
@@ -238,13 +273,24 @@ export class ServiceSupervisor {
       logger
     );
     this.ipc = new LocalIpcServer(resolveConfigPath(config, config.service.ipcSocket), logger, async (message) => {
-      if (message.type === "loop_run") await this.loops.handleRun(message.loopId, message.scheduledAt);
+      if (message.type === "loop_run") {
+        await this.loops.handleRun(message.loopId, message.scheduledAt);
+        return undefined;
+      }
+      if (message.type === "subagent_steer") {
+        const result = await this.subagents.steerJob(message.jobId, message.text);
+        if (result.status !== "success") throw new Error(result.message);
+        return result;
+      }
+      if (message.type === "ping") return { pong: true };
+      throw new Error(`Unknown IPC message type: ${(message as { type?: string }).type ?? "unknown"}`);
     });
   }
 
   async start(): Promise<void> {
     await ensureConfiguredDirectories(this.config);
     await this.state.init();
+    await this.subagents.loadRuntimeBackendOverride();
     await this.subagents.loadJobs();
     await this.files.init();
     await this.behavior.loadBootstrapPrompt();
@@ -294,6 +340,17 @@ export class ServiceSupervisor {
       // so the service handles the whole thing.
       if (isDeployCommand(event.text)) {
         await this.handleDeployCommandEvent(event);
+        return;
+      }
+      const backendCommand = parseSubagentBackendCommand(event.text);
+      if (backendCommand.isBackend) {
+        await this.handleSubagentBackendCommandEvent(event, backendCommand);
+        return;
+      }
+      const agentSteer = parseAgentSteerCommand(event.text);
+      if (agentSteer.isSteer) {
+        const result = await this.steerJob(agentSteer.jobId, agentSteer.text);
+        await this.telegram.sendText(event.chatId, result, event.messageId);
         return;
       }
       const agentKill = parseAgentKillCommand(event.text);
@@ -408,7 +465,9 @@ export class ServiceSupervisor {
       lines.push("\nRunning:");
       for (const j of running) {
         const ref = this.formatJobCancelRef(j);
-        lines.push(`  [${this.formatJobDisplayId(j)}] running ${j.profile}${this.formatJobModelEffort(j)} - ${formatDurationSeconds(elapsedSec(j.startedAt))} - cancel: agent kill ${ref}${j.pid ? ` - pid=${j.pid}` : ""}${j.summary ? ` - ${j.summary}` : ""}`);
+        const steer = j.backend === "codex_app_server" ? ` - steer: agent steer ${ref} <text>` : "";
+        const backend = j.backend ? ` backend=${j.backend}` : "";
+        lines.push(`  [${this.formatJobDisplayId(j)}] running ${j.profile}${this.formatJobModelEffort(j)}${backend} - ${formatDurationSeconds(elapsedSec(j.startedAt))} - cancel: agent kill ${ref}${steer}${j.pid ? ` - pid=${j.pid}` : ""}${j.summary ? ` - ${j.summary}` : ""}`);
       }
     }
 
@@ -423,7 +482,8 @@ export class ServiceSupervisor {
       lines.push("\nQueued:");
       for (const j of queued) {
         const ref = this.formatJobCancelRef(j);
-        lines.push(`  [${this.formatJobDisplayId(j)}] queued ${j.profile}${this.formatJobModelEffort(j)}${j.enqueuedAt ? ` - queued ${formatDurationSeconds(elapsedSec(j.enqueuedAt))} ago` : ""} - cancel: agent kill ${ref}${j.summary ? ` - ${j.summary}` : ""}`);
+        const backend = j.backend ? ` backend=${j.backend}` : "";
+        lines.push(`  [${this.formatJobDisplayId(j)}] queued ${j.profile}${this.formatJobModelEffort(j)}${backend}${j.enqueuedAt ? ` - queued ${formatDurationSeconds(elapsedSec(j.enqueuedAt))} ago` : ""} - cancel: agent kill ${ref}${j.summary ? ` - ${j.summary}` : ""}`);
       }
     }
 
@@ -470,6 +530,30 @@ export class ServiceSupervisor {
 
   async cancelJob(jobId: string): Promise<string> {
     return this.formatCancelJobResult(await this.subagents.requestCancel(jobId));
+  }
+
+  async steerJob(jobId: string, text: string): Promise<string> {
+    return this.formatSteerJobResult(await this.subagents.steerJob(jobId, text));
+  }
+
+  private formatSteerJobResult(result: SteerJobResult): string {
+    if (result.status === "success" && result.job) {
+      return `Steered subagent ${result.job.id} (${result.job.profile}).`;
+    }
+    if (result.status === "unsupported_backend" && result.job) {
+      return `Subagent ${result.job.id} (${result.job.profile}) was launched with backend=codex_exec and is not steerable. Use "agent backend app-server" before dispatching a new steerable job.`;
+    }
+    if ((result.status === "not_running" || result.status === "not_steerable") && result.job) {
+      return `Subagent ${result.job.id} (${result.job.profile}) is not currently steerable: ${result.message}`;
+    }
+    if (result.status === "ambiguous") {
+      const candidates = (result.candidates ?? []).slice(0, 8).map((candidate) =>
+        `${candidate.id} ref=${candidate.ref} status=${candidate.status} profile=${candidate.profile}${candidate.summary ? ` summary=${candidate.summary}` : ""}`
+      );
+      return [`Ambiguous subagent ref "${result.ref}". Use a longer ref.`, ...candidates].join("\n");
+    }
+    if (result.status === "failed") return `Failed to steer subagent "${result.ref}": ${result.message}`;
+    return `No subagent job matched "${result.ref}". Use "agents" to list usable refs.`;
   }
 
   private formatCancelJobResult(result: CancelJobResult): string {
@@ -745,6 +829,10 @@ export class ServiceSupervisor {
       }
       if (action.type === "cancel_job") {
         const result = await this.subagents.requestCancel(action.jobId);
+        if (result.status !== "success") throw new Error(result.message);
+      }
+      if (action.type === "steer_subagent") {
+        const result = await this.subagents.steerJob(action.jobId, action.text);
         if (result.status !== "success") throw new Error(result.message);
       }
       if (action.type === "notify_owner") await this.telegram.notifyOps(action.text);
@@ -1279,6 +1367,50 @@ export class ServiceSupervisor {
     if (!this.config.transcription.enabled) return new DisabledTranscriber();
     if (this.config.transcription.provider === "openai") return new OpenAITranscriber(this.config);
     return new DisabledTranscriber();
+  }
+
+  private async handleSubagentBackendCommandEvent(event: UserEvent, command: Exclude<SubagentBackendCommand, { isBackend: false }>): Promise<void> {
+    const chatId = event.chatId;
+    if (!chatId) return;
+    if (command.action !== "status") {
+      const isAdmin = isTelegramAdmin({
+        userId: event.userId,
+        configAdminUserIds: this.config.telegram.allowlist.adminUserIds,
+        stateUsers: await this.state.listTelegramUsers()
+      });
+      if (!isAdmin) {
+        await this.telegram.sendText(chatId, SUBAGENT_BACKEND_DENIED_MESSAGE, event.messageId).catch(() => undefined);
+        return;
+      }
+    }
+
+    let status: SubagentBackendStatus;
+    if (command.action === "set") {
+      status = await this.subagents.setBackendOverride(command.backend, event.userId ? `telegram:${event.userId}` : "telegram");
+    } else if (command.action === "clear") {
+      status = await this.subagents.setBackendOverride(undefined, event.userId ? `telegram:${event.userId}` : "telegram");
+    } else {
+      status = this.subagents.backendStatus();
+    }
+    await this.telegram.sendText(chatId, this.formatSubagentBackendStatus(status, command.action), event.messageId);
+  }
+
+  private formatSubagentBackendStatus(status: SubagentBackendStatus, action: "status" | "set" | "clear"): string {
+    const lines = [
+      `Subagent backend: ${status.effective}`,
+      `configured: ${status.configured}`,
+      `runtime override: ${status.override ?? "none"}`
+    ];
+    if (action === "set" && status.effective === "codex_exec") {
+      lines.push("Recovery active: new and queued subagents will use the safe codex_exec backend. Running jobs are unchanged; use agent kill <ref> if needed.");
+    } else if (action === "set") {
+      lines.push("App-server child backend enabled for new and queued subagents. Recover with: agent backend exec");
+    } else if (action === "clear") {
+      lines.push("Runtime override cleared; new and queued subagents use the configured backend.");
+    } else {
+      lines.push("Recovery command: agent backend exec");
+    }
+    return lines.join("\n");
   }
 
   /**

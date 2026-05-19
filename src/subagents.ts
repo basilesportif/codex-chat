@@ -1,13 +1,19 @@
-import { spawn, type ChildProcess } from "node:child_process";
-import { appendFile, readFile, rm, writeFile } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Logger } from "pino";
 import { AppConfig, resolveConfigPath } from "./config.js";
 import { BehaviorPack } from "./behavior.js";
 import { DirectiveAction } from "./directives.js";
 import { StateStore } from "./state.js";
-import { Route, SubagentJob } from "./types.js";
-import { ensureDir, killProcessTree, makeId, nowIso, pathExists } from "./util.js";
+import { Route, SubagentBackendKind, SubagentJob } from "./types.js";
+import {
+  ChildAgentBackend,
+  ChildAgentFinish,
+  CodexAppServerChildAgentBackend,
+  CodexExecChildAgentBackend,
+  StartedChildAgent
+} from "./subagent-backends.js";
+import { ensureDir, makeId, nowIso, pathExists } from "./util.js";
 
 const SIGKILL_GRACE_MS = 5_000;
 const MAX_QUEUE_DEPTH = 200;
@@ -40,7 +46,8 @@ interface SubagentCallbacks {
 
 interface RunningJob {
   job: SubagentJob;
-  child: ChildProcess;
+  child: StartedChildAgent;
+  backend: ChildAgentBackend;
   timeout: NodeJS.Timeout;
   killTimer?: NodeJS.Timeout;
 }
@@ -74,6 +81,29 @@ export interface CancelJobResult {
   candidates?: JobRefCandidate[];
 }
 
+export type SteerJobResultStatus =
+  | "success"
+  | "not_found"
+  | "ambiguous"
+  | "not_running"
+  | "unsupported_backend"
+  | "not_steerable"
+  | "failed";
+
+export interface SteerJobResult {
+  status: SteerJobResultStatus;
+  ref: string;
+  message: string;
+  job?: SubagentJob;
+  candidates?: JobRefCandidate[];
+}
+
+export interface SubagentBackendStatus {
+  configured: SubagentBackendKind;
+  override?: SubagentBackendKind;
+  effective: SubagentBackendKind;
+}
+
 const ACTIVE_JOB_STATUSES = new Set<SubagentJob["status"]>(["queued", "running", "cancelling"]);
 const TERMINAL_JOB_STATUSES = new Set<SubagentJob["status"]>(["completed", "failed", "cancelled", "timed_out", "abandoned"]);
 
@@ -81,6 +111,8 @@ export class SubagentManager {
   private queue: DispatchInput[] = [];
   private running = new Map<string, RunningJob>();
   private jobs = new Map<string, SubagentJob>();
+  private readonly backends: Record<SubagentBackendKind, ChildAgentBackend>;
+  private backendOverride?: SubagentBackendKind;
   /**
    * Serializes drain() so two concurrent dispatch() calls cannot both
    * observe `running.size < maxConcurrent` and start jobs in parallel,
@@ -95,7 +127,12 @@ export class SubagentManager {
     private readonly state: StateStore,
     private readonly logger: Logger,
     private readonly callbacks: SubagentCallbacks
-  ) {}
+  ) {
+    this.backends = {
+      codex_exec: new CodexExecChildAgentBackend(config, logger),
+      codex_app_server: new CodexAppServerChildAgentBackend(config, logger)
+    };
+  }
 
   async dispatchFromDirective(action: Extract<DirectiveAction, { type: "dispatch_subagent" }>, origin?: { chatId?: number; messageId?: number }): Promise<string> {
     return this.dispatch({
@@ -139,6 +176,7 @@ export class SubagentManager {
       artifactDir,
       model,
       effort,
+      backend: this.effectiveBackend(),
       summary: input.summary,
       enqueuedAt: nowIso(),
       originChatId: input.originChatId,
@@ -182,6 +220,40 @@ export class SubagentManager {
     }
     this.logger.info({ component: "subagents", event: "load_jobs", loaded: persisted.length, abandoned }, "loaded persisted subagent jobs");
     return { loaded: persisted.length, abandoned };
+  }
+
+  async loadRuntimeBackendOverride(): Promise<SubagentBackendStatus> {
+    const getter = (this.state as StateStore & { getSubagentBackendOverride?: () => Promise<SubagentBackendKind | undefined> }).getSubagentBackendOverride;
+    this.backendOverride = getter ? await getter.call(this.state) : undefined;
+    return this.backendStatus();
+  }
+
+  backendStatus(): SubagentBackendStatus {
+    const configured = this.configuredBackend();
+    return {
+      configured,
+      override: this.backendOverride,
+      effective: this.backendOverride ?? configured
+    };
+  }
+
+  async setBackendOverride(backend: SubagentBackendKind | undefined, updatedBy?: string): Promise<SubagentBackendStatus> {
+    this.backendOverride = backend;
+    const setter = (this.state as StateStore & { setSubagentBackendOverride?: (value: SubagentBackendKind | undefined, updatedBy?: string) => Promise<void> }).setSubagentBackendOverride;
+    if (setter) await setter.call(this.state, backend, updatedBy);
+    const queuedBackend = this.effectiveBackend();
+    for (const input of this.queue) {
+      if (!input.id) continue;
+      const job = this.jobs.get(input.id);
+      if (!job || job.status !== "queued") continue;
+      job.backend = queuedBackend;
+      await this.state.saveJob(job);
+    }
+    this.logger.warn(
+      { component: "subagents", event: "backend_override_set", configured: this.configuredBackend(), override: backend, effective: this.effectiveBackend(), updatedBy },
+      "subagent backend override updated"
+    );
+    return this.backendStatus();
   }
 
   resolveJobRef(ref: string): JobRefResolution {
@@ -277,19 +349,21 @@ export class SubagentManager {
     job.status = "cancelling";
     job.cancelRequestedAt = nowIso();
     job.cancelReason = reason;
+    job.interruptRequestedAt = job.cancelRequestedAt;
     job.termSentAt = nowIso();
     await this.state.saveJob(job);
-    killProcessTree(running.child, "SIGTERM");
+    await running.backend.interrupt(job.id, reason).catch((error) => {
+      this.logger.warn({ component: "subagents", event: "interrupt_failed", jobId: job.id, backend: running.backend.kind, error }, "subagent interrupt failed; falling back to terminate");
+      return running.backend.kill(job.id, "SIGTERM");
+    });
     if (running.killTimer) clearTimeout(running.killTimer);
     running.killTimer = setTimeout(() => {
       if (!this.running.has(job.id)) return;
-      const signalCode = (running.child as ChildProcess & { signalCode?: NodeJS.Signals | null }).signalCode;
-      if (running.child.exitCode !== null || signalCode !== null && signalCode !== undefined) return;
       job.killSentAt = nowIso();
       void this.state.saveJob(job);
-      this.logger.warn({ component: "subagents", event: "sigkill_after_grace", jobId: job.id, pid: running.child.pid }, "subagent ignored SIGTERM; sending SIGKILL");
-      killProcessTree(running.child, "SIGKILL");
-    }, SIGKILL_GRACE_MS);
+      this.logger.warn({ component: "subagents", event: "sigkill_after_grace", jobId: job.id, pid: job.pid, backend: running.backend.kind }, "subagent ignored graceful cancellation; sending SIGKILL");
+      void running.backend.kill(job.id, "SIGKILL");
+    }, this.cancelGraceMs(running.backend.kind));
     running.killTimer.unref?.();
 
     return {
@@ -306,8 +380,47 @@ export class SubagentManager {
     return result.status === "success";
   }
 
+  async steerJob(ref: string, text: string): Promise<SteerJobResult> {
+    const steeringText = text.trim();
+    const resolution = this.resolveJobRef(ref);
+    if (resolution.status === "not_found") {
+      return { status: "not_found", ref, message: `No subagent job matched "${ref}".` };
+    }
+    if (resolution.status === "ambiguous") {
+      return {
+        status: "ambiguous",
+        ref,
+        candidates: resolution.candidates,
+        message: `Ambiguous subagent job ref "${ref}" matches ${resolution.candidates.length} jobs.`
+      };
+    }
+    const job = resolution.job;
+    if (!steeringText) {
+      return { status: "failed", ref, job, message: "Steering text cannot be empty." };
+    }
+    if (job.status !== "running") {
+      return { status: "not_running", ref, job, message: `Subagent job ${job.id} is ${job.status}, not running.` };
+    }
+    const backendKind = job.backend ?? this.effectiveBackend();
+    const backend = this.backends[backendKind];
+    try {
+      await backend.steer(job.id, steeringText);
+      job.lastSteeredAt = nowIso();
+      job.steerCount = (job.steerCount ?? 0) + 1;
+      await this.state.saveJob(job);
+      return { status: "success", ref, job, message: `Steered subagent ${job.id} (${job.profile}).` };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const status: SteerJobResultStatus = backendKind === "codex_exec"
+        ? "unsupported_backend"
+        : /not currently steerable|no active/i.test(message) ? "not_steerable" : "failed";
+      return { status, ref, job, message };
+    }
+  }
+
   async shutdown(): Promise<void> {
     await Promise.all([...this.running.keys()].map((id) => this.requestCancel(id, { reason: "shutdown" })));
+    await Promise.all(Object.values(this.backends).map((backend) => backend.shutdown().catch(() => undefined)));
   }
 
   private async drain(): Promise<void> {
@@ -361,9 +474,11 @@ export class SubagentManager {
     const lastMessagePath = join(artifactDir, "last-message.md");
     const stdoutPath = join(artifactDir, "events.jsonl");
     const stderrPath = join(artifactDir, "stderr.log");
+    const appServerLogPath = join(artifactDir, "app-server.log");
     const timeoutSec = Math.min(input.timeoutSec ?? this.config.subagents.defaultTimeoutSec, this.config.subagents.maxTimeoutSec);
     const model = this.resolveModel(input.model);
     const effort = this.resolveEffort(input.effort);
+    const backendKind = this.backendForJob(id);
     const job: SubagentJob = this.jobs.get(id) ?? {
       id,
       profile: input.profile,
@@ -373,6 +488,7 @@ export class SubagentManager {
       artifactDir,
       model,
       effort,
+      backend: backendKind,
       summary: input.summary,
       enqueuedAt: nowIso(),
       originChatId: input.originChatId,
@@ -388,45 +504,36 @@ export class SubagentManager {
       lastMessagePath,
       model,
       effort,
+      backend: backendKind,
       summary: input.summary,
       originChatId: input.originChatId,
       originMessageId: input.originMessageId
     });
     this.jobs.set(id, job);
     await this.state.saveJob(job);
-
-    const args = this.buildArgs(lastMessagePath, model, effort, input.images ?? []);
-    this.logger.info({ component: "subagents", event: "start", jobId: id, profile: input.profile, args }, "starting subagent");
-    const { OPENAI_API_KEY: _omit, ...safeEnv } = process.env;
-    const child = spawn(this.config.codex.binary, args, {
-      cwd: this.config.service.workspace,
-      env: safeEnv,
-      stdio: ["pipe", "pipe", "pipe"],
-      detached: true
+    const backend = this.backends[backendKind];
+    const child = await backend.start({
+      job,
+      assembledPrompt,
+      lastMessagePath,
+      stdoutPath,
+      stderrPath,
+      appServerLogPath,
+      model,
+      effort,
+      images: input.images ?? [],
+      onJobUpdated: (updatedJob) => this.state.saveJob(updatedJob)
     });
-    if (child.pid) {
-      job.pid = child.pid;
-      job.pgid = child.pid;
-    }
-    child.stdin?.end(assembledPrompt);
-    child.stdout?.on("data", (chunk) => appendFile(stdoutPath, chunk).catch((error) => this.logger.error({ component: "subagents", jobId: id, error })));
-    child.stderr?.on("data", (chunk) => appendFile(stderrPath, chunk).catch((error) => this.logger.error({ component: "subagents", jobId: id, error })));
     const timeout = setTimeout(() => {
       this.logger.warn({ component: "subagents", event: "timeout", jobId: id }, "subagent timed out");
       void this.requestCancel(id, { reason: "timeout" });
     }, timeoutSec * 1000);
-    this.running.set(id, { job, child, timeout });
-    child.on("error", (error) => {
-      job.error = error instanceof Error ? error.message : String(error);
-      void this.finishJob(id, null, null);
-    });
-    child.on("exit", (code, signal) => {
-      void this.finishJob(id, code, signal);
-    });
-    if (child.pid) void this.state.saveJob(job);
+    this.running.set(id, { job, child, backend, timeout });
+    void child.finished.then((finish) => this.finishJob(id, finish));
+    if (job.pid || job.activeTurnId || job.backendThreadId) void this.state.saveJob(job);
   }
 
-  private async finishJob(jobId: string, code: number | null, signal: NodeJS.Signals | null): Promise<void> {
+  private async finishJob(jobId: string, finish: ChildAgentFinish): Promise<void> {
     const running = this.running.get(jobId);
     if (!running) return;
     this.running.delete(jobId);
@@ -434,13 +541,15 @@ export class SubagentManager {
     if (running.killTimer) clearTimeout(running.killTimer);
     const job = running.job;
     if (job.status === "cancelling") job.status = job.cancelReason === "timeout" ? "timed_out" : "cancelled";
-    else job.status = code === 0 ? "completed" : "failed";
+    else job.status = finish.code === 0 && !finish.error ? "completed" : "failed";
     job.completedAt = nowIso();
-    job.exitCode = code;
-    job.signal = signal;
+    job.exitCode = finish.code;
+    job.signal = finish.signal;
+    job.activeTurnId = undefined;
+    if (finish.error) job.error = finish.error;
     let result = "";
     if (job.lastMessagePath && await pathExists(job.lastMessagePath)) result = await readFile(job.lastMessagePath, "utf8");
-    result = this.formatTerminalResult(job, result, code, signal);
+    result = this.formatTerminalResult(job, result, finish.code, finish.signal);
     await this.state.saveJob(job);
     await this.deliverTerminalResult(job, result);
     // Clean up artifact directory for completed/cancelled/timed_out jobs that
@@ -524,29 +633,24 @@ export class SubagentManager {
     return effort || this.config.subagents.defaultEffort;
   }
 
-  private buildArgs(lastMessagePath: string, model?: string, effort?: string, images: string[] = []): string[] {
-    const args = [
-      "exec",
-      "--json",
-      "--output-last-message",
-      lastMessagePath,
-      "--cd",
-      this.config.service.workspace,
-      "--sandbox",
-      this.config.codex.sandbox,
-      "-c",
-      `ask_for_approval="${this.config.codex.approvalPolicy}"`
-    ];
-    for (const item of this.config.codex.extraConfig) {
-      if (/^\s*model_reasoning_effort\s*=/.test(item)) continue;
-      args.push("-c", item);
-    }
-    args.push("-c", `model_reasoning_effort="${this.resolveEffort(effort)}"`);
-    const selectedModel = this.resolveModel(model);
-    if (selectedModel) args.push("--model", selectedModel);
-    if (this.config.codex.profile) args.push("--profile", this.config.codex.profile);
-    for (const image of images) args.push("--image", image);
-    args.push("-");
-    return args;
+  private configuredBackend(): SubagentBackendKind {
+    return this.normalizeBackend(this.config.subagents.backend);
+  }
+
+  private effectiveBackend(): SubagentBackendKind {
+    return this.backendOverride ?? this.configuredBackend();
+  }
+
+  private backendForJob(id: string): SubagentBackendKind {
+    const existing = this.jobs.get(id)?.backend;
+    return this.normalizeBackend(existing ?? this.effectiveBackend());
+  }
+
+  private normalizeBackend(value: unknown): SubagentBackendKind {
+    return value === "codex_app_server" ? "codex_app_server" : "codex_exec";
+  }
+
+  private cancelGraceMs(kind: SubagentBackendKind): number {
+    return kind === "codex_app_server" ? this.config.subagents.childInterruptGraceMs ?? SIGKILL_GRACE_MS : SIGKILL_GRACE_MS;
   }
 }

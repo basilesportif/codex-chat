@@ -1,10 +1,17 @@
 import { appendFile, mkdir, readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { AppConfig, resolveConfigPath } from "./config.js";
-import { LoopRun, MonitorEvent, StoredAction, SubagentJob } from "./types.js";
+import { LoopRun, MonitorEvent, StoredAction, SubagentBackendKind, SubagentJob } from "./types.js";
 import { atomicWriteJson, atomicWriteText, ensureDir, nowIso, pathExists, removeIfExists } from "./util.js";
 
 const pairingCodePath = "data/pairing_code.txt";
+const subagentRuntimePath = "subagent_runtime.json";
+
+interface SubagentRuntimeState {
+  backendOverride?: SubagentBackendKind;
+  updatedAt?: string;
+  updatedBy?: string;
+}
 
 export class StateStore {
   readonly root: string;
@@ -113,6 +120,19 @@ export class StateStore {
     const sessions = await this.readJson<Record<string, Record<string, unknown>>>("codex_sessions.json", {});
     delete sessions[name];
     await this.writeJson("codex_sessions.json", sessions);
+  }
+
+  async getSubagentBackendOverride(): Promise<SubagentBackendKind | undefined> {
+    const state = await this.readJson<SubagentRuntimeState>(subagentRuntimePath, {});
+    return state.backendOverride;
+  }
+
+  async setSubagentBackendOverride(backend: SubagentBackendKind | undefined, updatedBy?: string): Promise<void> {
+    await this.writeJson(subagentRuntimePath, {
+      backendOverride: backend,
+      updatedAt: nowIso(),
+      updatedBy
+    } satisfies SubagentRuntimeState);
   }
 
   async listTelegramUsers(): Promise<Array<{ userId: number; isAdmin?: boolean; pairedAt?: string }>> {

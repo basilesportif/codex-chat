@@ -51,6 +51,12 @@ const cancelJobAction = baseAction.extend({
   jobId: z.string().min(1)
 });
 
+const steerSubagentAction = baseAction.extend({
+  type: z.literal("steer_subagent"),
+  jobId: z.string().min(1),
+  text: z.string().min(1)
+});
+
 const notifyOwnerAction = baseAction.extend({
   type: z.literal("notify_owner"),
   text: z.string().min(1)
@@ -76,6 +82,7 @@ export const directiveActionSchema = z.discriminatedUnion("type", [
   sendDocumentAction,
   dispatchSubagentAction,
   cancelJobAction,
+  steerSubagentAction,
   notifyOwnerAction,
   enqueueMainAction,
   reactAction

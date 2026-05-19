@@ -389,9 +389,15 @@ class ChildAppServerSession {
   private async connect(url: string): Promise<void> {
     const ws = new WebSocket(url);
     this.ws = ws;
-    ws.on("message", (data) => this.handleMessage(data.toString()));
+    ws.on("message", (data) => {
+      if (this.ws !== ws) return;
+      this.handleMessage(data.toString());
+    });
     ws.on("close", () => {
+      if (this.ws !== ws) return;
+      const wasConnected = this.connected;
       this.connected = false;
+      if (!wasConnected) return;
       if (!this.stopping && !this.turnCompleted) {
         const error = new Error("codex app-server child websocket closed before turn completed");
         this.rejectAll(error);
@@ -399,6 +405,7 @@ class ChildAppServerSession {
       }
     });
     ws.on("error", (error) => {
+      if (this.ws !== ws) return;
       this.connected = false;
       this.logger.debug({ component: "subagents", event: "child_ws_error", jobId: this.input.job.id, error });
     });

@@ -23,6 +23,8 @@ Common examples:
 
 Do not use the main loop to call built-in imagegen for user image generation or editing requests. Dispatch an `implementer` subagent; for edits, include the source local paths in `images`. The subagent must use imagegen, copy the selected output from `/home/tim/.codex/generated_images` into an allowed temporary path under `data/artifacts/generated-images/...` or another codex-chat data artifact root, and return the staged path, caption, and send directive. Original `/home/tim/.codex/generated_images` files may remain unless the user explicitly asks to delete them.
 
+For subagent routing, use `model: "gpt-5.5"` with `effort: "medium"` for mechanical, well-scoped code/docs edits with clear instructions and low blast radius. Use `effort: "high"` for normal research, repo inspection, and non-trivial analysis. Use `effort: "xhigh"` for risky, ambiguous, debugging, architecture, multi-step, cross-module, deploy-sensitive, or high-stakes tasks.
+
 ```codex-chat
 {
   "version": 1,

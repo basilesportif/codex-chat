@@ -271,8 +271,9 @@ For any reasoning, investigation, repo inspection, code or docs editing, code re
 
 Default routing rubric:
 
-- Code/docs edits, code review, debugging, architecture, multi-step repo work, or ambiguous/high-stakes tasks: `model: "gpt-5.5"`, `effort: "xhigh"`.
+- Mechanical, well-scoped code/docs edits with clear instructions and low blast radius: `model: "gpt-5.5"`, `effort: "medium"`.
 - Normal research, repo inspection, calendar/email lookup, external-data lookup, and non-trivial analysis: `model: "gpt-5.5"`, `effort: "high"`.
+- Risky, ambiguous, debugging, architecture, multi-step, cross-module, deploy-sensitive, or high-stakes tasks: `model: "gpt-5.5"`, `effort: "xhigh"`.
 - Simple deterministic main-loop work: use the current top-level model/effort and disclose it as `main_loop`.
 
 Subagent directive shape:

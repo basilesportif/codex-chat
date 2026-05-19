@@ -138,5 +138,5 @@ These Telegram commands are handled before Codex sees the message:
 | `subagent steer <id> <text>` | Alias for `agent steer`. |
 | `agent backend` | Show configured, runtime override, and effective subagent backend. |
 | `agent backend exec` | Recovery command: force new and queued subagents back to the safe `codex_exec` backend. |
-| `agent backend app-server` | Switch new and queued subagents to the app-server child backend. |
+| `agent backend app-server` | Opt in new and queued subagents to the app-server child backend. |
 | `agent backend config` | Clear the runtime override and use the configured backend. |

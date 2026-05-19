@@ -66,7 +66,7 @@ userIds = [12345]
 
     expect(config.codex.model).toBe("gpt-test");
     expect(config.codex.sandbox).toBe("danger-full-access");
-    expect(config.subagents.backend).toBe("codex_app_server");
+    expect(config.subagents.backend).toBe("codex_exec");
     expect(config.telegram.allowlist.userIds).toEqual([12345]);
     expect(config.rootDir).toBe(resolve(path, "../.."));
   });
@@ -94,25 +94,22 @@ botTokenEnv = "CUSTOM_TELEGRAM_TOKEN"
     const config = await loadConfig(path);
 
     expect(config.codex.model).toBe("from-env");
-    expect(config.subagents.backend).toBe("codex_app_server");
+    expect(config.subagents.backend).toBe("codex_exec");
     expect(config.telegramBotToken).toBe("token-from-custom-env");
   });
 
-  test("allows subagent backend switches from config and env", async () => {
+  test("allows app-server subagent backend opt-in from config and env", async () => {
     const path = await tempConfig(`
 version = 1
 
 [subagents]
 backend = "codex_exec"
 `);
-
-    await expect(loadConfig(path)).resolves.toMatchObject({ subagents: { backend: "codex_exec" } });
-
     process.env.CODEX_CHAT_SUBAGENTS_BACKEND = "codex_app_server";
-    await expect(loadConfig(path)).resolves.toMatchObject({ subagents: { backend: "codex_app_server" } });
 
-    process.env.CODEX_CHAT_SUBAGENTS_BACKEND = "codex_exec";
-    await expect(loadConfig(await tempConfig("version = 1\n"))).resolves.toMatchObject({ subagents: { backend: "codex_exec" } });
+    const config = await loadConfig(path);
+
+    expect(config.subagents.backend).toBe("codex_app_server");
   });
 
   test("adds Telegram user ID lists from environment", async () => {

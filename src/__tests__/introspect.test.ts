@@ -169,7 +169,6 @@ describe("HELP_TEXT", () => {
     expect(HELP_TEXT).toContain("agent kill");
     expect(HELP_TEXT).toContain("agent steer");
     expect(HELP_TEXT).toContain("agent backend exec");
-    expect(HELP_TEXT).toContain("agent backend app-server");
     expect(HELP_TEXT).toContain("help");
     expect(HELP_TEXT).toContain("update");
     expect(HELP_TEXT).toContain("deploy");

@@ -49,17 +49,16 @@ codex-chat jobs list
 
 `subagents.backend` controls new subagent jobs:
 
-- `codex_app_server` is the default steerable app-server child backend for new
-  jobs.
-- `codex_exec` preserves the historical `codex exec` child behavior and remains
-  available as a manual rollback/switch option.
+- `codex_exec` is the production-safe default and preserves the historical
+  `codex exec` child behavior.
+- `codex_app_server` enables the experimental steerable app-server child
+  backend for new jobs.
 
 Telegram recovery path: send `agent backend exec` from an admin account. That
 sets a persisted runtime override in `data/state/subagent_runtime.json` so new
-and queued subagents use `codex_exec` even if config says `codex_app_server`.
-Switch back with `agent backend app-server`, or clear the override with
-`agent backend config` to use the configured default. `agent backend` shows
-configured, override, and effective backend.
+and queued subagents use `codex_exec` even if config still says
+`codex_app_server`. `agent backend` shows configured, override, and effective
+backend. `agent backend config` clears the runtime override.
 
 Running jobs are not changed by the backend command. Use `agent kill <ref>` for
 any already-running bad child job, then dispatch again after rollback.

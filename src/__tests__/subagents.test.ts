@@ -249,7 +249,7 @@ describe("subagents", () => {
     expect(args.filter((arg) => arg.includes("model_reasoning_effort"))).toEqual(['model_reasoning_effort="xhigh"']);
   });
 
-  test("uses configured codex_exec backend and records it on jobs", async () => {
+  test("uses codex_exec backend by default and records it on jobs", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
     tempDirs.push(root);
     const spawn = vi.fn(() => fakeChild());

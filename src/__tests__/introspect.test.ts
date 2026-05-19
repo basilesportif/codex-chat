@@ -36,6 +36,11 @@ describe("parseAgentsCommand", () => {
     expect(parseAgentsCommand("subagents")).toEqual({ isAgents: true, lastN: 0 });
   });
 
+  test("matches detail variant", () => {
+    expect(parseAgentsCommand("agents detail")).toEqual({ isAgents: true, lastN: 10 });
+    expect(parseAgentsCommand("subagents detail")).toEqual({ isAgents: true, lastN: 10 });
+  });
+
   test("matches 'sub'", () => {
     expect(parseAgentsCommand("sub")).toEqual({ isAgents: true, lastN: 0 });
   });
@@ -296,7 +301,8 @@ describe("formatJobsDetailed", () => {
     const result = (service as unknown as { formatJobsDetailed(n: number): string }).formatJobsDetailed(0);
     expect(result).toContain("0 running");
     expect(result).toContain("0 queued");
-    expect(result).toContain("0 completed");
+    expect(result).not.toContain("completed");
+    expect(result).toContain("No active subagent jobs");
   });
 
   test("shows running and completed sections when jobs exist", async () => {
@@ -312,17 +318,18 @@ describe("formatJobsDetailed", () => {
     (service as unknown as { subagents: { listJobs(): SubagentJob[] } }).subagents.listJobs = () => jobs;
     const result = (service as unknown as { formatJobsDetailed(n: number): string }).formatJobsDetailed(0);
     expect(result).toContain("1 running");
-    expect(result).toContain("1 terminal");
-    expect(result).toContain("1 completed");
-    expect(result).toContain("[job_abc123de]");
+    expect(result).not.toContain("terminal");
+    expect(result).not.toContain("completed debugger");
+    expect(result).not.toContain("[job_abc123de]");
     expect(result).toContain("researcher");
     expect(result).toContain("cancel: agent kill abc123de");
-    expect(result).toContain("[job_ghi789jk]");
-    expect(result).toContain("debugger");
     expect(result).toContain("model=gpt-5.5");
-    expect(result).toContain("effort=xhigh");
     expect(result).toContain("research task");
-    expect(result).toContain("completed debugger");
+    const detail = (service as unknown as { formatJobsDetailed(n: number): string }).formatJobsDetailed(10);
+    expect(detail).toContain("1 terminal");
+    expect(detail).toContain("1 completed");
+    expect(detail).toContain("job_ghi789jk completed debugger");
+    expect(detail).toContain("effort=xhigh");
   });
 
   test("formats running and finished durations as minutes and seconds", async () => {
@@ -341,10 +348,12 @@ describe("formatJobsDetailed", () => {
     ];
     (service as unknown as { subagents: { listJobs(): SubagentJob[] } }).subagents.listJobs = () => jobs;
     const result = (service as unknown as { formatJobsDetailed(n: number): string }).formatJobsDetailed(0);
-    expect(result).toContain("[job_run007xx] running runner - 0:07");
-    expect(result).toContain("[job_done065x] completed finisher - done in 1:05");
-    expect(result).toContain("[job_fail3725] failed debugger - done in 62:05");
-    expect(result).toContain("[job_stop007x] cancelled reviewer - done in 0:07");
+    expect(result).toContain("`running runner - 0:07");
+    expect(result).not.toContain("completed finisher");
+    const detail = (service as unknown as { formatJobsDetailed(n: number): string }).formatJobsDetailed(10);
+    expect(detail).toContain("`job_done065x completed finisher - done in 1:05");
+    expect(detail).toContain("`job_fail3725 failed debugger - done in 62:05");
+    expect(detail).toContain("`job_stop007x cancelled reviewer - done in 0:07");
   });
 
   test("respects lastN parameter for completed jobs", async () => {
@@ -384,7 +393,8 @@ describe("formatJobsDetailed", () => {
     const detailed = (service as unknown as { formatJobsDetailed(n: number): string }).formatJobsDetailed(0);
     const compact = service.formatJobs();
 
-    expect(detailed).toContain("[job_e98ad78a]");
+    expect(detailed).not.toContain("[job_e98ad78a]");
+    expect(detailed).toContain("`running implementer");
     expect(detailed).toContain("cancel: agent kill e98ad78a");
     expect(compact).toContain("ref=e98ad78a");
     expect(compact).toContain('cancel="agent kill e98ad78a"');

@@ -67,7 +67,7 @@ any already-running bad child job, then dispatch again after rollback.
 
 Every Codex turn includes a compact `Active subagent jobs` snapshot when there
 are queued, running, or cancelling subagent jobs. The snapshot is intentionally
-short and omits terminal history; use `agents` for the full operator view.
+short and omits terminal history; use `agents detail` for active jobs plus the last 10 terminal jobs.
 
 Each active line includes the short ref, full `job_...` id, status, profile,
 backend, `steerable` boolean, elapsed and created times, summary, model/effort,

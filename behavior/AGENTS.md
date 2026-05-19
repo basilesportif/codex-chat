@@ -390,9 +390,10 @@ The following commands are intercepted by the service **before** they reach Code
 | `log [N]` | Same as `logs`. |
 | `introspect [N]` | Same as `logs`. |
 | `logs raw [N]` | Same as `logs` but includes raw/verbose events. |
-| `agents` | Subagent status — running, queued, recently completed with elapsed times. |
+| `agents` | Active subagent status — running, cancelling, and queued jobs with cancel/steer refs. |
 | `subagents (sub)` | Alias for `agents`. |
-| `agents <N>` | Show last N completed jobs. |
+| `agents detail` | Active jobs plus the last 10 terminal jobs. |
+| `agents <N>` | Active jobs plus last N terminal jobs. |
 | `agent kill <id>` | Cancel a running subagent by its short ID prefix (first 6 chars). |
 | `subagent kill <id>` | Alias for `agent kill`. |
 | `agent steer <id> <text>` | Steer a running app-server-backed subagent. |

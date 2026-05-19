@@ -106,13 +106,15 @@ function parseLogCommand(text: string): { isLog: boolean; lines: number; include
 }
 
 /**
- * Parses "agents [N]" / "subagents [N]" / "sub [N]" commands.
- * Returns isAgents=true, and optionally the last-N count (0 = default).
+ * Parses "agents" / "subagents" / "sub" commands.
+ * Defaults to active jobs only; "detail" includes recent terminal jobs.
+ * Numeric counts are retained as a legacy detail shortcut.
  */
 export function parseAgentsCommand(text: string): { isAgents: boolean; lastN: number } {
-  const match = text.trim().match(/^(?:agents?|subagents?|sub)(?:\s+(\d+))?$/i);
+  const match = text.trim().match(/^(?:agents?|subagents?|sub)(?:\s+(detail|\d+))?$/i);
   if (!match) return { isAgents: false, lastN: 0 };
-  const lastN = match[1] ? Math.min(parseInt(match[1], 10), 200) : 0;
+  const arg = match[1]?.toLowerCase();
+  const lastN = arg === "detail" ? 10 : arg ? Math.min(parseInt(arg, 10), 200) : 0;
   return { isAgents: true, lastN };
 }
 
@@ -167,9 +169,10 @@ export const HELP_TEXT = `Service commands (handled instantly, bypass Codex):
   logs [N]          — last N app-server log lines (default 50)
   logs raw [N]      — include raw/verbose events
   introspect [N]    — same as logs
-  agents            — subagent status and cancel refs
+  agents            — active subagent status and cancel refs
   subagents (sub)   — alias for agents
-  agents <N>        — last N terminal jobs
+  agents detail     — active jobs plus last 10 terminal jobs
+  agents <N>        — active jobs plus last N terminal jobs
   agent kill <ref>  — cancel a subagent by full ID, displayed ref, or hex prefix
   agent steer <ref> <text> — steer a running app-server subagent
   agent backend     — show effective subagent backend
@@ -447,6 +450,7 @@ export class ServiceSupervisor {
     const cancelled = terminal.filter((j) => j.status === "cancelled");
     const timedOut = terminal.filter((j) => j.status === "timed_out");
     const abandoned = terminal.filter((j) => j.status === "abandoned");
+    const includeTerminal = lastN > 0;
     const now = Date.now();
 
     function elapsedSec(iso?: string): number {
@@ -460,7 +464,14 @@ export class ServiceSupervisor {
     }
 
     const lines: string[] = [];
-    lines.push(`Subagents: ${running.length} running, ${cancelling.length} cancelling, ${queued.length} queued, ${terminal.length} terminal (${completed.length} completed, ${failed.length} failed, ${cancelled.length} cancelled, ${timedOut.length} timed_out, ${abandoned.length} abandoned)`);
+    if (includeTerminal) {
+      lines.push(`Subagents: ${running.length} running, ${cancelling.length} cancelling, ${queued.length} queued, ${terminal.length} terminal (${completed.length} completed, ${failed.length} failed, ${cancelled.length} cancelled, ${timedOut.length} timed_out, ${abandoned.length} abandoned)`);
+    } else {
+      lines.push(`Subagents: ${running.length} running, ${cancelling.length} cancelling, ${queued.length} queued`);
+      if (running.length + cancelling.length + queued.length === 0) {
+        lines.push("No active subagent jobs. Use `agents detail` for recent terminal jobs.");
+      }
+    }
 
     if (running.length > 0) {
       lines.push("\nRunning:");
@@ -468,14 +479,14 @@ export class ServiceSupervisor {
         const ref = this.formatJobCancelRef(j);
         const steer = j.backend === "codex_app_server" ? ` - steer: agent steer ${ref} <text>` : "";
         const backend = j.backend ? ` backend=${j.backend}` : "";
-        lines.push(`  [${this.formatJobDisplayId(j)}] running ${j.profile}${this.formatJobModelEffort(j)}${backend} - ${formatDurationSeconds(elapsedSec(j.startedAt))} - cancel: agent kill ${ref}${steer}${j.pid ? ` - pid=${j.pid}` : ""}${j.summary ? ` - ${j.summary}` : ""}`);
+        lines.push(this.formatJobCodeLine(`running ${j.profile}${this.formatJobModelEffort(j)}${backend} - ${formatDurationSeconds(elapsedSec(j.startedAt))} - cancel: agent kill ${ref}${steer}${j.pid ? ` - pid=${j.pid}` : ""}${j.summary ? ` - ${j.summary}` : ""}`));
       }
     }
 
     if (cancelling.length > 0) {
       lines.push("\nCancelling:");
       for (const j of cancelling) {
-        lines.push(`  [${this.formatJobDisplayId(j)}] cancelling ${j.profile}${this.formatJobModelEffort(j)} - requested=${j.cancelRequestedAt ?? "unknown"} reason=${j.cancelReason ?? "user"}${j.termSentAt ? ` termSent=${j.termSentAt}` : ""}${j.killSentAt ? ` killSent=${j.killSentAt}` : ""}${j.summary ? ` - ${j.summary}` : ""}`);
+        lines.push(this.formatJobCodeLine(`cancelling ${j.profile}${this.formatJobModelEffort(j)} - requested=${j.cancelRequestedAt ?? "unknown"} reason=${j.cancelReason ?? "user"}${j.termSentAt ? ` termSent=${j.termSentAt}` : ""}${j.killSentAt ? ` killSent=${j.killSentAt}` : ""}${j.summary ? ` - ${j.summary}` : ""}`));
       }
     }
 
@@ -484,22 +495,27 @@ export class ServiceSupervisor {
       for (const j of queued) {
         const ref = this.formatJobCancelRef(j);
         const backend = j.backend ? ` backend=${j.backend}` : "";
-        lines.push(`  [${this.formatJobDisplayId(j)}] queued ${j.profile}${this.formatJobModelEffort(j)}${backend}${j.enqueuedAt ? ` - queued ${formatDurationSeconds(elapsedSec(j.enqueuedAt))} ago` : ""} - cancel: agent kill ${ref}${j.summary ? ` - ${j.summary}` : ""}`);
+        lines.push(this.formatJobCodeLine(`queued ${j.profile}${this.formatJobModelEffort(j)}${backend}${j.enqueuedAt ? ` - queued ${formatDurationSeconds(elapsedSec(j.enqueuedAt))} ago` : ""} - cancel: agent kill ${ref}${j.summary ? ` - ${j.summary}` : ""}`));
       }
     }
 
-    const recentN = lastN > 0 ? lastN : 5;
-    const recent = terminal.slice(0, recentN);
-    if (recent.length > 0) {
-      lines.push(`\nRecently terminal (last ${recentN}):`);
-      for (const j of recent) {
-        const dur = durationSec(j.startedAt, j.completedAt);
-        const exit = j.exitCode !== undefined || j.signal !== undefined ? ` - exit=${j.exitCode ?? "null"} signal=${j.signal ?? "null"}` : "";
-        lines.push(`  [${this.formatJobDisplayId(j)}] ${j.status} ${j.profile}${this.formatJobModelEffort(j)} - done in ${formatDurationSeconds(dur)}${exit}${j.summary ? ` - ${j.summary}` : ""}`);
+    if (includeTerminal) {
+      const recent = terminal.slice(0, lastN);
+      if (recent.length > 0) {
+        lines.push(`\nRecently terminal (last ${lastN}):`);
+        for (const j of recent) {
+          const dur = durationSec(j.startedAt, j.completedAt);
+          const exit = j.exitCode !== undefined || j.signal !== undefined ? ` - exit=${j.exitCode ?? "null"} signal=${j.signal ?? "null"}` : "";
+          lines.push(this.formatJobCodeLine(`${this.formatJobDisplayId(j)} ${j.status} ${j.profile}${this.formatJobModelEffort(j)} - done in ${formatDurationSeconds(dur)}${exit}${j.summary ? ` - ${j.summary}` : ""}`));
+        }
       }
     }
 
     return lines.join("\n");
+  }
+
+  private formatJobCodeLine(text: string): string {
+    return `\`${text.replace(/[`\r\n]/g, " ")}\``;
   }
 
   private formatJobModelEffort(job: SubagentJob): string {

@@ -134,6 +134,10 @@ These Telegram commands are handled before Codex sees the message:
 
 | Command | What the service does |
 |---|---|
+| `agents` | Active subagent status — running, cancelling, and queued jobs with cancel/steer refs. |
+| `subagents (sub)` | Alias for `agents`. |
+| `agents detail` | Active jobs plus the last 10 terminal jobs. |
+| `agents <N>` | Active jobs plus last N terminal jobs. |
 | `agent steer <id> <text>` | Steer a running app-server-backed subagent. |
 | `subagent steer <id> <text>` | Alias for `agent steer`. |
 | `agent backend` | Show configured, runtime override, and effective subagent backend. |

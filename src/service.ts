@@ -481,10 +481,11 @@ export class ServiceSupervisor {
     }
 
     const lines: string[] = [];
+    const activeSummary = this.formatSubagentActiveSummary(running.length, cancelling.length, queued.length);
     if (includeTerminal) {
-      lines.push(`Subagents: ${running.length} running, ${cancelling.length} cancelling, ${queued.length} queued, ${terminal.length} terminal (${completed.length} completed, ${failed.length} failed, ${cancelled.length} cancelled, ${timedOut.length} timed_out, ${abandoned.length} abandoned)`);
+      lines.push(`${activeSummary}, ${terminal.length} terminal (${completed.length} completed, ${failed.length} failed, ${cancelled.length} cancelled, ${timedOut.length} timed_out, ${abandoned.length} abandoned)`);
     } else {
-      lines.push(`Subagents: ${running.length} running, ${cancelling.length} cancelling, ${queued.length} queued`);
+      lines.push(activeSummary);
       if (running.length + cancelling.length + queued.length === 0) {
         lines.push("No active subagent jobs. Use `agents detail` for recent terminal jobs.");
       }
@@ -492,47 +493,88 @@ export class ServiceSupervisor {
 
     if (running.length > 0) {
       lines.push("\nRunning:");
-      for (const j of running) {
+      running.forEach((j, index) => {
         const ref = this.formatJobCancelRef(j);
-        const steer = j.backend === "codex_app_server" ? ` - steer: agent steer ${ref} <text>` : "";
-        const backend = j.backend ? ` backend=${j.backend}` : "";
-        lines.push(this.formatJobCodeLine(`running ${j.profile}${this.formatJobModelEffort(j)}${backend} - ${formatDurationSeconds(elapsedSec(j.startedAt))} - cancel: agent kill ${ref}${steer}${j.pid ? ` - pid=${j.pid}` : ""}${j.summary ? ` - ${j.summary}` : ""}`));
-      }
+        const details = this.formatJobSummaryDetails(j);
+        details.push(`cancel: ${this.formatJobInlineCode(`agent kill ${ref}`)}`);
+        if (j.backend === "codex_app_server") details.push(`steer: ${this.formatJobInlineCode(`agent steer ${ref} <text>`)}`);
+        this.appendNumberedJobLines(lines, index + 1, ref, this.formatJobHeader(j, formatDurationSeconds(elapsedSec(j.startedAt))), details);
+      });
     }
 
     if (cancelling.length > 0) {
       lines.push("\nCancelling:");
-      for (const j of cancelling) {
-        lines.push(this.formatJobCodeLine(`cancelling ${j.profile}${this.formatJobModelEffort(j)} - requested=${j.cancelRequestedAt ?? "unknown"} reason=${j.cancelReason ?? "user"}${j.termSentAt ? ` termSent=${j.termSentAt}` : ""}${j.killSentAt ? ` killSent=${j.killSentAt}` : ""}${j.summary ? ` - ${j.summary}` : ""}`));
-      }
+      cancelling.forEach((j, index) => {
+        const ref = this.formatJobCancelRef(j);
+        const requested = j.cancelRequestedAt ? `${formatDurationSeconds(elapsedSec(j.cancelRequestedAt))} ago` : "unknown";
+        const details = this.formatJobSummaryDetails(j);
+        details.push(`reason: ${this.compactJobText(j.cancelReason ?? "user")}`);
+        if (j.termSentAt) details.push(`term sent: ${j.termSentAt}`);
+        if (j.killSentAt) details.push(`kill sent: ${j.killSentAt}`);
+        this.appendNumberedJobLines(lines, index + 1, ref, this.formatJobHeader(j, `requested ${requested}`), details);
+      });
     }
 
     if (queued.length > 0) {
       lines.push("\nQueued:");
-      for (const j of queued) {
+      queued.forEach((j, index) => {
         const ref = this.formatJobCancelRef(j);
-        const backend = j.backend ? ` backend=${j.backend}` : "";
-        lines.push(this.formatJobCodeLine(`queued ${j.profile}${this.formatJobModelEffort(j)}${backend}${j.enqueuedAt ? ` - queued ${formatDurationSeconds(elapsedSec(j.enqueuedAt))} ago` : ""} - cancel: agent kill ${ref}${j.summary ? ` - ${j.summary}` : ""}`));
-      }
+        const age = j.enqueuedAt ? formatDurationSeconds(elapsedSec(j.enqueuedAt)) : "unknown";
+        const details = this.formatJobSummaryDetails(j);
+        details.push(`cancel: ${this.formatJobInlineCode(`agent kill ${ref}`)}`);
+        this.appendNumberedJobLines(lines, index + 1, ref, this.formatJobHeader(j, age), details);
+      });
     }
 
     if (includeTerminal) {
       const recent = terminal.slice(0, lastN);
       if (recent.length > 0) {
         lines.push(`\nRecently terminal (last ${lastN}):`);
-        for (const j of recent) {
+        recent.forEach((j, index) => {
           const dur = durationSec(j.startedAt, j.completedAt);
-          const exit = j.exitCode !== undefined || j.signal !== undefined ? ` - exit=${j.exitCode ?? "null"} signal=${j.signal ?? "null"}` : "";
-          lines.push(this.formatJobCodeLine(`${this.formatJobDisplayId(j)} ${j.status} ${j.profile}${this.formatJobModelEffort(j)} - done in ${formatDurationSeconds(dur)}${exit}${j.summary ? ` - ${j.summary}` : ""}`));
-        }
+          const details = this.formatJobSummaryDetails(j);
+          if (j.exitCode !== undefined || j.signal !== undefined) details.push(`exit: ${j.exitCode ?? "null"} signal: ${j.signal ?? "null"}`);
+          this.appendNumberedJobLines(lines, index + 1, this.formatJobDisplayId(j), `${j.status} ${this.formatJobHeader(j, `done in ${formatDurationSeconds(dur)}`)}`, details);
+        });
       }
     }
 
     return lines.join("\n");
   }
 
-  private formatJobCodeLine(text: string): string {
-    return `\`${text.replace(/[`\r\n]/g, " ")}\``;
+  private formatSubagentActiveSummary(running: number, cancelling: number, queued: number): string {
+    if (running + cancelling + queued === 0) return "Subagents: 0 running, 0 cancelling, 0 queued";
+    const parts = [
+      running > 0 ? `${running} running` : "",
+      cancelling > 0 ? `${cancelling} cancelling` : "",
+      queued > 0 ? `${queued} queued` : ""
+    ].filter(Boolean);
+    return `Subagents: ${parts.join(", ")}`;
+  }
+
+  private appendNumberedJobLines(lines: string[], index: number, ref: string, header: string, details: string[]): void {
+    lines.push(`${index}. ${this.formatJobInlineCode(ref)} — ${this.compactJobText(header)}`);
+    for (const detail of details) {
+      const compact = detail.replace(/[\r\n]/g, " ").replace(/\s+/g, " ").trim();
+      if (compact) lines.push(`   ${compact}`);
+    }
+  }
+
+  private formatJobHeader(job: SubagentJob, duration: string): string {
+    return [job.profile, job.effort ?? "default", duration].map((part) => this.compactJobText(part)).filter(Boolean).join(" / ");
+  }
+
+  private formatJobSummaryDetails(job: SubagentJob): string[] {
+    const summary = this.compactJobText(job.summary);
+    return summary ? [summary] : [];
+  }
+
+  private formatJobInlineCode(text: string): string {
+    return `\`${this.compactJobText(text)}\``;
+  }
+
+  private compactJobText(value: unknown): string {
+    return String(value ?? "").replace(/[`\r\n]/g, " ").replace(/\s+/g, " ").trim();
   }
 
   private formatJobModelEffort(job: SubagentJob): string {

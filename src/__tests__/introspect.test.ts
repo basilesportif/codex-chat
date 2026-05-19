@@ -321,15 +321,14 @@ describe("formatJobsDetailed", () => {
     expect(result).not.toContain("terminal");
     expect(result).not.toContain("completed debugger");
     expect(result).not.toContain("[job_abc123de]");
-    expect(result).toContain("researcher");
-    expect(result).toContain("cancel: agent kill abc123de");
-    expect(result).toContain("model=gpt-5.5");
+    expect(result).toContain("1. `abc123de` — researcher / high");
     expect(result).toContain("research task");
+    expect(result).toContain("cancel: `agent kill abc123de`");
     const detail = (service as unknown as { formatJobsDetailed(n: number): string }).formatJobsDetailed(10);
     expect(detail).toContain("1 terminal");
     expect(detail).toContain("1 completed");
-    expect(detail).toContain("job_ghi789jk completed debugger");
-    expect(detail).toContain("effort=xhigh");
+    expect(detail).toContain("1. `job_ghi789jk` — completed debugger / xhigh / done in");
+    expect(detail).toContain("debug task");
   });
 
   test("formats running and finished durations as minutes and seconds", async () => {
@@ -348,12 +347,12 @@ describe("formatJobsDetailed", () => {
     ];
     (service as unknown as { subagents: { listJobs(): SubagentJob[] } }).subagents.listJobs = () => jobs;
     const result = (service as unknown as { formatJobsDetailed(n: number): string }).formatJobsDetailed(0);
-    expect(result).toContain("`running runner - 0:07");
+    expect(result).toContain("1. `run007xx` — runner / default / 0:07");
     expect(result).not.toContain("completed finisher");
     const detail = (service as unknown as { formatJobsDetailed(n: number): string }).formatJobsDetailed(10);
-    expect(detail).toContain("`job_done065x completed finisher - done in 1:05");
-    expect(detail).toContain("`job_fail3725 failed debugger - done in 62:05");
-    expect(detail).toContain("`job_stop007x cancelled reviewer - done in 0:07");
+    expect(detail).toContain("1. `job_done065x` — completed finisher / default / done in 1:05");
+    expect(detail).toContain("2. `job_fail3725` — failed debugger / default / done in 62:05");
+    expect(detail).toContain("3. `job_stop007x` — cancelled reviewer / default / done in 0:07");
   });
 
   test("respects lastN parameter for completed jobs", async () => {
@@ -394,8 +393,10 @@ describe("formatJobsDetailed", () => {
     const compact = service.formatJobs();
 
     expect(detailed).not.toContain("[job_e98ad78a]");
-    expect(detailed).toContain("`running implementer");
-    expect(detailed).toContain("cancel: agent kill e98ad78a");
+    expect(detailed).toContain("1. `e98ad78a` — implementer / default");
+    expect(detailed).toContain("fix cancellation");
+    expect(detailed).toContain("cancel: `agent kill e98ad78a`");
+    expect(detailed).toContain("1. `aaaaaaaa` — reviewer / default");
     expect(compact).toContain("ref=e98ad78a");
     expect(compact).toContain('cancel="agent kill e98ad78a"');
   });
@@ -535,6 +536,9 @@ describe("service command routing", () => {
     await service.state.init();
     const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
     const runTurn = vi.spyOn(service as unknown as { runTurn(e: unknown): void }, "runTurn");
+    (service as unknown as { subagents: { listJobs(): SubagentJob[] } }).subagents.listJobs = () => [
+      { id: "job_feedface000000000000000000000000", profile: "debugger", route: "return_to_main", status: "running", promptPath: "/tmp/p", artifactDir: "/tmp/a", startedAt: new Date().toISOString(), effort: "xhigh", backend: "codex_app_server", summary: "verify service path" }
+    ];
 
     await service.enqueueUserEvent({
       source: "telegram",
@@ -546,7 +550,9 @@ describe("service command routing", () => {
       receivedAt: new Date().toISOString()
     });
 
-    expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("Subagents:"), 2);
+    expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("Subagents: 1 running"), 2);
+    expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("1. `feedface` — debugger / xhigh"), 2);
+    expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("cancel: `agent kill feedface`"), 2);
     expect(runTurn).not.toHaveBeenCalled();
   });
 

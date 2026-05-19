@@ -172,8 +172,9 @@ export const HELP_TEXT = `Service commands (handled instantly, bypass Codex):
   agents <N>        — last N terminal jobs
   agent kill <ref>  — cancel a subagent by full ID, displayed ref, or hex prefix
   agent steer <ref> <text> — steer a running app-server subagent
-  agent backend     — show effective subagent backend
-  agent backend exec — recovery: force new/queued subagents back to safe codex_exec
+  agent backend     — show configured/effective subagent backend
+  agent backend exec — rollback: force new/queued subagents to codex_exec
+  agent backend app-server — switch new/queued subagents to codex_app_server
   help              — this message
   update / deploy   — pull latest and restart service`;
 

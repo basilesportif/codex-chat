@@ -61,7 +61,7 @@ const configSchema = z.object({
   }),
   subagents: z.object({
     enabled: z.boolean().default(true),
-    backend: subagentBackendSchema.default("codex_exec"),
+    backend: subagentBackendSchema.default("codex_app_server"),
     maxConcurrent: z.number().int().positive().default(5),
     defaultModel: z.string().default(""),
     defaultEffort: effortSchema.default("medium"),
@@ -160,7 +160,7 @@ const defaultConfig = configSchema.parse({
   },
   subagents: {
     enabled: true,
-    backend: "codex_exec",
+    backend: "codex_app_server",
     maxConcurrent: 5,
     defaultModel: "",
     defaultEffort: "medium",

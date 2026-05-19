@@ -51,10 +51,11 @@ reloadOnSighup = true
 
 [subagents]
 enabled = true
-# Production-safe default. Use Telegram command `agent backend app-server` or
-# set this to "codex_app_server" only after testing; recover with
-# `agent backend exec`.
-backend = "codex_exec"
+# Default steerable child backend. Recover or temporarily switch new/queued
+# subagents to the historical exec backend with Telegram command
+# `agent backend exec`; switch back with `agent backend app-server` or
+# clear the runtime override with `agent backend config`.
+backend = "codex_app_server"
 maxConcurrent = 5
 defaultModel = ""
 defaultEffort = "medium"

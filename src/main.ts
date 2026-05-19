@@ -5,9 +5,11 @@ import { join } from "node:path";
 import { Command } from "commander";
 import { loadConfig, ensureConfiguredDirectories, writeDefaultConfigFilesIfMissing, resolveConfigPath } from "./config.js";
 import { createLogger } from "./logger.js";
+import { FactorManager } from "./factors.js";
 import { runLoopCli, syncCron, validateLoops } from "./loops.js";
 import { validateMonitors } from "./monitors.js";
 import { injectFilePath, INJECT_TELEGRAM_USER_ID, ServiceSupervisor } from "./service.js";
+import { StateStore } from "./state.js";
 import { installUserService, uninstallUserService } from "./systemd.js";
 import { atomicWriteJson, nowIso, pathExists } from "./util.js";
 
@@ -137,6 +139,47 @@ monitors.command("validate")
     process.stdout.write(`valid monitors: ${parsed.monitors.length}\n`);
   });
 
+const factors = program.command("factors").description("durable Factor scaffold management");
+factors.command("list")
+  .description("list configured Factor scaffolds")
+  .option("--json", "print JSON")
+  .action(async (options: { json?: boolean }) => {
+    const manager = await loadFactorManager();
+    if (options.json) process.stdout.write(`${JSON.stringify(manager.listFactors(), null, 2)}\n`);
+    else process.stdout.write(`${await manager.formatList()}\n`);
+  });
+factors.command("status")
+  .argument("<id>", "factor id or prefix")
+  .description("show a Factor scaffold status")
+  .option("--json", "print JSON state")
+  .action(async (id: string, options: { json?: boolean }) => {
+    const manager = await loadFactorManager();
+    const resolution = manager.resolveFactorRef(id);
+    if (options.json) {
+      if (resolution.status !== "matched") {
+        process.stdout.write(`${JSON.stringify(resolution, null, 2)}\n`);
+        if (resolution.status === "not_found") process.exitCode = 1;
+        return;
+      }
+      const state = await manager.getFactorState(resolution.factor.id);
+      const directory = await manager.validateDirectory(resolution.factor.id);
+      process.stdout.write(`${JSON.stringify({ factor: resolution.factor, state, directory }, null, 2)}\n`);
+      return;
+    }
+    process.stdout.write(`${await manager.formatStatus(id)}\n`);
+  });
+factors.command("propose")
+  .argument("<id>", "factor id or prefix")
+  .argument("<action>", "proposal action: start, stop, steer, warmup, compact")
+  .argument("[text...]", "proposal text for steer")
+  .description("record a proposal only; no Factor runtime/account mutation is executed")
+  .action(async (id: string, action: string, textParts: string[]) => {
+    const manager = await loadFactorManager();
+    const result = await manager.propose(action as "start" | "stop" | "steer" | "warmup" | "compact", id, textParts.join(" "), "cli");
+    process.stdout.write(`${result.message}\n`);
+    if (result.status !== "proposal") process.exitCode = 1;
+  });
+
 const service = program.command("service").description("systemd service management");
 service.command("install")
   .description("install a systemd service")
@@ -202,6 +245,17 @@ function runCapture(command: string, args: string[]): Promise<string> {
     });
     child.on("exit", (code) => code === 0 ? resolve(stdout) : reject(new Error(stderr || stdout || `${command} exited with ${code}`)));
   });
+}
+
+async function loadFactorManager(): Promise<FactorManager> {
+  const config = await loadConfig(program.opts().config);
+  await ensureConfiguredDirectories(config);
+  const state = new StateStore(config);
+  await state.init();
+  const logger = createLogger("silent", config.security.redactSecretsInLogs);
+  const manager = new FactorManager(config, state, logger);
+  await manager.init();
+  return manager;
 }
 
 function runtimeVersion(): string {

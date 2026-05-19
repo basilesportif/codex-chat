@@ -112,6 +112,72 @@ backend = "codex_exec"
     expect(config.subagents.backend).toBe("codex_app_server");
   });
 
+  test("parses dynamic Factor config tables into definitions", async () => {
+    const path = await tempConfig(`
+version = 1
+
+[factors]
+enabled = true
+rootDir = "factor-root"
+socketDir = "factor-sockets"
+defaultModel = "gpt-factor-default"
+defaultEffort = "low"
+maxActive = 1
+
+[factors.email-calendar]
+enabled = true
+name = "Email/calendar"
+directory = "/tmp/email-calendar-factor"
+profile = "email-calendar"
+model = "gpt-factor"
+effort = "high"
+startup = "on_demand"
+warmupPrompt = "Read the briefing."
+warmupFile = "warmup.md"
+persistRawLogs = false
+compactAfterTask = true
+
+[factors.email-calendar.memory]
+enabled = true
+persistRawLogs = false
+notes = "summaries only"
+
+[factors.email-calendar.capabilities]
+allowed = ["draft_replies"]
+denied = ["calendar_mutations"]
+`);
+
+    const config = await loadConfig(path);
+    const factor = config.factors.definitions["email-calendar"];
+
+    expect(config.factors.enabled).toBe(true);
+    expect(config.factors.rootDir).toBe("factor-root");
+    expect(config.factors.maxActive).toBe(1);
+    expect(factor?.enabled).toBe(true);
+    expect(factor?.name).toBe("Email/calendar");
+    expect(factor?.directory).toBe("/tmp/email-calendar-factor");
+    expect(factor?.profile).toBe("email-calendar");
+    expect(factor?.model).toBe("gpt-factor");
+    expect(factor?.effort).toBe("high");
+    expect(factor?.memory.notes).toBe("summaries only");
+    expect(factor?.capabilities.allowed).toEqual(["draft_replies"]);
+    expect(factor?.capabilities.denied).toEqual(["calendar_mutations"]);
+  });
+
+  test("rejects unsafe Factor IDs", async () => {
+    const path = await tempConfig(`
+version = 1
+
+[factors]
+enabled = true
+
+[factors."../outside"]
+enabled = true
+`);
+
+    await expect(loadConfig(path)).rejects.toThrow(/Factor IDs/);
+  });
+
   test("adds Telegram user ID lists from environment", async () => {
     process.env.TELEGRAM_ALLOWED_USER_IDS = " 222, 333 , external-user ";
     process.env.TELEGRAM_ADMIN_USER_IDS = " 444,555 ";

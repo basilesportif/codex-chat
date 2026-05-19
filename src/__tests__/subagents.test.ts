@@ -242,7 +242,7 @@ describe("subagents", () => {
     );
 
     await manager.dispatch({ profile: "x", prompt: "a", route: "return_to_main", effort: "xhigh" });
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await waitFor(() => spawn.mock.calls.length === 1);
 
     const args = spawn.mock.calls[0]?.[1] as string[];
     expect(args).toContain('experimental_feature="on"');

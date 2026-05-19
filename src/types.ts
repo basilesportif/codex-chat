@@ -179,6 +179,35 @@ export interface SubagentJob {
   steerCount?: number;
 }
 
+export type FactorStatus = "disabled" | "idle" | "proposal_pending" | "running" | "stopped" | "error";
+export type FactorProposalAction = "start" | "stop" | "steer" | "warmup" | "compact";
+
+export interface FactorProposal {
+  action: FactorProposalAction;
+  text?: string;
+  proposedAt: string;
+  proposedBy?: string;
+  reason: string;
+}
+
+export interface FactorRuntimeState {
+  id: string;
+  status: FactorStatus;
+  enabled: boolean;
+  directory: string;
+  profile: string;
+  model: string;
+  effort: string;
+  startup: "on_demand" | "always";
+  updatedAt: string;
+  runtimeMode: "scaffold_only" | "app_server";
+  lastProposal?: FactorProposal;
+  lastError?: string;
+  activeTurnId?: string;
+  backendThreadId?: string;
+  pid?: number;
+}
+
 export interface LoopRun {
   id: string;
   loopId: string;

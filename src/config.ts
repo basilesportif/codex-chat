@@ -9,6 +9,58 @@ const sandboxSchema = z.enum(["read-only", "workspace-write", "danger-full-acces
 const approvalSchema = z.enum(["untrusted", "on-failure", "on-request", "never"]);
 const telegramUserIdSchema = z.union([z.number().int(), z.string().min(1)]);
 const subagentBackendSchema = z.enum(["codex_exec", "codex_app_server"]);
+const factorStartupSchema = z.enum(["on_demand", "always"]);
+const factorIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$/, "Factor IDs may contain only letters, numbers, dot, underscore, and dash");
+
+const factorMemoryPolicySchema = z.object({
+  // Placeholder policy: consumed by future Factor compaction/runtime work.
+  enabled: z.boolean().default(true),
+  persistRawLogs: z.boolean().default(false),
+  retentionDays: z.number().int().positive().optional(),
+  notes: z.string().default("")
+}).default({ enabled: true, persistRawLogs: false, notes: "" });
+
+const factorCompactionPolicySchema = z.object({
+  // Placeholder policy: no compaction worker is started by this scaffold.
+  compactAfterTask: z.boolean().default(true),
+  interval: z.string().default("manual"),
+  maxBriefingBytes: z.number().int().positive().optional(),
+  notes: z.string().default("")
+}).default({ compactAfterTask: true, interval: "manual", notes: "" });
+
+const factorCapabilitiesPolicySchema = z.object({
+  // Placeholder allow/deny lists for future tool/account integrations.
+  allowed: z.array(z.string()).default([]),
+  denied: z.array(z.string()).default([]),
+  notes: z.string().default("")
+}).default({ allowed: [], denied: [], notes: "" });
+
+const factorAclPolicySchema = z.object({
+  // Placeholder ACL: management surfaces are proposal-only in this scaffold.
+  telegramUserIds: z.array(telegramUserIdSchema).default([]),
+  adminUserIds: z.array(telegramUserIdSchema).default([]),
+  notes: z.string().default("")
+}).default({ telegramUserIds: [], adminUserIds: [], notes: "" });
+
+const factorDefinitionSchema = z.object({
+  enabled: z.boolean().default(false),
+  name: z.string().default(""),
+  directory: z.string().default(""),
+  profile: z.string().default(""),
+  model: z.string().default(""),
+  effort: effortSchema.optional(),
+  startup: factorStartupSchema.default("on_demand"),
+  warmupPrompt: z.string().default(""),
+  warmupFile: z.string().default(""),
+  gitRemote: z.string().default(""),
+  gitBranch: z.string().default("main"),
+  persistRawLogs: z.boolean().default(false),
+  compactAfterTask: z.boolean().default(true),
+  memory: factorMemoryPolicySchema,
+  compaction: factorCompactionPolicySchema,
+  capabilities: factorCapabilitiesPolicySchema,
+  acl: factorAclPolicySchema
+}).strict();
 
 const configSchema = z.object({
   version: z.literal(1).default(1),
@@ -75,6 +127,15 @@ const configSchema = z.object({
     allowedProfiles: z.array(z.string()).default([]),
     cleanupArtifacts: z.boolean().default(true)
   }),
+  factors: z.object({
+    enabled: z.boolean().default(false),
+    rootDir: z.string().default("data/factors"),
+    socketDir: z.string().default("data/run/factors"),
+    defaultModel: z.string().default("gpt-5.5"),
+    defaultEffort: effortSchema.default("medium"),
+    maxActive: z.number().int().nonnegative().default(2),
+    definitions: z.record(factorIdSchema, factorDefinitionSchema).default({})
+  }),
   loops: z.object({
     enabled: z.boolean().default(true),
     path: z.string().default("config/loops.json"),
@@ -112,6 +173,7 @@ export type AppConfig = z.infer<typeof configSchema> & {
   telegramBotToken?: string;
   openaiApiKey?: string;
 };
+export type FactorDefinitionConfig = z.infer<typeof factorDefinitionSchema>;
 
 const defaultConfig = configSchema.parse({
   version: 1,
@@ -173,6 +235,15 @@ const defaultConfig = configSchema.parse({
     childInterruptGraceMs: 5000,
     allowedProfiles: [],
     cleanupArtifacts: true
+  },
+  factors: {
+    enabled: false,
+    rootDir: "data/factors",
+    socketDir: "data/run/factors",
+    defaultModel: "gpt-5.5",
+    defaultEffort: "medium",
+    maxActive: 2,
+    definitions: {}
   },
   loops: {
     enabled: true,
@@ -261,6 +332,45 @@ function uniqueTelegramUserIds(values: Array<number | string>): Array<number | s
   return out;
 }
 
+const factorTopLevelKeys = new Set([
+  "enabled",
+  "rootDir",
+  "socketDir",
+  "defaultModel",
+  "defaultEffort",
+  "maxActive",
+  "definitions"
+]);
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizeParsedFactorConfig(parsed: unknown): unknown {
+  if (!isPlainRecord(parsed) || !isPlainRecord(parsed.factors)) return parsed;
+  const factors = parsed.factors;
+  const existingDefinitions = isPlainRecord(factors.definitions) ? factors.definitions : {};
+  const definitions: Record<string, unknown> = { ...existingDefinitions };
+  let changed = Object.keys(existingDefinitions).length > 0;
+
+  // Support the plan's TOML shape:
+  //
+  //   [factors.email-calendar]
+  //   enabled = true
+  //
+  // Internally we normalize dynamic child tables into factors.definitions so
+  // the validated AppConfig type stays explicit and safe.
+  for (const [key, value] of Object.entries(factors)) {
+    if (factorTopLevelKeys.has(key)) continue;
+    if (!isPlainRecord(value)) continue;
+    definitions[key] = value;
+    delete factors[key];
+    changed = true;
+  }
+  if (changed) factors.definitions = definitions;
+  return parsed;
+}
+
 function collectEnvOverrides(env: NodeJS.ProcessEnv = process.env): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   const specs: Array<{ name: string; path: string[]; parse?: (value: string) => unknown }> = [
@@ -290,7 +400,7 @@ export async function loadConfig(configPath = "config/codex-chat.toml"): Promise
   const absoluteConfigPath = resolve(configPath);
   let parsed: unknown = {};
   if (await pathExists(absoluteConfigPath)) {
-    parsed = parseToml(await readFile(absoluteConfigPath, "utf8"));
+    parsed = normalizeParsedFactorConfig(parseToml(await readFile(absoluteConfigPath, "utf8")));
   }
   const merged = deepMerge(deepMerge(defaultConfig, parsed), collectEnvOverrides());
   const config = configSchema.parse(merged);

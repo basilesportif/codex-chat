@@ -1,7 +1,7 @@
 import { appendFile, mkdir, readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { AppConfig, resolveConfigPath } from "./config.js";
-import { LoopRun, MonitorEvent, StoredAction, SubagentBackendKind, SubagentJob } from "./types.js";
+import { FactorRuntimeState, LoopRun, MonitorEvent, StoredAction, SubagentBackendKind, SubagentJob } from "./types.js";
 import { atomicWriteJson, atomicWriteText, ensureDir, nowIso, pathExists, removeIfExists } from "./util.js";
 
 const pairingCodePath = "data/pairing_code.txt";
@@ -23,7 +23,7 @@ export class StateStore {
 
   async init(): Promise<void> {
     await ensureDir(this.root);
-    for (const dir of ["messages", "files", "turns", "queued_turns", "jobs", "loop_runs", "monitor_events", "actions"]) {
+    for (const dir of ["messages", "files", "turns", "queued_turns", "jobs", "factors", "loop_runs", "monitor_events", "actions"]) {
       await ensureDir(join(this.root, dir));
     }
     if (!(await pathExists(join(this.root, "schema.json")))) {
@@ -95,6 +95,29 @@ export class StateStore {
       }
     }
     return jobs;
+  }
+
+  async saveFactorState(factor: FactorRuntimeState): Promise<void> {
+    await this.writeJson(`factors/${factor.id}.json`, factor);
+  }
+
+  async readFactorState(id: string): Promise<FactorRuntimeState | undefined> {
+    return this.readJson<FactorRuntimeState | undefined>(`factors/${id}.json`, undefined);
+  }
+
+  async listFactorStates(): Promise<FactorRuntimeState[]> {
+    const dir = this.path("factors");
+    const files = await readdir(dir).catch(() => []);
+    const factors: FactorRuntimeState[] = [];
+    for (const file of files) {
+      if (!file.endsWith(".json")) continue;
+      try {
+        factors.push(JSON.parse(await readFile(join(dir, file), "utf8")) as FactorRuntimeState);
+      } catch {
+        // Ignore malformed historical factor state files.
+      }
+    }
+    return factors;
   }
 
   async saveLoopRun(run: LoopRun): Promise<void> {

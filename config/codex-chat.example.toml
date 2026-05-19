@@ -68,6 +68,53 @@ childInterruptGraceMs = 5000
 allowedProfiles = []
 cleanupArtifacts = true
 
+[factors]
+# Durable Factors are scaffold-only and disabled by default. The management
+# surface can list/status/propose, but no Factor app-server runtime or external
+# account integration is started by this release.
+enabled = false
+rootDir = "data/factors"
+socketDir = "data/run/factors"
+defaultModel = "gpt-5.5"
+defaultEffort = "medium"
+maxActive = 2
+
+[factors.email-calendar]
+enabled = false
+name = "Email/calendar"
+# May be absolute; relative paths resolve from the codex-chat repo root.
+directory = "data/factors/email-calendar"
+profile = "email-calendar"
+model = "gpt-5.5"
+effort = "high"
+startup = "on_demand"
+warmupPrompt = ""
+warmupFile = ""
+gitRemote = ""
+gitBranch = "main"
+persistRawLogs = false
+compactAfterTask = true
+
+[factors.email-calendar.memory]
+enabled = true
+persistRawLogs = false
+notes = "Summaries and source pointers first; raw email/calendar bodies only by explicit future policy."
+
+[factors.email-calendar.compaction]
+compactAfterTask = true
+interval = "manual"
+notes = "Placeholder only; no compaction worker runs in scaffold mode."
+
+[factors.email-calendar.capabilities]
+allowed = []
+denied = ["external_account_calls", "calendar_mutations", "crm_mutations", "todo_mutations"]
+notes = "Placeholder ACL/capability model for future pilots."
+
+[factors.email-calendar.acl]
+telegramUserIds = []
+adminUserIds = []
+notes = "Placeholder; service commands are proposal-only in scaffold mode."
+
 [loops]
 enabled = true
 path = "config/loops.json"

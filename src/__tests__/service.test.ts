@@ -150,6 +150,20 @@ describe("service supervisor", () => {
     expect(turn.status).toBe("abandoned");
   });
 
+  test("handles Factor scaffold list command before Codex", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    const sendTurn = vi.spyOn(service.codex, "sendTurn");
+    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+
+    await service.enqueueUserEvent(userEvent(130, "factors"));
+
+    expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("Factors: 0 configured"), 130);
+    expect(sendTurn).not.toHaveBeenCalled();
+  });
+
   test("persists queued Telegram events and notifies on restart recovery", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
@@ -282,7 +296,9 @@ describe("service supervisor", () => {
     vi.spyOn(service.telegram, "notifyOps").mockResolvedValue();
     vi.spyOn(service as unknown as { restartCodex(reason: string): Promise<void> }, "restartCodex").mockResolvedValue();
     const releaseTurn = deferred();
+    const enteredTurn = deferred();
     vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
+      enteredTurn.resolve();
       await releaseTurn.promise;
       yield {
         type: "final",
@@ -293,7 +309,12 @@ describe("service supervisor", () => {
     });
 
     await service.enqueueUserEvent(userEvent(81, "slow request"));
-    await flush();
+    await enteredTurn.promise;
+    for (let i = 0; i < 30; i++) {
+      const files = await readdir(join(config.rootDir, "state", "turns")).catch(() => []);
+      if (files.length > 0) break;
+      await flush();
+    }
     (service as unknown as { turnStartedAt: Date }).turnStartedAt = new Date(Date.now() - 80_001);
 
     await (service as unknown as { checkTurnTimeout(): Promise<void> }).checkTurnTimeout();

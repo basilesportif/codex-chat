@@ -30,6 +30,9 @@ codex-chat health --json
 codex-chat loop sync
 codex-chat loop run <id>
 codex-chat monitors validate
+codex-chat factors list
+codex-chat factors status <id>
+codex-chat factors propose <id> steer <proposal text>
 codex-chat service install --user
 codex-chat jobs list
 ```
@@ -43,6 +46,8 @@ codex-chat jobs list
 - JSON state: `data/state/`
 - Telegram downloads: `data/files/`
 - Subagent artifacts: `data/subagents/`
+- Factor scaffold root: `data/factors/`
+- Factor runtime state/proposals: `data/state/factors/`
 - Disposable generated-image staging: `data/artifacts/generated-images/`
 
 ## Subagent Backend Flag
@@ -62,6 +67,28 @@ backend. `agent backend config` clears the runtime override.
 
 Running jobs are not changed by the backend command. Use `agent kill <ref>` for
 any already-running bad child job, then dispatch again after rollback.
+
+## Durable Factor Scaffold
+
+`[factors]` is a disabled-by-default feature flag for future durable Factors:
+named, directory-backed domain agents such as an email/calendar Factor. The
+current implementation is intentionally scaffold-only:
+
+- config parsing supports `[factors.<id>]` with per-Factor `directory`,
+  `enabled`, `profile`, `model`, `effort`, `startup`, warmup prompt/file,
+  memory/compaction placeholders, and capabilities/ACL placeholders;
+- state and proposal records live under `data/state/factors/`;
+- Factor-owned files should live only in the configured Factor directory
+  (`data/factors/<id>` by default, or an absolute per-Factor path);
+- `factors`, `factor status <id>`, and `factor steer <id> <text>` in Telegram
+  are management/proposal surfaces only;
+- `codex-chat factors list|status|propose` provides the same local CLI view;
+- no Factor app-server process, email/calendar account call, project/todo/CRM
+  mutation, Git push, or compaction worker is started by this scaffold.
+
+Before enabling a real pilot, implement and review the separate app-server
+Factor runtime, persistence policy, privacy/delete workflow, and account
+integration safety checks.
 
 ## Active Subagent Snapshot and Steering
 

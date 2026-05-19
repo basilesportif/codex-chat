@@ -15,6 +15,7 @@ import {
   waitForTurnDrain
 } from "./deploy.js";
 import { DirectiveAction, parseDirectives } from "./directives.js";
+import { FactorManager, parseFactorCommand, type FactorCommand } from "./factors.js";
 import { FileStore } from "./file-store.js";
 import { CodexHeartbeat } from "./heartbeat.js";
 import { LocalIpcServer } from "./ipc.js";
@@ -177,6 +178,9 @@ export const HELP_TEXT = `Service commands (handled instantly, bypass Codex):
   agent steer <ref> <text> — steer a running app-server subagent
   agent backend     — show effective subagent backend
   agent backend exec — recovery: force new/queued subagents back to safe codex_exec
+  factors           — list configured durable Factor scaffolds
+  factor status <id> — show Factor scaffold status and policy placeholders
+  factor steer <id> <text> — record a proposal only; no runtime/account mutation
   help              — this message
   update / deploy   — pull latest and restart service`;
 
@@ -192,6 +196,7 @@ export class ServiceSupervisor {
   private readonly heartbeat: CodexHeartbeat;
   private readonly ipc: LocalIpcServer;
   private readonly subagents: SubagentManager;
+  private readonly factors: FactorManager;
   private messageQueue = new Map<string, QueuedEvent[]>();
   private turnRunning = false;
   /** Wall-clock time the currently-running turn started; cleared in runTurn's finally. */
@@ -214,6 +219,7 @@ export class ServiceSupervisor {
     this.state = new StateStore(config);
     this.behavior = new BehaviorPack(config);
     this.files = new FileStore(config, this.state);
+    this.factors = new FactorManager(config, this.state, logger);
     const transcriber = this.createTranscriber();
     if (config.codex.transport !== "app-server") {
       throw new Error(DISABLED_EXEC_RESUME_MESSAGE);
@@ -294,6 +300,7 @@ export class ServiceSupervisor {
   async start(): Promise<void> {
     await ensureConfiguredDirectories(this.config);
     await this.state.init();
+    await this.factors.init();
     await this.subagents.loadRuntimeBackendOverride();
     await this.subagents.loadJobs();
     await this.files.init();
@@ -349,6 +356,11 @@ export class ServiceSupervisor {
       const backendCommand = parseSubagentBackendCommand(event.text);
       if (backendCommand.isBackend) {
         await this.handleSubagentBackendCommandEvent(event, backendCommand);
+        return;
+      }
+      const factorCommand = parseFactorCommand(event.text);
+      if (factorCommand.isFactor) {
+        await this.handleFactorCommandEvent(event, factorCommand);
         return;
       }
       const agentSteer = parseAgentSteerCommand(event.text);
@@ -414,7 +426,12 @@ export class ServiceSupervisor {
       codex,
       telegramConfigured: Boolean(this.config.telegramBotToken),
       openaiConfigured: Boolean(this.config.openaiApiKey),
-      stateDir: this.state.root
+      stateDir: this.state.root,
+      factors: {
+        enabled: this.config.factors.enabled,
+        configured: Object.keys(this.config.factors.definitions).length,
+        runtime: "scaffold_only"
+      }
     };
   }
 
@@ -1421,6 +1438,14 @@ export class ServiceSupervisor {
     if (!this.config.transcription.enabled) return new DisabledTranscriber();
     if (this.config.transcription.provider === "openai") return new OpenAITranscriber(this.config);
     return new DisabledTranscriber();
+  }
+
+  private async handleFactorCommandEvent(event: UserEvent, command: Exclude<FactorCommand, { isFactor: false }>): Promise<void> {
+    const chatId = event.chatId;
+    if (!chatId) return;
+    const proposedBy = event.userId ? `telegram:${event.userId}` : "telegram";
+    const text = await this.factors.handleCommand(command, proposedBy);
+    await this.telegram.sendText(chatId, text, event.messageId);
   }
 
   private async handleSubagentBackendCommandEvent(event: UserEvent, command: Exclude<SubagentBackendCommand, { isBackend: false }>): Promise<void> {

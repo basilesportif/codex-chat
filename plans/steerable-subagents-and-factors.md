@@ -38,6 +38,29 @@ The steerable-subagents foundation is implemented behind a safe backend flag:
 
 The app-server backend is intentionally opt-in and minimal: one child app-server process per active job over a loopback WebSocket. Factors runtime remains deferred.
 
+## 2026-05-19 Factor Scaffold Implementation Note
+
+The first safe Factor scaffold is implemented without starting durable Factor
+runtimes:
+
+- `[factors]` and `[factors.<id>]` config parse per-Factor directories,
+  enabled flags, profile/model/effort, startup mode, warmup prompt/file,
+  Git fields, memory/compaction policy placeholders, and capabilities/ACL
+  placeholders.
+- Runtime/proposal state is stored under `data/state/factors/<id>.json`; Factor
+  content remains in each configured Factor directory (`data/factors/<id>` by
+  default, or an absolute path).
+- Service, Telegram, and CLI management surfaces can list/status and record
+  start/stop/steer/warmup/compact proposals, but they do not start a Factor
+  process or call external accounts.
+- The email/calendar example stays disabled and scaffold-only. No email,
+  calendar, project, todo, CRM, Git push, or canonical assistant workspace
+  mutation is implemented by this pass.
+
+This preserves rollback: leave `factors.enabled = false` (the default) or set it
+back to false before restart. The existing `codex_exec`/`codex_app_server`
+subagent backend flag is unchanged.
+
 ## Current Architecture Mapping
 
 The current system already has the public product shape needed for this migration:
@@ -470,14 +493,16 @@ First pilot: email/calendar Factor
 - Warmup: current inbox/calendar state, open scheduling loops, recent decisions, and response preferences.
 - Safety: define what can be persisted, what must be redacted, and what can be pushed before enabling Git persistence.
 
-Deferred runtime implementation:
+Deferred full runtime implementation:
 
-- Do not implement `FactorManager`, `FactorRegistry`, `FactorSupervisor`, `FactorGitService`, or `FactorMaintenanceService` until Phase 6 acceptance criteria are met.
-- The first Factor work after Phase 6 should be an RFC plus scaffold:
-  - config schema
-  - directory validator
-  - example `email-calendar` Factor directory
-  - no always-on runtime
+- The current `FactorManager` is scaffold/proposal-only. Do not implement
+  `FactorSupervisor`, `FactorGitService`, `FactorMaintenanceService`, always-on
+  runtimes, or account integrations until Phase 6 acceptance criteria are met
+  and persistence/privacy policy is reviewed.
+- The first Factor work after Phase 6 should extend this scaffold with:
+  - app-server runtime lifecycle using the proven child backend model
+  - reviewed directory creation/migration tooling
+  - an example private `email-calendar` Factor directory
   - no Git push automation until persistence policy is reviewed
 
 Acceptance criteria for the RFC/scaffold:

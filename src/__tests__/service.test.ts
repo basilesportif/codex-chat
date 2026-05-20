@@ -485,6 +485,43 @@ describe("service supervisor", () => {
     expect(prompt.indexOf("Active subagent jobs")).toBeLessThan(prompt.indexOf("User content:"));
   });
 
+  test("injects compact Factor routing context before user content", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    (service as unknown as {
+      factors: {
+        runtimeSnapshot(limit?: number): unknown;
+      };
+    }).factors.runtimeSnapshot = vi.fn().mockReturnValue({
+      factors: [
+        {
+          id: "email-calendar",
+          name: "Email/calendar",
+          status: "running",
+          running: true,
+          resumable: true,
+          enabled: true,
+          profile: "email-calendar",
+          model: "gpt-5.5",
+          effort: "high",
+          backendThreadId: "thread-factor-1",
+          description: "Triage email/calendar context without mutations."
+        }
+      ],
+      omitted: 0
+    });
+
+    const prompt = (service as unknown as { formatEventForCodex(event: UserEvent): string }).formatEventForCodex(
+      userEvent(702, "ask the email factor what changed today")
+    );
+
+    expect(prompt).toContain("Available factors (compact runtime snapshot; durable/non-ephemeral threads when enabled):");
+    expect(prompt).toContain("factor steer <id> <text>");
+    expect(prompt).toContain("id=email-calendar name=\"Email/calendar\" status=running running=true resumable=true enabled=true profile=email-calendar model=gpt-5.5 effort=high thread=thread-factor-1 purpose=\"Triage email/calendar context without mutations.\"");
+    expect(prompt.indexOf("Available factors")).toBeLessThan(prompt.indexOf("User content:"));
+  });
+
   test.each([
     ["research", "research codex-chat routing"],
     ["debug", "debug the failing service test"],

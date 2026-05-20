@@ -32,6 +32,8 @@ codex-chat loop run <id>
 codex-chat monitors validate
 codex-chat factors list
 codex-chat factors status <id>
+codex-chat factors start <id>
+codex-chat factors steer <id> <query>
 codex-chat factors propose <id> steer <proposal text>
 codex-chat service install --user
 codex-chat jobs list
@@ -46,7 +48,7 @@ codex-chat jobs list
 - JSON state: `data/state/`
 - Telegram downloads: `data/files/`
 - Subagent artifacts: `data/subagents/`
-- Factor scaffold root: `data/factors/`
+- Factor runtime root: `data/factors/`
 - Factor runtime state/proposals: `data/state/factors/`
 - Disposable generated-image staging: `data/artifacts/generated-images/`
 
@@ -85,27 +87,38 @@ line as soon as possible when they receive such a steering request, then keep
 working. For a non-cooperative/mechanical snapshot that does not depend on
 model output, use `agent status <ref>`.
 
-## Durable Factor Scaffold
+## Durable Factors
 
-`[factors]` is a disabled-by-default feature flag for future durable Factors:
-named, directory-backed domain agents such as an email/calendar Factor. The
-current implementation is intentionally scaffold-only:
+`[factors]` is a disabled-by-default feature flag for durable Factors: named,
+directory-backed domain agents such as an email/calendar Factor. The current
+runtime is intentionally minimal:
 
 - config parsing supports `[factors.<id>]` with per-Factor `directory`,
-  `enabled`, `profile`, `model`, `effort`, `startup`, warmup prompt/file,
+  `enabled`, `profile`, `model`, `effort`, `startup`, `description`, warmup prompt/file,
   memory/compaction placeholders, and capabilities/ACL placeholders;
-- state and proposal records live under `data/state/factors/`;
+- state, proposal, and saved app-server thread metadata live under
+  `data/state/factors/`;
 - Factor-owned files should live only in the configured Factor directory
   (`data/factors/<id>` by default, or an absolute per-Factor path);
-- `factors`, `factor status <id>`, and `factor steer <id> <text>` in Telegram
-  are management/proposal surfaces only;
-- `codex-chat factors list|status|propose` provides the same local CLI view;
-- no Factor app-server process, email/calendar account call, project/todo/CRM
-  mutation, Git push, or compaction worker is started by this scaffold.
+- when `[factors]` and the individual Factor are enabled, `factor start <id>`
+  starts or resumes a non-ephemeral Codex app-server thread using
+  `persistExtendedHistory`; saved `backendThreadId` values are resumed on
+  service restart for running/`startup = "always"` Factors, and resume failure
+  starts a fresh thread while recording `lastResumeError`;
+- `factors`, `factor status <id>`, `factor start <id>`, `factor stop <id>`, and
+  `factor steer <id> <text>` are service-level Telegram commands;
+- `codex-chat factors list|status|start|stop|steer|propose` provides local CLI
+  management; start/stop/steer are sent to the running service over IPC;
+- every main Codex turn includes a compact `Available factors` snapshot so the
+  main loop can see configured/running/resumable Factors and the service
+  commands used to steer them;
+- no email/calendar account call, project/todo/CRM mutation, rich tool,
+  autonomous scheduler, Git push, or compaction worker is implemented by this
+  minimal runtime.
 
-Before enabling a real pilot, implement and review the separate app-server
-Factor runtime, persistence policy, privacy/delete workflow, and account
-integration safety checks.
+Regular subagents remain ephemeral by default: app-server subagents use
+`ephemeral: true`, do not request extended history persistence, and are not
+resumed after service restart.
 
 ## Active Subagent Snapshot and Steering
 

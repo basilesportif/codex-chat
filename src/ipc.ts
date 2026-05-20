@@ -6,6 +6,10 @@ import { pathExists } from "./util.js";
 export type IpcMessage =
   | { type: "loop_run"; loopId: string; scheduledAt?: string }
   | { type: "subagent_steer"; jobId: string; text: string }
+  | { type: "factor_start"; factorId: string }
+  | { type: "factor_stop"; factorId: string }
+  | { type: "factor_steer"; factorId: string; text: string }
+  | { type: "factor_status"; factorId: string }
   | { type: "ping" };
 
 export type IpcResponse = { ok: true; result?: unknown } | { ok: false; error: string };

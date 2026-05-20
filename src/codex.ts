@@ -4,6 +4,7 @@ import WebSocket from "ws";
 import type { Logger } from "pino";
 import { AppConfig } from "./config.js";
 import { BehaviorPack } from "./behavior.js";
+import type { FactorRuntimeClient, FactorThreadResumeInput, FactorThreadSpec, FactorThreadStartResult, FactorTurnInput } from "./factor-runtime.js";
 import { LogBuffer, scrubSecrets } from "./log-buffer.js";
 import { StateStore } from "./state.js";
 import { CodexClient, CodexEvent, CodexHealth, CodexTurnInput } from "./types.js";
@@ -70,7 +71,7 @@ export interface CodexCrashInfo {
 
 export type CodexCrashHandler = (reason: string, info: CodexCrashInfo) => void;
 
-export class AppServerCodexClient implements CodexClient {
+export class AppServerCodexClient implements CodexClient, FactorRuntimeClient {
   private child?: ChildProcess;
   private ws?: WebSocket;
   private requestId = 1;
@@ -294,6 +295,95 @@ export class AppServerCodexClient implements CodexClient {
     }
   }
 
+  async startFactorThread(input: FactorThreadSpec): Promise<FactorThreadStartResult> {
+    this.assertConnected();
+    const response = await this.request<Record<string, unknown>>("thread/start", {
+      model: input.model,
+      cwd: input.directory,
+      approvalPolicy: this.config.codex.approvalPolicy,
+      sandbox: this.config.codex.sandbox,
+      config: this.threadConfig(input.effort, this.factorWritableRoots(input.directory)),
+      serviceName: input.serviceName,
+      baseInstructions: input.baseInstructions,
+      developerInstructions: input.developerInstructions,
+      ephemeral: false,
+      experimentalRawEvents: Boolean(input.persistRawLogs),
+      persistExtendedHistory: true
+    });
+    const thread = response.thread as Record<string, unknown> | undefined;
+    const threadId = typeof thread?.id === "string" ? thread.id : undefined;
+    if (!threadId) throw new Error(`Codex app-server did not return a thread id for Factor ${input.id}`);
+    this.logBuffer.append("event", scrubSecrets(`[FACTOR THREAD START] factor=${input.id} thread_id=${threadId}`));
+    return { backendThreadId: threadId };
+  }
+
+  async resumeFactorThread(input: FactorThreadResumeInput): Promise<void> {
+    this.assertConnected();
+    await this.request("thread/resume", {
+      threadId: input.backendThreadId,
+      model: input.model,
+      cwd: input.directory,
+      approvalPolicy: this.config.codex.approvalPolicy,
+      sandbox: this.config.codex.sandbox,
+      config: this.threadConfig(input.effort, this.factorWritableRoots(input.directory)),
+      developerInstructions: input.developerInstructions,
+      persistExtendedHistory: true
+    });
+    this.logBuffer.append("event", scrubSecrets(`[FACTOR THREAD RESUME] factor=${input.id} thread_id=${input.backendThreadId}`));
+  }
+
+  async *sendFactorTurn(input: FactorTurnInput): AsyncIterable<CodexEvent> {
+    this.assertConnected();
+    const queue = new AsyncQueue<CodexEvent>();
+    const userInput: unknown[] = [{ type: "text", text: input.text, text_elements: [] }];
+    for (const attachment of input.attachments ?? []) {
+      if (attachment.kind === "image") userInput.push({ type: "localImage", path: attachment.localPath });
+    }
+    let turnId = "";
+    let accumulated = "";
+    const handler = (message: JsonRpcMessage): void => {
+      if (!message.method || typeof message.params !== "object" || message.params === null) return;
+      const params = message.params as Record<string, unknown>;
+      if (message.method === "item/agentMessage/delta" && params.turnId === turnId && typeof params.delta === "string") {
+        accumulated += params.delta;
+        queue.push({ type: "delta", text: params.delta });
+      }
+      if (message.method === "turn/completed" && typeof params.turn === "object" && params.turn !== null) {
+        const turn = params.turn as Record<string, unknown>;
+        if (turn.id === turnId) {
+          this.logTurnReasoning(turnId, accumulated);
+          queue.push({ type: "final", text: accumulated });
+          queue.close();
+        }
+      }
+      if (message.method === "error") {
+        queue.push({ type: "error", message: JSON.stringify(params), raw: params });
+      }
+    };
+    this.notificationHandlers.add(handler);
+    this.activeQueues.add(queue);
+    try {
+      const response = await this.request<Record<string, unknown>>("turn/start", {
+        threadId: input.backendThreadId,
+        input: userInput,
+        cwd: input.directory,
+        approvalPolicy: this.config.codex.approvalPolicy,
+        model: input.model,
+        effort: input.effort
+      });
+      const turn = response.turn as Record<string, unknown> | undefined;
+      turnId = typeof turn?.id === "string" ? turn.id : "";
+      if (!turnId) throw new Error(`Codex app-server did not return a turn id for Factor ${input.id}`);
+      await input.onTurnStarted?.(turnId);
+      this.logBuffer.append("event", scrubSecrets(`[FACTOR TURN START] factor=${input.id} turn_id=${turnId} thread_id=${input.backendThreadId}`));
+      for await (const event of queue.iterate()) yield event;
+    } finally {
+      this.notificationHandlers.delete(handler);
+      this.activeQueues.delete(queue);
+      queue.close();
+    }
+  }
+
   private async startTurnRequest(userInput: unknown[]): Promise<Record<string, unknown>> {
     if (!this.sessionId) throw new Error("No Codex app-server thread is available");
     try {
@@ -306,12 +396,17 @@ export class AppServerCodexClient implements CodexClient {
     }
   }
 
-  private threadConfig(): Record<string, unknown> {
-    const cfg: Record<string, unknown> = { model_reasoning_effort: this.config.codex.effort };
-    if (this.config.codex.addDirs.length > 0) {
-      cfg.sandbox_workspace_write = { writable_roots: this.config.codex.addDirs };
+  private threadConfig(effort: string = this.config.codex.effort, writableRoots = this.config.codex.addDirs): Record<string, unknown> {
+    const cfg: Record<string, unknown> = { model_reasoning_effort: effort };
+    if (writableRoots.length > 0) {
+      cfg.sandbox_workspace_write = { writable_roots: writableRoots };
     }
     return cfg;
+  }
+
+  private factorWritableRoots(directory: string): string[] {
+    const roots = [directory, ...(this.config.codex.addDirs ?? [])].filter(Boolean);
+    return [...new Set(roots)];
   }
 
   private turnStartParams(userInput: unknown[]): Record<string, unknown> {

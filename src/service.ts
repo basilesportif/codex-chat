@@ -189,9 +189,11 @@ export const HELP_TEXT = `Service commands (handled instantly, bypass Codex):
   agent steer <ref> STATUS: briefly report current progress, then continue — request an interim Telegram status
   agent backend     — show effective subagent backend
   agent backend exec — recovery: force new/queued subagents back to safe codex_exec
-  factors           — list configured durable Factor scaffolds
-  factor status <id> — show Factor scaffold status and policy placeholders
-  factor steer <id> <text> — record a proposal only; no runtime/account mutation
+  factors           — list configured durable Factors
+  factor status <id> — show Factor runtime/scaffold status
+  factor start <id> — start/resume a minimal durable Factor runtime when enabled
+  factor stop <id>  — stop Factor runtime management; saved thread remains resumable
+  factor steer <id> <text> — send a query/steering turn to a running Factor when enabled
   help              — this message
   update / deploy   — pull latest and restart service`;
 
@@ -230,7 +232,6 @@ export class ServiceSupervisor {
     this.state = new StateStore(config);
     this.behavior = new BehaviorPack(config);
     this.files = new FileStore(config, this.state);
-    this.factors = new FactorManager(config, this.state, logger);
     const transcriber = this.createTranscriber();
     if (config.codex.transport !== "app-server") {
       throw new Error(DISABLED_EXEC_RESUME_MESSAGE);
@@ -246,6 +247,7 @@ export class ServiceSupervisor {
         this.logger.error({ component: "service", event: "restart_failed", error }, "Codex restart failed");
       });
     });
+    this.factors = new FactorManager(config, this.state, logger, this.codex as AppServerCodexClient);
     this.subagents = new SubagentManager(
       config,
       this.behavior,
@@ -308,6 +310,22 @@ export class ServiceSupervisor {
         if (result.status !== "success") throw new Error(result.message);
         return result;
       }
+      if (message.type === "factor_start") {
+        const result = await this.factors.startFactor(message.factorId, "ipc");
+        if (!["started", "resumed"].includes(result.status)) throw new Error(result.message);
+        return result;
+      }
+      if (message.type === "factor_stop") {
+        const result = await this.factors.stopFactor(message.factorId, "ipc");
+        if (result.status !== "stopped") throw new Error(result.message);
+        return result;
+      }
+      if (message.type === "factor_steer") {
+        const result = await this.factors.steerFactor(message.factorId, message.text, "ipc");
+        if (result.status !== "steered") throw new Error(result.message);
+        return result;
+      }
+      if (message.type === "factor_status") return this.factors.formatStatus(message.factorId);
       if (message.type === "ping") return { pong: true };
       throw new Error(`Unknown IPC message type: ${(message as { type?: string }).type ?? "unknown"}`);
     });
@@ -322,6 +340,7 @@ export class ServiceSupervisor {
     await this.files.init();
     await this.behavior.loadBootstrapPrompt();
     await this.codex.start();
+    await this.factors.recoverRuntimesOnStartup();
     await this.telegram.start();
     await this.recoverAbandonedWork();
     await this.ipc.start();
@@ -451,7 +470,8 @@ export class ServiceSupervisor {
       factors: {
         enabled: this.config.factors.enabled,
         configured: Object.keys(this.config.factors.definitions).length,
-        runtime: "scaffold_only"
+        runtime: this.config.factors.enabled ? "app_server" : "scaffold_only",
+        active: this.factors.runtimeSnapshot().factors.filter((factor) => factor.running).length
       }
     };
   }
@@ -1065,6 +1085,9 @@ export class ServiceSupervisor {
         return;
       }
       const health = await this.codex.health();
+      await this.factors.recoverRuntimesOnStartup().catch((error) => {
+        this.logger.warn({ component: "factors", event: "restart_recovery_failed", error }, "factor runtime recovery after Codex restart failed");
+      });
       // After a crash the in-memory thread on the app-server is gone, so the
       // restarted codex has either resumed our stored thread or started a
       // fresh one — either way, the user's mid-turn context is lost. Make
@@ -1476,7 +1499,41 @@ export class ServiceSupervisor {
       ].join("\n")
       : "";
     const activeSubagents = this.formatActiveSubagentSnapshot();
-    return `${header}${replyContext ? `\n\n${replyContext}` : ""}${activeSubagents ? `\n\n${activeSubagents}` : ""}\n\nUser content:\n${event.text}${attachments}`;
+    const factorRuntimes = this.formatFactorRuntimeSnapshot();
+    return `${header}${replyContext ? `\n\n${replyContext}` : ""}${factorRuntimes ? `\n\n${factorRuntimes}` : ""}${activeSubagents ? `\n\n${activeSubagents}` : ""}\n\nUser content:\n${event.text}${attachments}`;
+  }
+
+  private formatFactorRuntimeSnapshot(): string {
+    const snapshot = this.factors.runtimeSnapshot(12);
+    const lines = [
+      "Available factors (compact runtime snapshot; durable/non-ephemeral threads when enabled):",
+      "Use for durable domain routing/context. Service commands: `factors`, `factor status <id>`, `factor start <id>`, `factor steer <id> <text>`, `factor stop <id>`. No Factor directive or rich external-account tools are implemented; do not claim email/calendar/CRM/project mutations are available."
+    ];
+    if (snapshot.factors.length === 0) {
+      lines.push("- none configured");
+      return lines.join("\n");
+    }
+    for (const factor of snapshot.factors) lines.push(this.formatFactorRuntimeSnapshotLine(factor));
+    if (snapshot.omitted > 0) lines.push(`- ${snapshot.omitted} more factor(s) omitted; use the service-level \`factors\` command for full status.`);
+    return lines.join("\n");
+  }
+
+  private formatFactorRuntimeSnapshotLine(factor: ReturnType<FactorManager["runtimeSnapshot"]>["factors"][number]): string {
+    const parts = [
+      `id=${factor.id}`,
+      `name=${JSON.stringify(factor.name)}`,
+      `status=${factor.status}`,
+      `running=${factor.running}`,
+      `resumable=${factor.resumable}`,
+      `enabled=${factor.enabled}`,
+      `profile=${factor.profile}`,
+      `model=${factor.model}`,
+      `effort=${factor.effort}`
+    ];
+    if (factor.backendThreadId) parts.push(`thread=${factor.backendThreadId}`);
+    if (factor.description) parts.push(`purpose=${JSON.stringify(this.compactSnapshotText(factor.description))}`);
+    if (factor.lastError) parts.push(`lastError=${JSON.stringify(this.compactSnapshotText(factor.lastError, 100))}`);
+    return `- ${parts.join(" ")}`;
   }
 
   private formatActiveSubagentSnapshot(): string {

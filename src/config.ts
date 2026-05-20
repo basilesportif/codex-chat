@@ -45,6 +45,8 @@ const factorAclPolicySchema = z.object({
 const factorDefinitionSchema = z.object({
   enabled: z.boolean().default(false),
   name: z.string().default(""),
+  description: z.string().default(""),
+  purpose: z.string().default(""),
   directory: z.string().default(""),
   profile: z.string().default(""),
   model: z.string().default(""),
@@ -431,6 +433,8 @@ export async function ensureConfiguredDirectories(config: AppConfig): Promise<vo
     config.files.artifactDir,
     config.subagents.artifactDir,
     config.subagents.childSocketDir,
+    config.factors.rootDir,
+    config.factors.socketDir,
     "data/logs",
     "data/run",
     "data/spool/loops",

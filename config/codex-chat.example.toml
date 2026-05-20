@@ -69,9 +69,10 @@ allowedProfiles = []
 cleanupArtifacts = true
 
 [factors]
-# Durable Factors are scaffold-only and disabled by default. The management
-# surface can list/status/propose, but no Factor app-server runtime or external
-# account integration is started by this release.
+# Durable Factors are disabled by default. When enabled, the service can start
+# minimal non-ephemeral app-server threads and persist per-Factor thread IDs.
+# External account integrations, rich tools, autonomous scheduling, mutations,
+# and compaction are intentionally not implemented here.
 enabled = false
 rootDir = "data/factors"
 socketDir = "data/run/factors"
@@ -82,6 +83,7 @@ maxActive = 2
 [factors.email-calendar]
 enabled = false
 name = "Email/calendar"
+description = "Triage email/calendar context and draft recommendations without mutating external accounts."
 # May be absolute; relative paths resolve from the codex-chat repo root.
 directory = "data/factors/email-calendar"
 profile = "email-calendar"
@@ -113,7 +115,7 @@ notes = "Placeholder ACL/capability model for future pilots."
 [factors.email-calendar.acl]
 telegramUserIds = []
 adminUserIds = []
-notes = "Placeholder; service commands are proposal-only in scaffold mode."
+notes = "Placeholder ACL; no external account mutations are implemented by the minimal runtime."
 
 [loops]
 enabled = true

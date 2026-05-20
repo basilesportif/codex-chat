@@ -132,6 +132,97 @@ describe("codex clients", () => {
     await client.stop();
   });
 
+  test("starts Factor threads as non-ephemeral with extended history persistence", async () => {
+    vi.resetModules();
+    const spawn = vi.fn(() => fakeChild());
+    const sent: Array<{ method: string; params: Record<string, unknown> }> = [];
+    vi.doMock("node:child_process", async () => {
+      const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+      return { ...actual, spawn };
+    });
+    vi.doMock("ws", () => {
+      class FakeWebSocket extends EventEmitter {
+        static OPEN = 1;
+        readyState = 1;
+
+        constructor(readonly url: string) {
+          super();
+          queueMicrotask(() => this.emit("open"));
+        }
+
+        send(raw: string): void {
+          const message = JSON.parse(raw) as { id: number; method: string; params: Record<string, unknown> };
+          sent.push({ method: message.method, params: message.params });
+          const serviceName = typeof message.params?.serviceName === "string" ? message.params.serviceName : "";
+          const result = message.method === "thread/start"
+            ? { thread: { id: serviceName.startsWith("codex-chat-factor:") ? "factor-thread" : "main-thread" } }
+            : {};
+          queueMicrotask(() => this.emit("message", JSON.stringify({ id: message.id, result })));
+        }
+
+        close(): void {
+          this.readyState = 3;
+        }
+      }
+      return { default: FakeWebSocket };
+    });
+    const { AppServerCodexClient } = await import("../codex.js");
+    const state = {
+      getCodexSession: vi.fn().mockResolvedValue(undefined),
+      setCodexSession: vi.fn().mockResolvedValue(undefined)
+    };
+    const behavior = {
+      loadBootstrapPrompt: vi.fn().mockResolvedValue("bootstrap"),
+      hash: vi.fn().mockResolvedValue("hash")
+    };
+    const client = new AppServerCodexClient(testConfig("/tmp/codex-chat-test"), state as never, behavior as never, fakeLogger() as never);
+
+    await client.start();
+    const result = await client.startFactorThread({
+      id: "email-calendar",
+      name: "Email/calendar",
+      description: "Triage email/calendar context.",
+      directory: "/tmp/codex-chat-test/factors/email-calendar",
+      profile: "email-calendar",
+      model: "gpt-factor",
+      effort: "high",
+      serviceName: "codex-chat-factor:email-calendar",
+      baseInstructions: "base",
+      developerInstructions: "dev"
+    });
+
+    expect(result.backendThreadId).toBe("factor-thread");
+    const factorStart = sent.find((message) => message.method === "thread/start" && message.params.serviceName === "codex-chat-factor:email-calendar");
+    expect(factorStart?.params).toMatchObject({
+      model: "gpt-factor",
+      cwd: "/tmp/codex-chat-test/factors/email-calendar",
+      serviceName: "codex-chat-factor:email-calendar",
+      ephemeral: false,
+      persistExtendedHistory: true
+    });
+    expect((factorStart?.params.config as Record<string, unknown> | undefined)?.model_reasoning_effort).toBe("high");
+    await client.resumeFactorThread({
+      id: "email-calendar",
+      name: "Email/calendar",
+      directory: "/tmp/codex-chat-test/factors/email-calendar",
+      profile: "email-calendar",
+      model: "gpt-factor",
+      effort: "high",
+      serviceName: "codex-chat-factor:email-calendar",
+      baseInstructions: "base",
+      developerInstructions: "dev",
+      backendThreadId: "factor-thread"
+    });
+    const factorResume = sent.find((message) => message.method === "thread/resume" && message.params.threadId === "factor-thread");
+    expect(factorResume?.params).toMatchObject({
+      threadId: "factor-thread",
+      model: "gpt-factor",
+      cwd: "/tmp/codex-chat-test/factors/email-calendar",
+      persistExtendedHistory: true
+    });
+    await client.stop();
+  });
+
   test("does not report a crash while app-server websocket startup is still retrying", async () => {
     vi.resetModules();
     const spawn = vi.fn(() => fakeChild());

@@ -6,6 +6,7 @@ import { Command } from "commander";
 import { loadConfig, ensureConfiguredDirectories, writeDefaultConfigFilesIfMissing, resolveConfigPath } from "./config.js";
 import { createLogger } from "./logger.js";
 import { FactorManager } from "./factors.js";
+import { sendIpcMessage, type IpcMessage } from "./ipc.js";
 import { runLoopCli, syncCron, validateLoops } from "./loops.js";
 import { validateMonitors } from "./monitors.js";
 import { injectFilePath, INJECT_TELEGRAM_USER_ID, ServiceSupervisor } from "./service.js";
@@ -139,9 +140,9 @@ monitors.command("validate")
     process.stdout.write(`valid monitors: ${parsed.monitors.length}\n`);
   });
 
-const factors = program.command("factors").description("durable Factor scaffold management");
+const factors = program.command("factors").description("durable Factor runtime/scaffold management");
 factors.command("list")
-  .description("list configured Factor scaffolds")
+  .description("list configured Factors")
   .option("--json", "print JSON")
   .action(async (options: { json?: boolean }) => {
     const manager = await loadFactorManager();
@@ -150,7 +151,7 @@ factors.command("list")
   });
 factors.command("status")
   .argument("<id>", "factor id or prefix")
-  .description("show a Factor scaffold status")
+  .description("show a Factor runtime/scaffold status")
   .option("--json", "print JSON state")
   .action(async (id: string, options: { json?: boolean }) => {
     const manager = await loadFactorManager();
@@ -167,6 +168,28 @@ factors.command("status")
       return;
     }
     process.stdout.write(`${await manager.formatStatus(id)}\n`);
+  });
+factors.command("start")
+  .argument("<id>", "factor id or prefix")
+  .description("ask the running service to start/resume a Factor runtime")
+  .action(async (id: string) => {
+    const result = await sendFactorIpc("factor_start", { factorId: id });
+    process.stdout.write(`${formatIpcFactorResult(result)}\n`);
+  });
+factors.command("stop")
+  .argument("<id>", "factor id or prefix")
+  .description("ask the running service to stop Factor runtime management")
+  .action(async (id: string) => {
+    const result = await sendFactorIpc("factor_stop", { factorId: id });
+    process.stdout.write(`${formatIpcFactorResult(result)}\n`);
+  });
+factors.command("steer")
+  .argument("<id>", "factor id or prefix")
+  .argument("<text...>", "steering/query text")
+  .description("ask the running service to send a turn to a Factor runtime")
+  .action(async (id: string, textParts: string[]) => {
+    const result = await sendFactorIpc("factor_steer", { factorId: id, text: textParts.join(" ") });
+    process.stdout.write(`${formatIpcFactorResult(result)}\n`);
   });
 factors.command("propose")
   .argument("<id>", "factor id or prefix")
@@ -256,6 +279,26 @@ async function loadFactorManager(): Promise<FactorManager> {
   const manager = new FactorManager(config, state, logger);
   await manager.init();
   return manager;
+}
+
+async function sendFactorIpc(
+  type: "factor_start" | "factor_stop" | "factor_steer",
+  payload: { factorId: string; text?: string }
+): Promise<unknown> {
+  const config = await loadConfig(program.opts().config);
+  const socketPath = resolveConfigPath(config, config.service.ipcSocket);
+  try {
+    return await sendIpcMessage(socketPath, { type, ...payload } as IpcMessage);
+  } catch (error) {
+    throw new Error(`Could not reach running codex-chat service at ${socketPath}; start the service before using factors start/stop/steer. ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function formatIpcFactorResult(result: unknown): string {
+  if (result && typeof result === "object" && "message" in result && typeof (result as { message?: unknown }).message === "string") {
+    return (result as { message: string }).message;
+  }
+  return JSON.stringify(result, null, 2);
 }
 
 function runtimeVersion(): string {

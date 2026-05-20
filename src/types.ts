@@ -205,6 +205,11 @@ export interface FactorRuntimeState {
   lastError?: string;
   activeTurnId?: string;
   backendThreadId?: string;
+  startedAt?: string;
+  stoppedAt?: string;
+  resumedAt?: string;
+  lastSteeredAt?: string;
+  lastResumeError?: string;
   pid?: number;
 }
 

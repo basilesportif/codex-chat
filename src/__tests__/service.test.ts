@@ -544,7 +544,8 @@ describe("service supervisor", () => {
 
     expect(prompt).toContain("Active subagent jobs (compact routing snapshot; active/queued only):");
     expect(prompt).toContain("emit steer_subagent only when exactly one steerable=true non-Employee child job matches");
-    expect(prompt).toContain("agent steer <ref> <text>");
+    expect(prompt).toContain("emit steer_subagent with text `STATUS: briefly report current progress, then continue`");
+    expect(prompt).toContain("agent status <ref>");
     expect(prompt).toContain("ref=0b8020bf id=job_0b8020bf704f422fbb82c9bcf3cde3aa status=running profile=implementer backend=codex_app_server owner=main:main result=main steerable=true elapsed=3:05 created=2026-05-19T12:00:00.000Z model=gpt-5.5 effort=medium origin_chat_id=253768951 origin_message_id=700 summary=\"Implement steering snapshot\"");
     expect(prompt).toContain("ref=abcd1234 id=job_abcd1234000000000000000000000000 status=queued profile=researcher backend=codex_exec owner=main:main result=main steerable=false elapsed=1:05 created=2026-05-19T12:02:00.000Z summary=\"Research docs\"");
     expect(prompt.indexOf("Active subagent jobs")).toBeLessThan(prompt.indexOf("User content:"));

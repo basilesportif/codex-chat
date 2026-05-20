@@ -1630,7 +1630,7 @@ export class ServiceSupervisor {
     if (snapshot.jobs.length === 0) return "";
     const lines = [
       "Active subagent jobs (compact routing snapshot; active/queued only):",
-      "Use for natural-language steering: emit steer_subagent only when exactly one steerable=true non-Employee child job matches the user's request. If a job has owner=employee:<id>, prefer `employee steer <id> <text>` and do not steer that child directly unless the user explicitly asks to control that exact nested job. If none or multiple match, ask which job or tell the user to run `agent steer <ref> <text>`."
+      "Use for natural-language steering: emit steer_subagent only when exactly one steerable=true non-Employee child job matches the user's request. For natural-language status requests about a running active subagent, if exactly one running steerable non-Employee child job matches, emit steer_subagent with text `STATUS: briefly report current progress, then continue` instead of writing a manual status report; if the status request is explicitly mechanical or has no/multiple matches, ask which job or tell the user to run `agent status <ref>`. For other steering with no/multiple matches, ask which job or tell the user to run `agent steer <ref> <text>`. If a job has owner=employee:<id>, prefer `employee steer <id> <text>` and do not steer that child directly unless the user explicitly asks to control that exact nested job."
     ];
     for (const job of snapshot.jobs) lines.push(this.formatActiveSubagentSnapshotLine(job));
     if (snapshot.omitted > 0) lines.push(`- ${snapshot.omitted} more active job(s) omitted; use the service-level \`agents\` command for full status.`);

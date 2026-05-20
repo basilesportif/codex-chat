@@ -111,6 +111,14 @@ agent ping config   # clear runtime override and use config
 
 `agents` output includes the current automatic status ping setting.
 
+Each job records durable observability fields for automatic pings:
+`lastAutoPingAt`, `autoPingCount`, `lastAutoPingError`, and
+`lastStatusForwardedAt`. `agent status <ref>` shows these fields once present.
+When artifact cleanup is enabled, completed/cancelled/timed-out jobs that used
+or were eligible for automatic status pings keep their artifact directory for a
+short bounded retention window before deletion, so ping/response failures remain
+inspectable. Failed-job artifacts remain retained for postmortem as before.
+
 ## Durable Employees
 
 `[employees]` is a disabled-by-default feature flag for durable Employees: named,

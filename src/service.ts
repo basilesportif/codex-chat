@@ -813,6 +813,12 @@ export class ServiceSupervisor {
     if (job.activeTurnId) lines.push(`activeTurnId: ${job.activeTurnId}`);
     if (job.backendThreadId) lines.push(`thread: ${job.backendThreadId}`);
     if (job.lastSteeredAt) lines.push(`lastSteeredAt: ${job.lastSteeredAt} (${job.steerCount ?? 0} steer${job.steerCount === 1 ? "" : "s"})`);
+    if (job.lastAutoPingAt || job.autoPingCount || job.lastAutoPingError || job.lastStatusForwardedAt) {
+      lines.push(`autoStatusPings: ${job.autoPingCount ?? 0}`);
+      if (job.lastAutoPingAt) lines.push(`lastAutoPingAt: ${job.lastAutoPingAt}`);
+      if (job.lastAutoPingError) lines.push(`lastAutoPingError: ${job.lastAutoPingError}`);
+      if (job.lastStatusForwardedAt) lines.push(`lastStatusForwardedAt: ${job.lastStatusForwardedAt}`);
+    }
     if (job.status === "queued" || job.status === "running" || job.status === "cancelling") lines.push(`cancel: agent kill ${refText}`);
     if (steerable) {
       lines.push(`steer: agent steer ${refText} <text>`);

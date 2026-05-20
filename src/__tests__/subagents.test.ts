@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setImmediate as realSetImmediate } from "node:timers";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { AppConfig } from "../config.js";
 import type { SubagentJob } from "../types.js";
@@ -73,12 +74,14 @@ function makeConfig(rootDir: string, maxConcurrent = 2): AppConfig {
 
 function fakeBackend(kind: "codex_exec" | "codex_app_server", options: { activeTurnId?: string; alive?: boolean } = {}) {
   let resolveFinish!: (finish: ChildAgentFinish) => void;
+  const starts: StartChildAgentInput[] = [];
   const finished = new Promise<ChildAgentFinish>((resolve) => {
     resolveFinish = resolve;
   });
   const backend = {
     kind,
     start: vi.fn(async (input: StartChildAgentInput): Promise<StartedChildAgent> => {
+      starts.push(input);
       input.job.pid = 1234;
       if (options.activeTurnId) {
         input.job.backendThreadId = "thread_1";
@@ -96,8 +99,9 @@ function fakeBackend(kind: "codex_exec" | "codex_app_server", options: { activeT
     interrupt: vi.fn(async () => undefined),
     kill: vi.fn(async () => undefined),
     shutdown: vi.fn(async () => undefined),
+    starts,
     finish: (finish: ChildAgentFinish = { code: 0, signal: null }) => resolveFinish(finish)
-  } satisfies ChildAgentBackend & { finish(finish?: ChildAgentFinish): void };
+  } satisfies ChildAgentBackend & { starts: StartChildAgentInput[]; finish(finish?: ChildAgentFinish): void };
   return backend;
 }
 
@@ -113,6 +117,7 @@ async function flushUntil(predicate: () => boolean, attempts = 50): Promise<void
     if (predicate()) return;
     await vi.advanceTimersByTimeAsync(0);
     await Promise.resolve();
+    await new Promise<void>((resolve) => realSetImmediate(resolve));
   }
   expect(predicate()).toBe(true);
 }
@@ -694,11 +699,13 @@ describe("subagents", () => {
     config.subagents.backend = "codex_app_server";
     config.subagents.statusPingIntervalSec = 1;
     const backend = fakeBackend("codex_app_server", { activeTurnId: "turn_1" });
+    const state = { saveJob: vi.fn().mockResolvedValue(undefined) };
+    const logger = fakeLogger();
     const manager = new SubagentManager(
       config,
       { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") } as never,
-      { saveJob: vi.fn().mockResolvedValue(undefined) } as never,
-      fakeLogger() as never,
+      state as never,
+      logger as never,
       { onReturnToMain: vi.fn(), onSendToUser: vi.fn() },
       { codex_app_server: backend }
     );
@@ -710,7 +717,63 @@ describe("subagents", () => {
     await vi.advanceTimersByTimeAsync(999);
     expect(backend.steer).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
+    await flushUntil(() => manager.listJobs()[0]?.autoPingCount === 1);
     expect(backend.steer).toHaveBeenCalledWith(id, SUBAGENT_STATUS_PING_TEXT);
+    expect(manager.listJobs()[0]).toMatchObject({
+      id,
+      lastAutoPingAt: expect.any(String),
+      autoPingCount: 1
+    });
+    expect(manager.listJobs()[0]?.lastAutoPingError).toBeUndefined();
+    expect(state.saveJob).toHaveBeenLastCalledWith(expect.objectContaining({ id, autoPingCount: 1, lastAutoPingAt: expect.any(String) }));
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ component: "subagents", event: "status_ping_scheduled", jobId: id, intervalMs: 1000 }),
+      expect.any(String)
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ component: "subagents", event: "status_ping_sent", jobId: id, autoPingCount: 1 }),
+      expect.any(String)
+    );
+
+    await vi.advanceTimersByTimeAsync(1000);
+    await flushUntil(() => manager.listJobs()[0]?.autoPingCount === 2);
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ component: "subagents", event: "status_ping_no_response", jobId: id, reason: "next_ping" }),
+      expect.any(String)
+    );
+  });
+
+  test("manager forwards child STATUS updates and persists forwarding telemetry", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
+    tempDirs.push(root);
+    const { SubagentManager } = await import("../subagents.js");
+    const config = makeConfig(root, 1);
+    config.subagents.backend = "codex_app_server";
+    const backend = fakeBackend("codex_app_server", { activeTurnId: "turn_1" });
+    const state = { saveJob: vi.fn().mockResolvedValue(undefined) };
+    const logger = fakeLogger();
+    const onStatus = vi.fn().mockResolvedValue(undefined);
+    const manager = new SubagentManager(
+      config,
+      { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") } as never,
+      state as never,
+      logger as never,
+      { onReturnToMain: vi.fn(), onSendToUser: vi.fn(), onStatus },
+      { codex_app_server: backend }
+    );
+
+    const id = await manager.dispatch({ profile: "x", prompt: "running", route: "return_to_main" });
+    await waitFor(() => backend.start.mock.calls.length === 1);
+    const job = manager.listJobs()[0]!;
+    await backend.starts[0]!.onStatus!(job, "checking repo; tests next");
+
+    expect(onStatus).toHaveBeenCalledWith(expect.objectContaining({ id }), "checking repo; tests next");
+    expect(manager.listJobs()[0]).toMatchObject({ id, lastStatusForwardedAt: expect.any(String) });
+    expect(state.saveJob).toHaveBeenLastCalledWith(expect.objectContaining({ id, lastStatusForwardedAt: expect.any(String) }));
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ component: "subagents", event: "status_forwarded", jobId: id, route: "return_to_main" }),
+      expect.any(String)
+    );
   });
 
   test("cleans automatic status ping intervals when jobs finish or are cancelled", async () => {

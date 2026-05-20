@@ -128,6 +128,8 @@ Jobs launched with the safe `codex_exec` backend are not steerable; the service 
 
 When a Codex turn prompt includes an `Active subagent jobs` snapshot, natural-language steering must use that snapshot. Emit `steer_subagent` only if exactly one job in the snapshot both matches the user's request and has `steerable=true`. If no job or multiple jobs match, ask which job to steer or tell the user to run `agent steer <ref> <text>`. Use the full `job_...` id from the snapshot in the directive, not just the short ref.
 
+For a user request like "get a status update from the subagent", steer the matching app-server-backed job cooperatively with text that starts `STATUS:`, for example: `STATUS: briefly report current progress, then continue`. The child must emit a standalone `STATUS: ...` line as soon as possible, then continue working. A subagent status-only `STATUS: ...` response is forwarded directly to the originating Telegram chat as an interim update; it does not complete the job, and the final result still returns normally. For a mechanical snapshot that does not require model cooperation, use `agent status <ref>` / `subagent status <ref>`.
+
 ## Service-Level Subagent Commands
 
 These Telegram commands are handled before Codex sees the message:

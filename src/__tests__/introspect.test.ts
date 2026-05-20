@@ -5,6 +5,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   parseAgentsCommand,
   parseAgentKillCommand,
+  parseAgentStatusCommand,
   parseAgentSteerCommand,
   parseSubagentBackendCommand,
   parseHelpCommand,
@@ -129,6 +130,18 @@ describe("parseAgentSteerCommand", () => {
   });
 });
 
+describe("parseAgentStatusCommand", () => {
+  test("matches mechanical status commands", () => {
+    expect(parseAgentStatusCommand("agent status abc123")).toEqual({ isStatus: true, jobId: "abc123" });
+    expect(parseAgentStatusCommand("subagent status job_deadbeef")).toEqual({ isStatus: true, jobId: "job_deadbeef" });
+  });
+
+  test("does not match incomplete status commands", () => {
+    expect(parseAgentStatusCommand("agent status")).toEqual({ isStatus: false, jobId: "" });
+    expect(parseAgentStatusCommand("agents")).toEqual({ isStatus: false, jobId: "" });
+  });
+});
+
 describe("parseSubagentBackendCommand", () => {
   test("parses status, recovery, app-server opt-in, and clear commands", () => {
     expect(parseSubagentBackendCommand("agent backend")).toEqual({ isBackend: true, action: "status" });
@@ -171,6 +184,7 @@ describe("HELP_TEXT", () => {
     expect(HELP_TEXT).toContain("introspect");
     expect(HELP_TEXT).toContain("agents");
     expect(HELP_TEXT).toContain("subagents (sub)");
+    expect(HELP_TEXT).toContain("agent status");
     expect(HELP_TEXT).toContain("agent kill");
     expect(HELP_TEXT).toContain("agent steer");
     expect(HELP_TEXT).toContain("agent backend exec");
@@ -207,6 +221,37 @@ describe("dispatch_subagent status", () => {
 
     expect(sendText).toHaveBeenCalledWith(123, "Sub: inspect routing\nresearcher · gpt-5.5 · high", 456);
     expect(dispatchFromDirective).toHaveBeenCalled();
+  });
+
+  test("forwards cooperative subagent STATUS updates to the originating Telegram chat", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    const sendText = vi.fn().mockResolvedValue(undefined);
+    (service as unknown as { telegram: { sendText: typeof sendText } }).telegram.sendText = sendText;
+    const callbacks = (service as unknown as {
+      subagents: { callbacks: { onStatus(job: SubagentJob, message: string): Promise<void> } };
+    }).subagents.callbacks;
+
+    await callbacks.onStatus(
+      {
+        id: "job_abc12345000000000000000000000000",
+        profile: "implementer",
+        route: "return_to_main",
+        status: "running",
+        promptPath: "/tmp/prompt",
+        artifactDir: "/tmp/artifacts",
+        originChatId: 253768951,
+        originMessageId: 44
+      },
+      " checking repo; tests next "
+    );
+
+    expect(sendText).toHaveBeenCalledWith(
+      253768951,
+      "Sub abc12345 (implementer) status: checking repo; tests next",
+      44
+    );
   });
 });
 
@@ -399,6 +444,45 @@ describe("formatJobsDetailed", () => {
     expect(detailed).toContain("1. `aaaaaaaa` — reviewer / default");
     expect(compact).toContain("ref=e98ad78a");
     expect(compact).toContain('cancel="agent kill e98ad78a"');
+  });
+
+  test("formats mechanical status for one subagent ref", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    const now = new Date("2026-04-29T12:00:00.000Z");
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const subagents = (service as unknown as { subagents: SubagentManager }).subagents;
+    subagents.addJobs([
+      {
+        id: "job_feedface000000000000000000000000",
+        profile: "implementer",
+        route: "return_to_main",
+        status: "running",
+        promptPath: "/tmp/p",
+        artifactDir: "/tmp/a",
+        startedAt: new Date(now.getTime() - 12_000).toISOString(),
+        backend: "codex_app_server",
+        activeTurnId: "turn_1",
+        pid: 12345,
+        effort: "high",
+        summary: "fix status steering"
+      }
+    ]);
+
+    const output = service.formatSingleSubagentStatus("feedface");
+
+    expect(output).toContain("Subagent job_feedface000000000000000000000000");
+    expect(output).toContain("status: running");
+    expect(output).toContain("profile: implementer");
+    expect(output).toContain("backend: codex_app_server");
+    expect(output).toContain("steerable: yes");
+    expect(output).toContain("elapsed: 0:12");
+    expect(output).toContain("pid: 12345");
+    expect(output).toContain("summary: fix status steering");
+    expect(output).toContain("cancel: agent kill feedface");
+    expect(output).toContain("steer: agent steer feedface <text>");
   });
 });
 
@@ -623,6 +707,30 @@ describe("service command routing", () => {
 
     expect(steerJob).toHaveBeenCalledWith("abc123", "please stop and summarize");
     expect(sendText).toHaveBeenCalledWith(253768951, "Steered subagent job_abc123 (debugger).", 4);
+    expect(runTurn).not.toHaveBeenCalled();
+  });
+
+  test("'agent status <id>' command is intercepted and bypasses Codex", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+    const formatStatus = vi.spyOn(service, "formatSingleSubagentStatus").mockReturnValue("mechanical status");
+    const runTurn = vi.spyOn(service as unknown as { runTurn(e: unknown): void }, "runTurn");
+
+    await service.enqueueUserEvent({
+      source: "telegram",
+      chatId: 253768951,
+      userId: 253768951,
+      messageId: 4,
+      text: "agent status abc123",
+      attachments: [],
+      receivedAt: new Date().toISOString()
+    });
+
+    expect(formatStatus).toHaveBeenCalledWith("abc123");
+    expect(sendText).toHaveBeenCalledWith(253768951, "mechanical status", 4);
     expect(runTurn).not.toHaveBeenCalled();
   });
 

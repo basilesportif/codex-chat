@@ -33,6 +33,7 @@ export interface StartChildAgentInput {
   effort: string;
   images: string[];
   onJobUpdated(job: SubagentJob): Promise<void>;
+  onStatus?(job: SubagentJob, message: string): Promise<void>;
 }
 
 export interface StartedChildAgent {
@@ -208,6 +209,7 @@ class ChildAppServerSession {
   private threadId = "";
   private activeTurnId = "";
   private accumulated = "";
+  private pendingOutput = "";
   private connected = false;
   private stopping = false;
   private turnCompleted = false;
@@ -339,7 +341,10 @@ class ChildAppServerSession {
       config: this.threadConfig(),
       serviceName: "codex-chat-subagent",
       baseInstructions: "You are a codex-chat child subagent. Follow the task, context, and output contract supplied in the turn.",
-      developerInstructions: "You are a codex-chat child subagent. Return the concise final answer expected by codex-chat.",
+      developerInstructions: [
+        "You are a codex-chat child subagent. Return the concise final answer expected by codex-chat.",
+        "If a steering message asks for STATUS:, emit exactly one brief standalone line starting with `STATUS:` as soon as possible to report current progress, then continue working. Do not treat a STATUS line as the final answer."
+      ].join("\n"),
       ephemeral: true
     });
     const thread = threadResponse.thread as Record<string, unknown> | undefined;
@@ -443,12 +448,13 @@ class ChildAppServerSession {
     if (!message.method || typeof message.params !== "object" || message.params === null) return;
     const params = message.params as Record<string, unknown>;
     if (message.method === "item/agentMessage/delta" && params.turnId === this.activeTurnId && typeof params.delta === "string") {
-      this.accumulated += params.delta;
+      this.handleAgentMessageDelta(params.delta);
     }
     if (message.method === "turn/completed" && typeof params.turn === "object" && params.turn !== null) {
       const turn = params.turn as Record<string, unknown>;
       if (turn.id !== this.activeTurnId) return;
       this.turnCompleted = true;
+      this.flushPendingOutput();
       this.input.job.activeTurnId = undefined;
       const status = typeof turn.status === "string" ? turn.status : "completed";
       const turnError = turn.error && typeof turn.error === "object" ? turn.error as Record<string, unknown> : undefined;
@@ -506,6 +512,39 @@ class ChildAppServerSession {
     this.resolveFinished(finish);
   }
 
+  private handleAgentMessageDelta(delta: string): void {
+    this.pendingOutput += delta;
+    let newlineIndex = this.pendingOutput.search(/\r?\n/);
+    while (newlineIndex >= 0) {
+      const newlineLength = this.pendingOutput[newlineIndex] === "\r" && this.pendingOutput[newlineIndex + 1] === "\n" ? 2 : 1;
+      const lineWithNewline = this.pendingOutput.slice(0, newlineIndex + newlineLength);
+      this.pendingOutput = this.pendingOutput.slice(newlineIndex + newlineLength);
+      this.handleCompleteOutputLine(lineWithNewline);
+      newlineIndex = this.pendingOutput.search(/\r?\n/);
+    }
+  }
+
+  private flushPendingOutput(): void {
+    if (!this.pendingOutput) return;
+    const pending = this.pendingOutput;
+    this.pendingOutput = "";
+    this.handleCompleteOutputLine(pending);
+  }
+
+  private handleCompleteOutputLine(line: string): void {
+    const status = parseSubagentStatusLine(line);
+    if (status) {
+      void this.appendEvent({ event: "status_forwarded", jobId: this.input.job.id, status, at: nowIso() });
+      if (this.input.onStatus) {
+        void this.input.onStatus(this.input.job, status).catch((error) => {
+          this.logger.warn({ component: "subagents", event: "status_callback_failed", jobId: this.input.job.id, error }, "subagent status callback failed");
+        });
+      }
+      return;
+    }
+    this.accumulated += line;
+  }
+
   private async appendEvent(value: unknown): Promise<void> {
     await appendFile(this.input.stdoutPath, `${JSON.stringify(value)}\n`, { mode: 0o600 }).catch((error) => {
       this.logger.error({ component: "subagents", event: "child_event_write_failed", jobId: this.input.job.id, error });
@@ -524,4 +563,13 @@ async function findFreePort(): Promise<number> {
   await new Promise<void>((resolve) => server.close(() => resolve()));
   if (!port) throw new Error("Could not allocate a local app-server child port");
   return port;
+}
+
+export function parseSubagentStatusLine(line: string): string | undefined {
+  const withoutNewline = line.replace(/\r?\n$/, "");
+  const match = withoutNewline.match(/^\s*STATUS:\s*(.+?)\s*$/i);
+  if (!match) return undefined;
+  const compact = (match[1] ?? "").replace(/[\u0000-\u001F\u007F]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!compact) return undefined;
+  return compact.length > 500 ? `${compact.slice(0, 497)}...` : compact;
 }

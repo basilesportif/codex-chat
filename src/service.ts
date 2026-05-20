@@ -137,6 +137,15 @@ export function parseAgentSteerCommand(text: string): { isSteer: boolean; jobId:
   return { isSteer: true, jobId: match[1] as string, text: (match[2] as string).trim() };
 }
 
+/**
+ * Parses "agent status <id>" / "subagent status <id>" commands.
+ */
+export function parseAgentStatusCommand(text: string): { isStatus: boolean; jobId: string } {
+  const match = text.trim().match(/^(?:agents?|subagents?)\s+status\s+(\S+)$/i);
+  if (!match) return { isStatus: false, jobId: "" };
+  return { isStatus: true, jobId: match[1] as string };
+}
+
 export type SubagentBackendCommand =
   | { isBackend: false }
   | { isBackend: true; action: "status" | "set" | "clear"; backend?: SubagentBackendKind };
@@ -174,8 +183,10 @@ export const HELP_TEXT = `Service commands (handled instantly, bypass Codex):
   subagents (sub)   — alias for agents
   agents detail     — active jobs plus last 10 terminal jobs
   agents <N>        — active jobs plus last N terminal jobs
+  agent status <ref> — mechanical subagent status for one job
   agent kill <ref>  — cancel a subagent by full ID, displayed ref, or hex prefix
   agent steer <ref> <text> — steer a running app-server subagent
+  agent steer <ref> STATUS: briefly report current progress, then continue — request an interim Telegram status
   agent backend     — show effective subagent backend
   agent backend exec — recovery: force new/queued subagents back to safe codex_exec
   factors           — list configured durable Factor scaffolds
@@ -254,6 +265,9 @@ export class ServiceSupervisor {
         },
         onSendToUser: async (job: SubagentJob, result: string) => {
           if (job.originChatId) await this.telegram.sendText(job.originChatId, result, job.originMessageId);
+        },
+        onStatus: async (job: SubagentJob, message: string) => {
+          if (job.originChatId) await this.telegram.sendText(job.originChatId, this.formatSubagentStatusText(job, message), job.originMessageId);
         }
       }
     );
@@ -363,6 +377,11 @@ export class ServiceSupervisor {
       const factorCommand = parseFactorCommand(event.text);
       if (factorCommand.isFactor) {
         await this.handleFactorCommandEvent(event, factorCommand);
+        return;
+      }
+      const agentStatus = parseAgentStatusCommand(event.text);
+      if (agentStatus.isStatus) {
+        await this.telegram.sendText(event.chatId, this.formatSingleSubagentStatus(agentStatus.jobId), event.messageId);
         return;
       }
       const agentSteer = parseAgentSteerCommand(event.text);
@@ -597,6 +616,51 @@ export class ServiceSupervisor {
     return job.id.startsWith("job_") ? `job_${this.formatJobCancelRef(job)}` : this.formatJobCancelRef(job);
   }
 
+  formatSingleSubagentStatus(ref: string): string {
+    const resolution = this.subagents.resolveJobRef(ref);
+    if (resolution.status === "not_found") return `No subagent job matched "${ref}". Use "agents" to list usable refs.`;
+    if (resolution.status === "ambiguous") {
+      const candidates = resolution.candidates.slice(0, 8).map((candidate) =>
+        `${candidate.id} ref=${candidate.ref} status=${candidate.status} profile=${candidate.profile}${candidate.summary ? ` summary=${candidate.summary}` : ""}`
+      );
+      return [`Ambiguous subagent ref "${resolution.ref}". Use a longer ref.`, ...candidates].join("\n");
+    }
+
+    const job = resolution.job;
+    const backend = job.backend ?? this.subagents.backendStatus().effective;
+    const refText = this.formatJobCancelRef(job);
+    const elapsedFrom = job.status === "queued"
+      ? job.enqueuedAt
+      : job.status === "cancelling"
+        ? job.cancelRequestedAt ?? job.startedAt ?? job.enqueuedAt
+        : job.startedAt ?? job.enqueuedAt ?? job.completedAt ?? job.abandonedAt;
+    const elapsedMs = elapsedFrom ? Date.now() - new Date(elapsedFrom).getTime() : 0;
+    const elapsed = formatDurationSeconds(Number.isFinite(elapsedMs) ? elapsedMs / 1000 : 0);
+    const steerable = job.status === "running" && backend === "codex_app_server" && Boolean(job.activeTurnId);
+    const lines = [
+      `Subagent ${job.id}`,
+      `ref: ${refText}`,
+      `status: ${job.status}`,
+      `profile: ${job.profile}`,
+      `backend: ${backend}`,
+      `steerable: ${steerable ? "yes" : "no"}`,
+      `elapsed: ${elapsed}`,
+      `pid: ${job.pid ?? "unknown"}`
+    ];
+    if (job.model || job.effort) lines.push(`model/effort: ${job.model ?? "default"} / ${job.effort ?? "default"}`);
+    const summary = this.compactJobText(job.summary);
+    if (summary) lines.push(`summary: ${summary}`);
+    if (job.activeTurnId) lines.push(`activeTurnId: ${job.activeTurnId}`);
+    if (job.backendThreadId) lines.push(`thread: ${job.backendThreadId}`);
+    if (job.lastSteeredAt) lines.push(`lastSteeredAt: ${job.lastSteeredAt} (${job.steerCount ?? 0} steer${job.steerCount === 1 ? "" : "s"})`);
+    if (job.status === "queued" || job.status === "running" || job.status === "cancelling") lines.push(`cancel: agent kill ${refText}`);
+    if (steerable) {
+      lines.push(`steer: agent steer ${refText} <text>`);
+      lines.push(`cooperative status: agent steer ${refText} STATUS: briefly report current progress, then continue`);
+    }
+    return lines.join("\n");
+  }
+
   private formatDispatchSummary(action: DispatchSubagentAction, followupText?: string): string {
     const summary = action.summary ?? action.prompt.split("\n").find((line) => line.trim())?.trim().slice(0, 160) ?? action.profile;
     const model = action.model || this.subagents.resolveModel(action.model);
@@ -819,6 +883,14 @@ export class ServiceSupervisor {
         ? "cancelled"
         : job.status === "timed_out" ? "timed out" : "completed";
     return `Subagent ${job.id} (${job.profile}) ${status}.\n\nResult path: ${job.lastMessagePath ?? "unknown"}\n\n${result}`;
+  }
+
+  private formatSubagentStatusText(job: SubagentJob, message: string): string {
+    const ref = this.formatJobCancelRef(job);
+    const compact = message.replace(/\s+/g, " ").trim();
+    const maxMessageLength = 700;
+    const body = compact.length > maxMessageLength ? `${compact.slice(0, maxMessageLength - 1)}…` : compact;
+    return `Sub ${ref} (${job.profile}) status: ${body}`;
   }
 
   private async deliverSubagentFallbackIfNeeded(event: UserEvent): Promise<void> {

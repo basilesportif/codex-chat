@@ -68,6 +68,23 @@ backend. `agent backend config` clears the runtime override.
 Running jobs are not changed by the backend command. Use `agent kill <ref>` for
 any already-running bad child job, then dispatch again after rollback.
 
+For steerable app-server-backed jobs, you can ask for a cooperative interim
+status without ending the job:
+
+```text
+agent steer <ref> STATUS: briefly report current progress, then continue
+```
+
+If the subagent responds with a status-only `STATUS: ...` line, the service
+forwards a concise Telegram update to the job's originating chat and keeps the
+job running. The final result is still delivered normally when the turn
+completes.
+
+App-server-backed subagents are instructed to emit a standalone `STATUS: ...`
+line as soon as possible when they receive such a steering request, then keep
+working. For a non-cooperative/mechanical snapshot that does not depend on
+model output, use `agent status <ref>`.
+
 ## Durable Factor Scaffold
 
 `[factors]` is a disabled-by-default feature flag for future durable Factors:

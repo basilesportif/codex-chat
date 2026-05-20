@@ -42,6 +42,7 @@ interface DispatchInput {
 interface SubagentCallbacks {
   onReturnToMain(job: SubagentJob, result: string): Promise<void>;
   onSendToUser(job: SubagentJob, result: string): Promise<void>;
+  onStatus?(job: SubagentJob, message: string): Promise<void>;
 }
 
 interface RunningJob {
@@ -553,7 +554,8 @@ export class SubagentManager {
       model,
       effort,
       images: input.images ?? [],
-      onJobUpdated: (updatedJob) => this.state.saveJob(updatedJob)
+      onJobUpdated: (updatedJob) => this.state.saveJob(updatedJob),
+      onStatus: (updatedJob, message) => this.deliverInterimStatus(updatedJob, message)
     });
     const timeout = setTimeout(() => {
       this.logger.warn({ component: "subagents", event: "timeout", jobId: id }, "subagent timed out");
@@ -621,6 +623,15 @@ export class SubagentManager {
       if (job.route === "send_to_user") await this.callbacks.onSendToUser(job, result);
     } catch (error) {
       this.logger.error({ component: "subagents", event: "callback_failed", jobId: job.id, route: job.route, error }, "subagent result delivery failed");
+    }
+  }
+
+  private async deliverInterimStatus(job: SubagentJob, message: string): Promise<void> {
+    if (!message.trim()) return;
+    try {
+      await this.callbacks.onStatus?.(job, message.trim());
+    } catch (error) {
+      this.logger.error({ component: "subagents", event: "status_callback_failed", jobId: job.id, route: job.route, error }, "subagent status delivery failed");
     }
   }
 

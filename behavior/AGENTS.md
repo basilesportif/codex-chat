@@ -247,6 +247,7 @@ Codex turn prompts may include an `Active subagent jobs` snapshot. Use it to han
 - Emit `steer_subagent` only when exactly one steerable job matches the user's request by ref, full id, profile, summary, or other snapshot fields.
 - If no steerable job matches, or if multiple steerable jobs match, ask for clarification or tell the user to run `agent steer <ref> <text>`.
 - Do not guess, and do not try to steer queued, cancelling, terminal, `codex_exec`, or `steerable=false` jobs.
+- For a user request like "ask the subagent for status", steer the matching app-server-backed job with `STATUS: briefly report current progress, then continue`. The child must emit a standalone `STATUS: ...` line as soon as possible, then continue working. A subagent response line that starts `STATUS:` is an interim Telegram update and does not complete the job.
 
 ### Model/effort disclosure and routing
 
@@ -396,7 +397,9 @@ The following commands are intercepted by the service **before** they reach Code
 | `agents <N>` | Active jobs plus last N terminal jobs. |
 | `agent kill <id>` | Cancel a running subagent by its short ID prefix (first 6 chars). |
 | `subagent kill <id>` | Alias for `agent kill`. |
+| `agent status <id>` | Show mechanical status for a subagent without depending on model cooperation. |
 | `agent steer <id> <text>` | Steer a running app-server-backed subagent. |
+| `agent steer <id> STATUS: briefly report current progress, then continue` | Request a cooperative interim status update from a running app-server-backed subagent. |
 | `subagent steer <id> <text>` | Alias for `agent steer`. |
 | `agent backend` | Show configured, runtime override, and effective subagent backend. |
 | `agent backend exec` | Recovery command: force new and queued subagents back to the safe `codex_exec` backend. |

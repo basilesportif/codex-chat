@@ -389,6 +389,124 @@ describe("subagents", () => {
     await expect(readFile(join(root, "last-message.md"), "utf8")).resolves.toBe("ok");
   });
 
+  test("codex_app_server backend forwards STATUS lines without completing the job", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
+    tempDirs.push(root);
+    const children: ReturnType<typeof fakeChild>[] = [];
+    const spawn = vi.fn(() => {
+      const child = fakeChild();
+      child.pid = 99999998;
+      child.kill = vi.fn((signal?: NodeJS.Signals) => {
+        child.killed = true;
+        child.signalCode = signal ?? null;
+        queueMicrotask(() => child.emit("exit", null, signal ?? null));
+        return true;
+      });
+      children.push(child);
+      return child;
+    });
+    vi.doMock("node:child_process", async () => {
+      const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+      return { ...actual, spawn };
+    });
+
+    const sockets: FakeWebSocket[] = [];
+    class FakeWebSocket extends EventEmitter {
+      static OPEN = 1;
+      readyState = 0;
+      readonly sent: unknown[] = [];
+
+      constructor(readonly url: string) {
+        super();
+        sockets.push(this);
+        queueMicrotask(() => {
+          this.readyState = FakeWebSocket.OPEN;
+          this.emit("open");
+        });
+      }
+
+      send(data: string): void {
+        const message = JSON.parse(data) as { id: number; method: string };
+        this.sent.push(message);
+        queueMicrotask(() => {
+          if (message.method === "initialize") {
+            this.emit("message", JSON.stringify({ id: message.id, result: {} }));
+          } else if (message.method === "thread/start") {
+            this.emit("message", JSON.stringify({ id: message.id, result: { thread: { id: "thread_1" } } }));
+          } else if (message.method === "turn/start") {
+            this.emit("message", JSON.stringify({ id: message.id, result: { turn: { id: "turn_1" } } }));
+          }
+        });
+      }
+
+      close(): void {
+        this.readyState = 3;
+        this.emit("close");
+      }
+    }
+    vi.doMock("ws", () => ({ default: FakeWebSocket }));
+
+    const { CodexAppServerChildAgentBackend } = await import("../subagent-backends.js");
+    const config = makeConfig(root, 1);
+    config.subagents.backend = "codex_app_server";
+    const job: SubagentJob = {
+      id: "job_appserver_status",
+      profile: "implementer",
+      route: "return_to_main",
+      status: "running",
+      promptPath: join(root, "prompt.md"),
+      artifactDir: root
+    };
+    const onStatus = vi.fn().mockResolvedValue(undefined);
+    const backend = new CodexAppServerChildAgentBackend(config, fakeLogger() as never);
+    const started = await backend.start({
+      job,
+      assembledPrompt: "hello",
+      lastMessagePath: join(root, "last-message.md"),
+      stdoutPath: join(root, "events.jsonl"),
+      stderrPath: join(root, "stderr.log"),
+      appServerLogPath: join(root, "app-server.log"),
+      model: "gpt-test",
+      effort: "medium",
+      images: [],
+      onJobUpdated: vi.fn().mockResolvedValue(undefined),
+      onStatus
+    });
+
+    let settled: unknown;
+    void started.finished.then((finish) => {
+      settled = finish;
+    });
+
+    sockets[0]!.emit("message", JSON.stringify({
+      method: "item/agentMessage/delta",
+      params: { threadId: "thread_1", turnId: "turn_1", itemId: "msg_1", delta: "STA" }
+    }));
+    await Promise.resolve();
+    expect(onStatus).not.toHaveBeenCalled();
+
+    sockets[0]!.emit("message", JSON.stringify({
+      method: "item/agentMessage/delta",
+      params: { threadId: "thread_1", turnId: "turn_1", itemId: "msg_1", delta: "TUS: checking repo; tests next\n" }
+    }));
+    await waitFor(() => onStatus.mock.calls.length === 1);
+    expect(onStatus).toHaveBeenCalledWith(job, "checking repo; tests next");
+    expect(settled).toBeUndefined();
+    expect(job.status).toBe("running");
+
+    sockets[0]!.emit("message", JSON.stringify({
+      method: "item/agentMessage/delta",
+      params: { threadId: "thread_1", turnId: "turn_1", itemId: "msg_1", delta: "Final result" }
+    }));
+    sockets[0]!.emit("message", JSON.stringify({
+      method: "turn/completed",
+      params: { threadId: "thread_1", turn: { id: "turn_1", status: "completed", error: null } }
+    }));
+
+    await expect(started.finished).resolves.toMatchObject({ code: 0, signal: null });
+    await expect(readFile(join(root, "last-message.md"), "utf8")).resolves.toBe("Final result");
+  });
+
   test("runtime backend rollback forces queued and new jobs back to codex_exec", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
     tempDirs.push(root);

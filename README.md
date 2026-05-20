@@ -79,46 +79,7 @@ backend. `agent backend config` clears the runtime override.
 Running jobs are not changed by the backend command. Use `agent kill <ref>` for
 any already-running bad child job, then dispatch again after rollback.
 
-For steerable app-server-backed jobs, you can ask for a cooperative interim
-status without ending the job:
-
-```text
-agent steer <ref> STATUS: briefly report current progress, then continue
-```
-
-If the subagent responds with a status-only `STATUS: ...` line, the service
-forwards a concise Telegram update to the job's originating chat and keeps the
-job running. The final result is still delivered normally when the turn
-completes.
-
-App-server-backed subagents are instructed to emit a standalone `STATUS: ...`
-line as soon as possible when they receive such a steering request, then keep
-working. For a non-cooperative/mechanical snapshot that does not depend on
-model output, use `agent status <ref>`.
-
-While a job is running and steerable, the service also sends that exact
-cooperative status request automatically when enabled. It is disabled by
-default. The interval is configured with `subagents.statusPingIntervalSec` (`0`
-by default; set a positive number of seconds to enable) and can be overridden
-at runtime by an admin:
-
-```text
-agent ping          # show configured/runtime/effective status ping setting
-agent ping off      # disable automatic pings
-agent ping on       # enable at 3 minutes
-agent ping 5m       # set a runtime interval
-agent ping config   # clear runtime override and use config
-```
-
-`agents` output includes the current automatic status ping setting.
-
-Each job records durable observability fields for automatic pings:
-`lastAutoPingAt`, `autoPingCount`, `lastAutoPingError`, and
-`lastStatusForwardedAt`. `agent status <ref>` shows these fields once present.
-When artifact cleanup is enabled, completed/cancelled/timed-out jobs that used
-or were eligible for automatic status pings keep their artifact directory for a
-short bounded retention window before deletion, so ping/response failures remain
-inspectable. Failed-job artifacts remain retained for postmortem as before.
+Use `agent status <ref>` for a mechanical snapshot of a subagent job. For app-server-backed running jobs, `agent steer <ref> <text>` can still send natural-language steering text to the child.
 
 ## Durable Employees
 

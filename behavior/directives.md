@@ -128,7 +128,7 @@ Jobs launched with the safe `codex_exec` backend are not steerable; the service 
 
 When a Codex turn prompt includes an `Active subagent jobs` snapshot, natural-language steering must use that snapshot. Emit `steer_subagent` only if exactly one non-Employee child job in the snapshot both matches the user's request and has `steerable=true`. If a matching job has `owner=employee:<id>`, steer the owning Employee with `employee steer <id> <text>` unless Tim explicitly asks to control that exact nested child. If no job or multiple jobs match, ask which job to steer or tell the user to run `agent steer <ref> <text>`. Use the full `job_...` id from the snapshot in the directive, not just the short ref.
 
-For a natural-language status request like "how's the implementer doing?" or "get a status update from the subagent", if exactly one running steerable non-Employee child job matches from the snapshot, emit `steer_subagent` with text `STATUS: briefly report current progress, then continue` instead of writing a manual explanatory status report. The child must emit a standalone `STATUS: ...` line as soon as possible, then continue working. A subagent status-only `STATUS: ...` response is forwarded directly to the originating Telegram chat as an interim update; it does not complete the job, and the final result still returns normally. If Tim explicitly asks for mechanical status, or if zero/multiple jobs match, ask for clarification or tell Tim to use `agent status <ref>` / `subagent status <ref>`.
+For subagent status requests, ask which job if ambiguous, then tell Tim to use `agent status <ref>` / `subagent status <ref>` for a mechanical snapshot. Do not steer STATUS requests into child jobs as normal behavior.
 
 ## Service-Level Subagent Commands
 
@@ -146,5 +146,3 @@ These Telegram commands are handled before Codex sees the message:
 | `agent backend exec` | Recovery command: force new and queued subagents back to the safe `codex_exec` backend. |
 | `agent backend app-server` | Opt in new and queued subagents to the app-server child backend. |
 | `agent backend config` | Clear the runtime override and use the configured backend. |
-| `agent ping` | Show automatic cooperative status ping setting for steerable app-server subagents. |
-| `agent ping off` / `agent ping on` / `agent ping 3m` / `agent ping config` | Admin-only runtime override for automatic status pings; default is disabled; `agent ping on` uses 3 minutes. |

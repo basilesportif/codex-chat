@@ -9,7 +9,6 @@ const sandboxSchema = z.enum(["read-only", "workspace-write", "danger-full-acces
 const approvalSchema = z.enum(["untrusted", "on-failure", "on-request", "never"]);
 const telegramUserIdSchema = z.union([z.number().int(), z.string().min(1)]);
 const subagentBackendSchema = z.enum(["codex_exec", "codex_app_server"]);
-const DEFAULT_SUBAGENT_STATUS_PING_INTERVAL_SEC = 0;
 const employeeStartupSchema = z.enum(["on_demand", "always"]);
 const employeeIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$/, "Employee IDs may contain only letters, numbers, dot, underscore, and dash");
 
@@ -127,7 +126,6 @@ const configSchema = z.object({
     childSocketDir: z.string().default("data/run/subagents"),
     childStartupTimeoutSec: z.number().int().positive().default(60),
     childInterruptGraceMs: z.number().int().positive().default(5000),
-    statusPingIntervalSec: z.number().int().nonnegative().default(DEFAULT_SUBAGENT_STATUS_PING_INTERVAL_SEC),
     allowedProfiles: z.array(z.string()).default([]),
     cleanupArtifacts: z.boolean().default(true)
   }),
@@ -237,7 +235,6 @@ const defaultConfig = configSchema.parse({
     childSocketDir: "data/run/subagents",
     childStartupTimeoutSec: 60,
     childInterruptGraceMs: 5000,
-    statusPingIntervalSec: DEFAULT_SUBAGENT_STATUS_PING_INTERVAL_SEC,
     allowedProfiles: [],
     cleanupArtifacts: true
   },
@@ -389,7 +386,6 @@ function collectEnvOverrides(env: NodeJS.ProcessEnv = process.env): Record<strin
     { name: "CODEX_CHAT_CODEX_SANDBOX", path: ["codex", "sandbox"] },
     { name: "CODEX_CHAT_CODEX_APPROVAL_POLICY", path: ["codex", "approvalPolicy"] },
     { name: "CODEX_CHAT_SUBAGENTS_BACKEND", path: ["subagents", "backend"] },
-    { name: "CODEX_CHAT_SUBAGENTS_STATUS_PING_INTERVAL_SEC", path: ["subagents", "statusPingIntervalSec"], parse: (value) => parseInt(value, 10) },
     { name: "CODEX_CHAT_TELEGRAM_MODE", path: ["telegram", "mode"] },
     { name: "CODEX_CHAT_LOOPS_PATH", path: ["loops", "path"] },
     { name: "CODEX_CHAT_MONITORS_PATH", path: ["monitors", "path"] },

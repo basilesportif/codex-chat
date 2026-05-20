@@ -65,11 +65,6 @@ artifactDir = "data/subagents"
 childSocketDir = "data/run/subagents"
 childStartupTimeoutSec = 60
 childInterruptGraceMs = 5000
-# Automatic cooperative STATUS pings for running, steerable app-server-backed
-# subagents. Disabled by default. Set a positive number of seconds to enable. Admin
-# Telegram commands can override at runtime: `agent ping`, `agent ping on`,
-# `agent ping off`, `agent ping 3m`.
-statusPingIntervalSec = 0
 allowedProfiles = []
 cleanupArtifacts = true
 

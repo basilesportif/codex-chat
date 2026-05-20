@@ -16,10 +16,6 @@ import {
 import { ensureDir, makeId, nowIso, pathExists } from "./util.js";
 
 const SIGKILL_GRACE_MS = 5_000;
-export const DEFAULT_SUBAGENT_STATUS_PING_INTERVAL_SEC = 0;
-export const SUBAGENT_STATUS_PING_ON_INTERVAL_SEC = 3 * 60;
-export const SUBAGENT_STATUS_PING_TEXT = "STATUS: briefly report current progress, then continue";
-export const STATUS_PING_ARTIFACT_RETENTION_MS = 30 * 60 * 1000;
 const MAX_QUEUE_DEPTH = 200;
 const REMOTE_REPO_AUTHORITY_RULES = [
   "Remote repo authority:",
@@ -53,7 +49,6 @@ interface SubagentCallbacks {
   onSendToUser(job: SubagentJob, result: string): Promise<void>;
   onReturnToEmployee?(job: SubagentJob, result: string): Promise<void>;
   onSendToAdmins?(job: SubagentJob, result: string): Promise<void>;
-  onStatus?(job: SubagentJob, message: string): Promise<void>;
 }
 
 interface RunningJob {
@@ -62,8 +57,6 @@ interface RunningJob {
   backend: ChildAgentBackend;
   timeout: NodeJS.Timeout;
   killTimer?: NodeJS.Timeout;
-  statusPingInterval?: NodeJS.Timeout;
-  lastAutoPingNoResponseLoggedAt?: string;
 }
 
 export interface JobRefCandidate {
@@ -120,12 +113,6 @@ export interface SubagentBackendStatus {
   effective: SubagentBackendKind;
 }
 
-export interface SubagentStatusPingStatus {
-  configuredIntervalSec: number;
-  overrideIntervalSec?: number;
-  effectiveIntervalSec: number;
-  enabled: boolean;
-}
 
 export interface ActiveSubagentJobSnapshot {
   ref: string;
@@ -168,7 +155,6 @@ export class SubagentManager {
   private jobs = new Map<string, SubagentJob>();
   private readonly backends: Record<SubagentBackendKind, ChildAgentBackend>;
   private backendOverride?: SubagentBackendKind;
-  private statusPingIntervalSecOverride?: number;
   /**
    * Serializes drain() so two concurrent dispatch() calls cannot both
    * observe `running.size < maxConcurrent` and start jobs in parallel,
@@ -324,8 +310,6 @@ export class SubagentManager {
   async loadRuntimeBackendOverride(): Promise<SubagentBackendStatus> {
     const getter = (this.state as StateStore & { getSubagentBackendOverride?: () => Promise<SubagentBackendKind | undefined> }).getSubagentBackendOverride;
     this.backendOverride = getter ? await getter.call(this.state) : undefined;
-    const pingGetter = (this.state as StateStore & { getSubagentStatusPingIntervalSecOverride?: () => Promise<number | undefined> }).getSubagentStatusPingIntervalSecOverride;
-    this.statusPingIntervalSecOverride = pingGetter ? await pingGetter.call(this.state) : undefined;
     return this.backendStatus();
   }
 
@@ -357,32 +341,6 @@ export class SubagentManager {
     return this.backendStatus();
   }
 
-  statusPingStatus(): SubagentStatusPingStatus {
-    const configuredIntervalSec = this.configuredStatusPingIntervalSec();
-    const effectiveIntervalSec = this.statusPingIntervalSecOverride ?? configuredIntervalSec;
-    return {
-      configuredIntervalSec,
-      overrideIntervalSec: this.statusPingIntervalSecOverride,
-      effectiveIntervalSec,
-      enabled: effectiveIntervalSec > 0
-    };
-  }
-
-  async setStatusPingIntervalOverride(intervalSec: number | undefined, updatedBy?: string): Promise<SubagentStatusPingStatus> {
-    if (intervalSec !== undefined && (!Number.isInteger(intervalSec) || intervalSec < 0)) {
-      throw new Error("Subagent status ping interval must be a non-negative whole number of seconds.");
-    }
-    this.statusPingIntervalSecOverride = intervalSec;
-    const setter = (this.state as StateStore & { setSubagentStatusPingIntervalSecOverride?: (value: number | undefined, updatedBy?: string) => Promise<void> }).setSubagentStatusPingIntervalSecOverride;
-    if (setter) await setter.call(this.state, intervalSec, updatedBy);
-    this.rescheduleStatusPingIntervals();
-    const status = this.statusPingStatus();
-    this.logger.warn(
-      { component: "subagents", event: "status_ping_override_set", configuredIntervalSec: status.configuredIntervalSec, overrideIntervalSec: status.overrideIntervalSec, effectiveIntervalSec: status.effectiveIntervalSec, updatedBy },
-      "subagent automatic status ping setting updated"
-    );
-    return status;
-  }
 
   resolveJobRef(ref: string): JobRefResolution {
     const normalized = this.normalizeJobRef(ref);
@@ -483,7 +441,6 @@ export class SubagentManager {
     }
 
     clearTimeout(running.timeout);
-    this.clearStatusPingInterval(job.id);
     job.status = "cancelling";
     job.cancelRequestedAt = nowIso();
     job.cancelReason = reason;
@@ -675,15 +632,13 @@ export class SubagentManager {
       model,
       effort,
       images: input.images ?? [],
-      onJobUpdated: (updatedJob) => this.state.saveJob(updatedJob),
-      onStatus: (updatedJob, message) => this.deliverInterimStatus(updatedJob, message)
+      onJobUpdated: (updatedJob) => this.state.saveJob(updatedJob)
     });
     const timeout = setTimeout(() => {
       this.logger.warn({ component: "subagents", event: "timeout", jobId: id }, "subagent timed out");
       void this.requestCancel(id, { reason: "timeout" });
     }, timeoutSec * 1000);
     this.running.set(id, { job, child, backend, timeout });
-    this.scheduleStatusPingInterval(id);
     void child.finished.then((finish) => this.finishJob(id, finish));
     if (job.pid || job.activeTurnId || job.backendThreadId) void this.state.saveJob(job);
   }
@@ -694,8 +649,6 @@ export class SubagentManager {
     this.running.delete(jobId);
     clearTimeout(running.timeout);
     if (running.killTimer) clearTimeout(running.killTimer);
-    this.logUnansweredAutoPing(running, "finish");
-    this.clearStatusPingInterval(jobId, running);
     const job = running.job;
     if (job.status === "cancelling") job.status = job.cancelReason === "timeout" ? "timed_out" : "cancelled";
     else job.status = finish.code === 0 && !finish.error ? "completed" : "failed";
@@ -750,10 +703,7 @@ export class SubagentManager {
   private scheduleArtifactCleanup(job: SubagentJob): void {
     // Clean up artifact directories for completed/cancelled/timed_out jobs
     // that delivered successfully. Failed-job artifacts are still retained
-    // indefinitely for postmortem. When automatic cooperative STATUS pings
-    // are enabled (or actually ran), completed artifacts are retained briefly
-    // so ping/response failures remain inspectable; the TTL keeps cleanup
-    // bounded while this observability feature settles.
+    // indefinitely for postmortem.
     if (!this.config.subagents.cleanupArtifacts) {
       this.logger.info({ component: "subagents", event: "artifact_cleanup_skipped", jobId: job.id, reason: "disabled" }, "subagent artifact cleanup disabled");
       return;
@@ -767,20 +717,6 @@ export class SubagentManager {
       this.logger.info({ component: "subagents", event: "artifact_cleanup_skipped", jobId: job.id, reason: "missing_artifact_dir" }, "subagent artifact cleanup skipped");
       return;
     }
-    const hasStatusPingTelemetry = (job.autoPingCount ?? 0) > 0 || Boolean(job.lastStatusForwardedAt);
-    const statusPingsEnabledForJob = this.normalizeBackend(job.backend ?? this.effectiveBackend()) === "codex_app_server" && this.statusPingStatus().enabled;
-    const delayMs = hasStatusPingTelemetry || statusPingsEnabledForJob ? STATUS_PING_ARTIFACT_RETENTION_MS : 0;
-    if (delayMs > 0) {
-      this.logger.info(
-        { component: "subagents", event: "artifact_cleanup_scheduled", jobId: job.id, artifactDir, delayMs, reason: "status_ping_observability" },
-        "retaining subagent artifacts briefly for status ping observability"
-      );
-      const timer = setTimeout(() => {
-        void this.removeArtifactDir(job.id, artifactDir, "status_ping_retention_ttl");
-      }, delayMs);
-      timer.unref?.();
-      return;
-    }
     void this.removeArtifactDir(job.id, artifactDir, "immediate");
   }
 
@@ -790,23 +726,6 @@ export class SubagentManager {
       this.logger.info({ component: "subagents", event: "artifact_cleanup_completed", jobId, artifactDir, reason }, "subagent artifact cleanup completed");
     } catch (error) {
       this.logger.warn({ component: "subagents", event: "artifact_cleanup_failed", jobId, artifactDir, reason, error }, "subagent artifact cleanup failed");
-    }
-  }
-
-  private async deliverInterimStatus(job: SubagentJob, message: string): Promise<void> {
-    const trimmed = message.trim();
-    if (!trimmed) return;
-    if (!this.callbacks.onStatus) {
-      this.logger.info({ component: "subagents", event: "status_forwarded_no_callback", jobId: job.id, route: job.route }, "subagent status had no delivery callback");
-      return;
-    }
-    try {
-      await this.callbacks.onStatus(job, trimmed);
-      job.lastStatusForwardedAt = nowIso();
-      await this.state.saveJob(job);
-      this.logger.info({ component: "subagents", event: "status_forwarded", jobId: job.id, route: job.route }, "forwarded subagent status update");
-    } catch (error) {
-      this.logger.error({ component: "subagents", event: "status_callback_failed", jobId: job.id, route: job.route, error }, "subagent status delivery failed");
     }
   }
 
@@ -847,76 +766,6 @@ export class SubagentManager {
     return this.running.get(job.id)?.child.isAlive() === true;
   }
 
-  private scheduleStatusPingInterval(jobId: string): void {
-    const running = this.running.get(jobId);
-    if (!running || running.statusPingInterval) return;
-    if (!this.isJobCurrentlySteerable(running.job)) return;
-    const intervalSec = this.statusPingStatus().effectiveIntervalSec;
-    if (intervalSec <= 0) return;
-    const intervalMs = intervalSec * 1000;
-
-    const interval = setInterval(() => {
-      void this.requestCooperativeStatus(jobId);
-    }, intervalMs);
-    interval.unref?.();
-    running.statusPingInterval = interval;
-    this.logger.info(
-      { component: "subagents", event: "status_ping_scheduled", jobId, intervalMs },
-      "scheduled automatic subagent status ping"
-    );
-  }
-
-  private rescheduleStatusPingIntervals(): void {
-    for (const [jobId, running] of this.running) {
-      this.clearStatusPingInterval(jobId, running);
-      this.scheduleStatusPingInterval(jobId);
-    }
-  }
-
-  private clearStatusPingInterval(jobId: string, running = this.running.get(jobId)): void {
-    if (!running?.statusPingInterval) return;
-    clearInterval(running.statusPingInterval);
-    running.statusPingInterval = undefined;
-    this.logger.info({ component: "subagents", event: "status_ping_cleared", jobId }, "cleared automatic subagent status ping");
-  }
-
-  private async requestCooperativeStatus(jobId: string): Promise<void> {
-    const running = this.running.get(jobId);
-    if (!running) return;
-    const job = running.job;
-    if (!this.isJobCurrentlySteerable(job)) {
-      this.logUnansweredAutoPing(running, "not_steerable");
-      this.clearStatusPingInterval(jobId, running);
-      return;
-    }
-    this.logUnansweredAutoPing(running, "next_ping");
-    try {
-      await running.backend.steer(jobId, SUBAGENT_STATUS_PING_TEXT);
-      job.lastAutoPingAt = nowIso();
-      job.autoPingCount = (job.autoPingCount ?? 0) + 1;
-      job.lastAutoPingError = undefined;
-      await this.state.saveJob(job);
-      this.logger.info({ component: "subagents", event: "status_ping_sent", jobId, autoPingCount: job.autoPingCount }, "requested automatic subagent status");
-    } catch (error) {
-      job.lastAutoPingError = error instanceof Error ? error.message : String(error);
-      await this.state.saveJob(job);
-      this.logger.warn({ component: "subagents", event: "status_ping_failed", jobId, error }, "automatic subagent status ping failed");
-      if (!this.isJobCurrentlySteerable(job)) this.clearStatusPingInterval(jobId, running);
-    }
-  }
-
-  private logUnansweredAutoPing(running: RunningJob, reason: string): void {
-    const { job } = running;
-    const lastPing = job.lastAutoPingAt;
-    if (!lastPing) return;
-    if (job.lastStatusForwardedAt && job.lastStatusForwardedAt >= lastPing) return;
-    if (running.lastAutoPingNoResponseLoggedAt === lastPing) return;
-    running.lastAutoPingNoResponseLoggedAt = lastPing;
-    this.logger.info(
-      { component: "subagents", event: "status_ping_no_response", jobId: job.id, lastAutoPingAt: lastPing, lastStatusForwardedAt: job.lastStatusForwardedAt, reason },
-      "automatic subagent status ping has not produced a forwarded STATUS response"
-    );
-  }
 
   private normalizeJobRef(ref: string): string {
     return ref.trim().replace(/^[[(<]+/, "").replace(/[\])>.,;:]+$/, "");
@@ -956,12 +805,6 @@ export class SubagentManager {
 
   private configuredBackend(): SubagentBackendKind {
     return this.normalizeBackend(this.config.subagents.backend);
-  }
-
-  private configuredStatusPingIntervalSec(): number {
-    const value = (this.config.subagents as AppConfig["subagents"] & { statusPingIntervalSec?: number }).statusPingIntervalSec;
-    if (Number.isInteger(value) && value >= 0) return value;
-    return DEFAULT_SUBAGENT_STATUS_PING_INTERVAL_SEC;
   }
 
   private effectiveBackend(): SubagentBackendKind {

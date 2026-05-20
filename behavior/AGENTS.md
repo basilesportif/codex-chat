@@ -250,8 +250,7 @@ Codex turn prompts may include an `Active subagent jobs` snapshot. Use it to han
 - If a matching job has `owner=employee:<id>`, steer the owning Employee with `employee steer <id> <text>` unless Tim explicitly asks to control that exact nested child job.
 - If no steerable job matches, or if multiple steerable jobs match, ask for clarification or tell the user to run `agent steer <ref> <text>`.
 - Do not guess, and do not try to steer queued, cancelling, terminal, `codex_exec`, or `steerable=false` jobs.
-- For a natural-language status request like "how's the implementer doing?" or "ask the subagent for status", if exactly one running steerable non-Employee child job matches from the snapshot, emit `steer_subagent` with text `STATUS: briefly report current progress, then continue` instead of writing a manual explanatory status report. The child must emit a standalone `STATUS: ...` line as soon as possible, then continue working. A subagent response line that starts `STATUS:` is an interim Telegram update and does not complete the job.
-- If Tim explicitly asks for mechanical status, or if a natural-language status request has zero or multiple matching jobs, ask for clarification or tell Tim to use `agent status <ref>` / `subagent status <ref>`.
+- For subagent status requests, ask which job if ambiguous, then tell Tim to use `agent status <ref>` / `subagent status <ref>` for a mechanical snapshot. Do not steer STATUS requests into child jobs as normal behavior.
 
 ### Model/effort disclosure and routing
 
@@ -403,14 +402,11 @@ The following commands are intercepted by the service **before** they reach Code
 | `subagent kill <id>` | Alias for `agent kill`. |
 | `agent status <id>` | Show mechanical status for a subagent without depending on model cooperation. |
 | `agent steer <id> <text>` | Steer a running app-server-backed subagent. |
-| `agent steer <id> STATUS: briefly report current progress, then continue` | Request a cooperative interim status update from a running app-server-backed subagent. |
 | `subagent steer <id> <text>` | Alias for `agent steer`. |
 | `agent backend` | Show configured, runtime override, and effective subagent backend. |
 | `agent backend exec` | Recovery command: force new and queued subagents back to the safe `codex_exec` backend. |
 | `agent backend app-server` | Opt in new and queued subagents to the app-server child backend. |
 | `agent backend config` | Clear the runtime override and use the configured backend. |
-| `agent ping` | Show automatic cooperative status ping setting for steerable app-server subagents. |
-| `agent ping off` / `agent ping on` / `agent ping 3m` / `agent ping config` | Admin-only runtime override for automatic status pings; default is disabled; `agent ping on` uses 3 minutes. |
 | `help` | List all service-level commands. |
 | `update` / `deploy` | Pull latest and restart the service. |
 

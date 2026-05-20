@@ -184,14 +184,6 @@ export interface SubagentJob {
   interruptRequestedAt?: string;
   lastSteeredAt?: string;
   steerCount?: number;
-  /** Last successful automatic cooperative STATUS ping send time. */
-  lastAutoPingAt?: string;
-  /** Number of automatic cooperative STATUS pings sent successfully. */
-  autoPingCount?: number;
-  /** Last automatic cooperative STATUS ping send failure, if any. */
-  lastAutoPingError?: string;
-  /** Last time a child-emitted STATUS line was forwarded to the service callback. */
-  lastStatusForwardedAt?: string;
 }
 
 export type EmployeeStatus = "disabled" | "idle" | "proposal_pending" | "running" | "stopped" | "error";

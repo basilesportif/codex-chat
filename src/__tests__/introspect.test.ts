@@ -8,7 +8,6 @@ import {
   parseAgentStatusCommand,
   parseAgentSteerCommand,
   parseSubagentBackendCommand,
-  parseSubagentStatusPingCommand,
   parseHelpCommand,
   HELP_TEXT,
   ServiceSupervisor,
@@ -152,23 +151,6 @@ describe("parseSubagentBackendCommand", () => {
   });
 });
 
-describe("parseSubagentStatusPingCommand", () => {
-  test("parses status, enable/disable, clear, and interval commands", () => {
-    expect(parseSubagentStatusPingCommand("agent ping")).toEqual({ isStatusPing: true, action: "status" });
-    expect(parseSubagentStatusPingCommand("subagent status-ping off")).toEqual({ isStatusPing: true, action: "set", intervalSec: 0 });
-    expect(parseSubagentStatusPingCommand("agents ping on")).toEqual({ isStatusPing: true, action: "set", intervalSec: 180 });
-    expect(parseSubagentStatusPingCommand("agent ping config")).toEqual({ isStatusPing: true, action: "clear" });
-    expect(parseSubagentStatusPingCommand("agent ping 5m")).toEqual({ isStatusPing: true, action: "set", intervalSec: 300 });
-    expect(parseSubagentStatusPingCommand("agent ping 90s")).toEqual({ isStatusPing: true, action: "set", intervalSec: 90 });
-    expect(parseSubagentStatusPingCommand("agent ping 3")).toEqual({ isStatusPing: true, action: "set", intervalSec: 180 });
-  });
-
-  test("does not match unrelated ping text", () => {
-    expect(parseSubagentStatusPingCommand("ping agents")).toEqual({ isStatusPing: false });
-    expect(parseSubagentStatusPingCommand("agent ping soon")).toEqual({ isStatusPing: false });
-  });
-});
-
 // ---------------------------------------------------------------------------
 // parseHelpCommand
 // ---------------------------------------------------------------------------
@@ -205,7 +187,6 @@ describe("HELP_TEXT", () => {
     expect(HELP_TEXT).toContain("agent status");
     expect(HELP_TEXT).toContain("agent kill");
     expect(HELP_TEXT).toContain("agent steer");
-    expect(HELP_TEXT).toContain("agent ping");
     expect(HELP_TEXT).toContain("agent backend exec");
     expect(HELP_TEXT).toContain("help");
     expect(HELP_TEXT).toContain("update");
@@ -242,36 +223,6 @@ describe("dispatch_subagent status", () => {
     expect(dispatchFromDirective).toHaveBeenCalled();
   });
 
-  test("forwards cooperative subagent STATUS updates to the originating Telegram chat", async () => {
-    const config = await loadTestConfig();
-    const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
-    const sendText = vi.fn().mockResolvedValue(undefined);
-    (service as unknown as { telegram: { sendText: typeof sendText } }).telegram.sendText = sendText;
-    const callbacks = (service as unknown as {
-      subagents: { callbacks: { onStatus(job: SubagentJob, message: string): Promise<void> } };
-    }).subagents.callbacks;
-
-    await callbacks.onStatus(
-      {
-        id: "job_abc12345000000000000000000000000",
-        profile: "implementer",
-        route: "return_to_main",
-        status: "running",
-        promptPath: "/tmp/prompt",
-        artifactDir: "/tmp/artifacts",
-        originChatId: 253768951,
-        originMessageId: 44
-      },
-      " checking repo; tests next "
-    );
-
-    expect(sendText).toHaveBeenCalledWith(
-      253768951,
-      "Sub abc12345 (implementer) status: checking repo; tests next",
-      44
-    );
-  });
 });
 
 describe("cancel_job directive", () => {
@@ -807,53 +758,6 @@ describe("service command routing", () => {
     expect(runTurn).not.toHaveBeenCalled();
   });
 
-  test("'agent ping' shows automatic status ping setting and agents output includes it", async () => {
-    const config = await loadTestConfig();
-    const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
-    await service.state.init();
-    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
-    const runTurn = vi.spyOn(service as unknown as { runTurn(e: unknown): void }, "runTurn");
-
-    await service.enqueueUserEvent({
-      source: "telegram",
-      chatId: 253768951,
-      userId: 253768951,
-      messageId: 6,
-      text: "agent ping",
-      attachments: [],
-      receivedAt: new Date().toISOString()
-    });
-
-    expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("Subagent auto status ping: disabled"), 6);
-    expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("effective interval: disabled"), 6);
-    expect(runTurn).not.toHaveBeenCalled();
-    expect(service.formatJobsDetailed()).toContain("Auto status ping: disabled");
-  });
-
-  test("'agent ping off' is admin-only and updates runtime status ping setting", async () => {
-    const config = await loadTestConfig();
-    config.telegram.allowlist.adminUserIds = [253768951];
-    const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
-    await service.state.init();
-    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
-    const runTurn = vi.spyOn(service as unknown as { runTurn(e: unknown): void }, "runTurn");
-
-    await service.enqueueUserEvent({
-      source: "telegram",
-      chatId: 253768951,
-      userId: 253768951,
-      messageId: 7,
-      text: "agent ping off",
-      attachments: [],
-      receivedAt: new Date().toISOString()
-    });
-
-    expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("Subagent auto status ping: disabled"), 7);
-    expect((service as unknown as { subagents: SubagentManager }).subagents.statusPingStatus()).toMatchObject({ enabled: false, effectiveIntervalSec: 0, overrideIntervalSec: 0 });
-    expect(runTurn).not.toHaveBeenCalled();
-  });
 
   test("cancelJob resolves prefixes and reports ambiguous, unknown, and terminal refs", async () => {
     const config = await loadTestConfig();

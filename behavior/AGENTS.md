@@ -244,7 +244,8 @@ When a `source=subagent` callback includes Telegram origin chat/message metadata
 Codex turn prompts may include an `Active subagent jobs` snapshot. Use it to handle natural-language steering requests such as "tell the implementer to focus on tests":
 
 - Only jobs with `steerable=true` can receive a `steer_subagent` directive.
-- Emit `steer_subagent` only when exactly one steerable job matches the user's request by ref, full id, profile, summary, or other snapshot fields.
+- Emit `steer_subagent` only when exactly one steerable non-Employee child job matches the user's request by ref, full id, profile, summary, or other snapshot fields.
+- If a matching job has `owner=employee:<id>`, steer the owning Employee with `employee steer <id> <text>` unless Tim explicitly asks to control that exact nested child job.
 - If no steerable job matches, or if multiple steerable jobs match, ask for clarification or tell the user to run `agent steer <ref> <text>`.
 - Do not guess, and do not try to steer queued, cancelling, terminal, `codex_exec`, or `steerable=false` jobs.
 - For a user request like "ask the subagent for status", steer the matching app-server-backed job with `STATUS: briefly report current progress, then continue`. The child must emit a standalone `STATUS: ...` line as soon as possible, then continue working. A subagent response line that starts `STATUS:` is an interim Telegram update and does not complete the job.

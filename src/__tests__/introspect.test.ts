@@ -446,6 +446,36 @@ describe("formatJobsDetailed", () => {
     expect(compact).toContain('cancel="agent kill e98ad78a"');
   });
 
+  test("agents detail output includes subagent owner and result metadata", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    const jobs: SubagentJob[] = [
+      {
+        id: "job_employee11110000000000000000000000",
+        profile: "researcher",
+        route: "return_to_main",
+        ownerType: "employee",
+        ownerId: "email-calendar",
+        ownerRequestId: "req-77",
+        parentTurnId: "turn-77",
+        resultTarget: "employee",
+        status: "queued",
+        promptPath: "/tmp/p",
+        artifactDir: "/tmp/a",
+        enqueuedAt: new Date().toISOString(),
+        summary: "employee child research"
+      }
+    ];
+    (service as unknown as { subagents: { listJobs(): SubagentJob[] } }).subagents.listJobs = () => jobs;
+
+    const detailed = (service as unknown as { formatJobsDetailed(n: number): string }).formatJobsDetailed(0);
+    const compact = service.formatJobs();
+
+    expect(detailed).toContain("owner: employee:email-calendar request: req-77 parentTurn: turn-77 result: employee");
+    expect(compact).toContain("owner=employee:email-calendar result=employee request=req-77 parentTurn=turn-77");
+  });
+
   test("formats mechanical status for one subagent ref", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");

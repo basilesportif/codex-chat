@@ -15,7 +15,7 @@ import {
   waitForTurnDrain
 } from "./deploy.js";
 import { DirectiveAction, parseDirectives } from "./directives.js";
-import { FactorManager, parseFactorCommand, type FactorCommand } from "./factors.js";
+import { EmployeeManager, parseEmployeeCommand, type EmployeeCommand } from "./employees.js";
 import { FileStore } from "./file-store.js";
 import { CodexHeartbeat } from "./heartbeat.js";
 import { LocalIpcServer } from "./ipc.js";
@@ -25,7 +25,7 @@ import { StateStore } from "./state.js";
 import { SubagentManager, type ActiveSubagentJobSnapshot, type CancelJobResult, type SteerJobResult, type SubagentBackendStatus } from "./subagents.js";
 import { DisabledTranscriber, OpenAITranscriber, Transcriber } from "./transcription.js";
 import { isTelegramAdmin, TelegramGateway } from "./telegram.js";
-import { CodexClient, StoredAction, SubagentBackendKind, SubagentJob, UserEvent } from "./types.js";
+import { CodexClient, StoredAction, SubagentBackendKind, SubagentJob, SubagentOwnerType, SubagentResultTarget, UserEvent } from "./types.js";
 import { makeId, nowIso } from "./util.js";
 
 export const INJECT_TELEGRAM_USER_ID = 253768951;
@@ -189,11 +189,11 @@ export const HELP_TEXT = `Service commands (handled instantly, bypass Codex):
   agent steer <ref> STATUS: briefly report current progress, then continue — request an interim Telegram status
   agent backend     — show effective subagent backend
   agent backend exec — recovery: force new/queued subagents back to safe codex_exec
-  factors           — list configured durable Factors
-  factor status <id> — show Factor runtime/scaffold status
-  factor start <id> — start/resume a minimal durable Factor runtime when enabled
-  factor stop <id>  — stop Factor runtime management; saved thread remains resumable
-  factor steer <id> <text> — send a query/steering turn to a running Factor when enabled
+  employees           — list configured durable Employees
+  employee status <id> — show Employee runtime/scaffold status
+  employee start <id> — start/resume a minimal durable Employee runtime when enabled
+  employee stop <id>  — stop Employee runtime management; saved thread remains resumable
+  employee steer <id> <text> — send a query/steering turn to a running Employee when enabled
   help              — this message
   update / deploy   — pull latest and restart service`;
 
@@ -209,7 +209,7 @@ export class ServiceSupervisor {
   private readonly heartbeat: CodexHeartbeat;
   private readonly ipc: LocalIpcServer;
   private readonly subagents: SubagentManager;
-  private readonly factors: FactorManager;
+  private readonly employees: EmployeeManager;
   private messageQueue = new Map<string, QueuedEvent[]>();
   private turnRunning = false;
   /** Wall-clock time the currently-running turn started; cleared in runTurn's finally. */
@@ -247,7 +247,7 @@ export class ServiceSupervisor {
         this.logger.error({ component: "service", event: "restart_failed", error }, "Codex restart failed");
       });
     });
-    this.factors = new FactorManager(config, this.state, logger, this.codex as AppServerCodexClient);
+    this.employees = new EmployeeManager(config, this.state, logger, this.codex as AppServerCodexClient);
     this.subagents = new SubagentManager(
       config,
       this.behavior,
@@ -268,11 +268,38 @@ export class ServiceSupervisor {
         onSendToUser: async (job: SubagentJob, result: string) => {
           if (job.originChatId) await this.telegram.sendText(job.originChatId, result, job.originMessageId);
         },
+        onReturnToEmployee: async (job: SubagentJob, result: string) => {
+          await this.employees.deliverChildSubagentResult(job, result);
+        },
+        onSendToAdmins: async (_job: SubagentJob, result: string) => {
+          await this.telegram.notifyOps(result);
+        },
         onStatus: async (job: SubagentJob, message: string) => {
           if (job.originChatId) await this.telegram.sendText(job.originChatId, this.formatSubagentStatusText(job, message), job.originMessageId);
         }
       }
     );
+    this.employees.attachServiceActions({
+      requestSubagent: async (input) => this.subagents.dispatch({
+        profile: input.profile,
+        prompt: input.prompt,
+        route: "return_to_main",
+        ownerType: "employee",
+        ownerId: input.employeeId,
+        ownerRequestId: input.requestId,
+        parentTurnId: input.parentTurnId,
+        resultTarget: "employee",
+        timeoutSec: input.timeoutSec,
+        model: input.model,
+        effort: input.effort,
+        summary: input.summary,
+        images: input.images
+      }),
+      cancelSubagent: async (ref, options) => this.subagents.requestCancel(ref, options),
+      steerSubagent: async (ref, text, options) => this.subagents.steerJob(ref, text, options),
+      cancelOwnedActiveSubagents: async (employeeId, reason) => this.subagents.cancelActiveJobsForOwner("employee", employeeId, reason),
+      listSubagentJobs: () => this.subagents.listJobs()
+    });
     this.telegram = new TelegramGateway(config, this.state, this.files, transcriber, logger, {
       onUserEvent: (event) => this.enqueueUserEvent(event),
       onJobsCommand: async () => this.formatJobs(),
@@ -283,13 +310,13 @@ export class ServiceSupervisor {
       enqueueMain: (text, metadata) => this.enqueueSynthetic(text, metadata),
       sendAdmins: (text) => this.telegram.notifyOps(text),
       dispatchSubagent: async (input) => {
-        await this.subagents.dispatch(input);
+        await this.subagents.dispatch({ ...input, ownerType: "loop", ownerId: input.ownerId, ownerRequestId: input.ownerRequestId, resultTarget: this.resultTargetForRoute(input.route) });
       }
     });
     this.monitors = new MonitorManager(config, this.state, logger, {
       enqueueMain: (text, metadata) => this.enqueueSynthetic(text, metadata),
       dispatchSubagent: async (input) => {
-        await this.subagents.dispatch(input);
+        await this.subagents.dispatch({ ...input, ownerType: "monitor", ownerId: input.ownerId, ownerRequestId: input.ownerRequestId, resultTarget: this.resultTargetForRoute(input.route) });
       },
       notifyAdmins: (text) => this.telegram.notifyOps(text)
     });
@@ -310,22 +337,25 @@ export class ServiceSupervisor {
         if (result.status !== "success") throw new Error(result.message);
         return result;
       }
-      if (message.type === "factor_start") {
-        const result = await this.factors.startFactor(message.factorId, "ipc");
+      if (message.type === "employee_start" || message.type === "factor_start") {
+        const employeeId = message.type === "factor_start" ? message.factorId : message.employeeId;
+        const result = await this.employees.startEmployee(employeeId, "ipc");
         if (!["started", "resumed"].includes(result.status)) throw new Error(result.message);
         return result;
       }
-      if (message.type === "factor_stop") {
-        const result = await this.factors.stopFactor(message.factorId, "ipc");
+      if (message.type === "employee_stop" || message.type === "factor_stop") {
+        const employeeId = message.type === "factor_stop" ? message.factorId : message.employeeId;
+        const result = await this.employees.stopEmployee(employeeId, "ipc");
         if (result.status !== "stopped") throw new Error(result.message);
         return result;
       }
-      if (message.type === "factor_steer") {
-        const result = await this.factors.steerFactor(message.factorId, message.text, "ipc");
+      if (message.type === "employee_steer" || message.type === "factor_steer") {
+        const employeeId = message.type === "factor_steer" ? message.factorId : message.employeeId;
+        const result = await this.employees.steerEmployee(employeeId, message.text, "ipc");
         if (result.status !== "steered") throw new Error(result.message);
         return result;
       }
-      if (message.type === "factor_status") return this.factors.formatStatus(message.factorId);
+      if (message.type === "employee_status" || message.type === "factor_status") return this.employees.formatStatus(message.type === "factor_status" ? message.factorId : message.employeeId);
       if (message.type === "ping") return { pong: true };
       throw new Error(`Unknown IPC message type: ${(message as { type?: string }).type ?? "unknown"}`);
     });
@@ -334,13 +364,13 @@ export class ServiceSupervisor {
   async start(): Promise<void> {
     await ensureConfiguredDirectories(this.config);
     await this.state.init();
-    await this.factors.init();
+    await this.employees.init();
     await this.subagents.loadRuntimeBackendOverride();
     await this.subagents.loadJobs();
     await this.files.init();
     await this.behavior.loadBootstrapPrompt();
     await this.codex.start();
-    await this.factors.recoverRuntimesOnStartup();
+    await this.employees.recoverRuntimesOnStartup();
     await this.telegram.start();
     await this.recoverAbandonedWork();
     await this.ipc.start();
@@ -393,9 +423,9 @@ export class ServiceSupervisor {
         await this.handleSubagentBackendCommandEvent(event, backendCommand);
         return;
       }
-      const factorCommand = parseFactorCommand(event.text);
-      if (factorCommand.isFactor) {
-        await this.handleFactorCommandEvent(event, factorCommand);
+      const employeeCommand = parseEmployeeCommand(event.text);
+      if (employeeCommand.isEmployee) {
+        await this.handleEmployeeCommandEvent(event, employeeCommand);
         return;
       }
       const agentStatus = parseAgentStatusCommand(event.text);
@@ -467,11 +497,11 @@ export class ServiceSupervisor {
       telegramConfigured: Boolean(this.config.telegramBotToken),
       openaiConfigured: Boolean(this.config.openaiApiKey),
       stateDir: this.state.root,
-      factors: {
-        enabled: this.config.factors.enabled,
-        configured: Object.keys(this.config.factors.definitions).length,
-        runtime: this.config.factors.enabled ? "app_server" : "scaffold_only",
-        active: this.factors.runtimeSnapshot().factors.filter((factor) => factor.running).length
+      employees: {
+        enabled: this.config.employees.enabled,
+        configured: Object.keys(this.config.employees.definitions).length,
+        runtime: this.config.employees.enabled ? "app_server" : "scaffold_only",
+        active: this.employees.runtimeSnapshot().employees.filter((employee) => employee.running).length
       }
     };
   }
@@ -493,7 +523,8 @@ export class ServiceSupervisor {
     return jobs.slice(0, 20).map((job) => {
       const ref = this.formatJobCancelRef(job);
       const cancel = job.status === "queued" || job.status === "running" ? ` cancel="agent kill ${ref}"` : "";
-      return `${job.id} ref=${ref} status=${job.status} profile=${job.profile}${this.formatJobModelEffort(job)}${job.enqueuedAt ? ` enqueued=${job.enqueuedAt}` : ""}${job.startedAt ? ` started=${job.startedAt}` : ""}${job.completedAt ? ` completed=${job.completedAt}` : ""}${cancel}`;
+      const owner = this.formatJobCompactOwner(job);
+      return `${job.id} ref=${ref} status=${job.status} profile=${job.profile}${this.formatJobModelEffort(job)}${owner}${job.enqueuedAt ? ` enqueued=${job.enqueuedAt}` : ""}${job.startedAt ? ` started=${job.startedAt}` : ""}${job.completedAt ? ` completed=${job.completedAt}` : ""}${cancel}`;
     }).join("\n");
   }
 
@@ -607,7 +638,41 @@ export class ServiceSupervisor {
 
   private formatJobSummaryDetails(job: SubagentJob): string[] {
     const summary = this.compactJobText(job.summary);
-    return summary ? [summary] : [];
+    const details = summary ? [summary] : [];
+    const owner = this.formatJobOwnerDetails(job);
+    if (owner) details.push(owner);
+    return details;
+  }
+
+  private formatJobOwnerDetails(job: SubagentJob): string {
+    const ownerType = this.jobOwnerType(job);
+    const resultTarget = this.jobResultTarget(job);
+    const parts = [
+      `owner: ${ownerType}:${this.compactJobText(job.ownerId ?? ownerType)}`,
+      job.ownerRequestId ? `request: ${this.compactJobText(job.ownerRequestId)}` : "",
+      job.parentTurnId ? `parentTurn: ${this.compactJobText(job.parentTurnId)}` : "",
+      `result: ${resultTarget}`
+    ].filter(Boolean);
+    if (ownerType === "main" && resultTarget === this.resultTargetForRoute(job.route) && !job.ownerRequestId && !job.parentTurnId) return "";
+    return parts.join(" ");
+  }
+
+  private formatJobCompactOwner(job: SubagentJob): string {
+    const ownerType = this.jobOwnerType(job);
+    const resultTarget = this.jobResultTarget(job);
+    if (ownerType === "main" && resultTarget === this.resultTargetForRoute(job.route) && !job.ownerRequestId && !job.parentTurnId) return "";
+    const parts = [`owner=${ownerType}:${this.compactJobText(job.ownerId ?? ownerType)}`, `result=${resultTarget}`];
+    if (job.ownerRequestId) parts.push(`request=${this.compactJobText(job.ownerRequestId)}`);
+    if (job.parentTurnId) parts.push(`parentTurn=${this.compactJobText(job.parentTurnId)}`);
+    return ` ${parts.join(" ")}`;
+  }
+
+  private jobOwnerType(job: SubagentJob): SubagentOwnerType {
+    return job.ownerType === "loop" || job.ownerType === "monitor" || job.ownerType === "employee" ? job.ownerType : "main";
+  }
+
+  private jobResultTarget(job: SubagentJob): SubagentResultTarget {
+    return job.resultTarget ?? this.resultTargetForRoute(job.route);
   }
 
   private formatJobInlineCode(text: string): string {
@@ -621,6 +686,14 @@ export class ServiceSupervisor {
   private formatJobModelEffort(job: SubagentJob): string {
     const parts = [job.model ? `model=${job.model}` : "", job.effort ? `effort=${job.effort}` : ""].filter(Boolean);
     return parts.length > 0 ? ` (${parts.join(" ")})` : "";
+  }
+
+  private resultTargetForRoute(route: SubagentJob["route"]): SubagentResultTarget {
+    if (route === "send_to_user") return "user";
+    if (route === "send_to_admins") return "admins";
+    if (route === "store_only") return "store_only";
+    if (route === "silent") return "silent";
+    return "main";
   }
 
   private isTerminalSubagentStatus(status: SubagentJob["status"]): boolean {
@@ -663,6 +736,8 @@ export class ServiceSupervisor {
       `status: ${job.status}`,
       `profile: ${job.profile}`,
       `backend: ${backend}`,
+      `owner: ${this.jobOwnerType(job)}:${job.ownerId ?? this.jobOwnerType(job)}`,
+      `resultTarget: ${this.jobResultTarget(job)}`,
       `steerable: ${steerable ? "yes" : "no"}`,
       `elapsed: ${elapsed}`,
       `pid: ${job.pid ?? "unknown"}`
@@ -670,6 +745,8 @@ export class ServiceSupervisor {
     if (job.model || job.effort) lines.push(`model/effort: ${job.model ?? "default"} / ${job.effort ?? "default"}`);
     const summary = this.compactJobText(job.summary);
     if (summary) lines.push(`summary: ${summary}`);
+    if (job.ownerRequestId) lines.push(`ownerRequestId: ${job.ownerRequestId}`);
+    if (job.parentTurnId) lines.push(`parentTurnId: ${job.parentTurnId}`);
     if (job.activeTurnId) lines.push(`activeTurnId: ${job.activeTurnId}`);
     if (job.backendThreadId) lines.push(`thread: ${job.backendThreadId}`);
     if (job.lastSteeredAt) lines.push(`lastSteeredAt: ${job.lastSteeredAt} (${job.steerCount ?? 0} steer${job.steerCount === 1 ? "" : "s"})`);
@@ -714,6 +791,7 @@ export class ServiceSupervisor {
       );
       return [`Ambiguous subagent ref "${result.ref}". Use a longer ref.`, ...candidates].join("\n");
     }
+    if (result.status === "forbidden") return `Not allowed to steer subagent "${result.ref}": ${result.message}`;
     if (result.status === "failed") return `Failed to steer subagent "${result.ref}": ${result.message}`;
     return `No subagent job matched "${result.ref}". Use "agents" to list usable refs.`;
   }
@@ -737,6 +815,7 @@ export class ServiceSupervisor {
       );
       return [`Ambiguous subagent ref "${result.ref}". Use a longer ref.`, ...candidates].join("\n");
     }
+    if (result.status === "forbidden") return `Not allowed to cancel subagent "${result.ref}": ${result.message}`;
     return `No subagent job matched "${result.ref}". Use "agents" to list usable refs.`;
   }
 
@@ -785,7 +864,7 @@ export class ServiceSupervisor {
                 const actionKey = this.directiveActionKey(action, blockIndex, actionIndex);
                 if (!preExecutedActions.has(actionKey) && this.shouldPreExecuteDirective(action)) {
                   preExecutedActions.add(actionKey);
-                  void this.executeDirective(action, event);
+                  void this.executeDirective(action, event, { parentTurnId: turnId });
                 }
               });
             });
@@ -839,7 +918,7 @@ export class ServiceSupervisor {
           if (action.type === "dispatch_subagent" && nextAction && nextActionKey && !preExecutedActions.has(nextActionKey)) {
             const mergedAckText = this.dispatchFollowupAckText(nextAction, event);
             if (mergedAckText) {
-              const status = await this.executeDirective(action, event, { dispatchStatusText: this.formatDispatchSummary(action, mergedAckText) });
+              const status = await this.executeDirective(action, event, { dispatchStatusText: this.formatDispatchSummary(action, mergedAckText), parentTurnId: turnId });
               if (this.isUserFacingSendDirective(action) && status === "completed") userFacingDelivered = true;
               if (status !== "failed") {
                 await this.skipDirective(nextAction, "merged_dispatch_ack");
@@ -848,7 +927,7 @@ export class ServiceSupervisor {
               continue;
             }
           }
-          const status = await this.executeDirective(action, event);
+          const status = await this.executeDirective(action, event, { parentTurnId: turnId });
           if (this.isUserFacingSendDirective(action) && status === "completed") userFacingDelivered = true;
         }
       }
@@ -959,7 +1038,7 @@ export class ServiceSupervisor {
     return stored.status;
   }
 
-  private async executeDirective(action: DirectiveAction, origin: UserEvent, options: { dispatchStatusText?: string } = {}): Promise<StoredAction["status"]> {
+  private async executeDirective(action: DirectiveAction, origin: UserEvent, options: { dispatchStatusText?: string; parentTurnId?: string } = {}): Promise<StoredAction["status"]> {
     const stored: StoredAction = {
       id: makeId("action"),
       idempotencyKey: action.idempotencyKey,
@@ -995,7 +1074,7 @@ export class ServiceSupervisor {
         if (origin.chatId) {
           await this.telegram.sendText(origin.chatId, options.dispatchStatusText ?? this.formatDispatchSummary(action), origin.messageId);
         }
-        await this.subagents.dispatchFromDirective(action, { chatId: origin.chatId, messageId: origin.messageId });
+        await this.subagents.dispatchFromDirective(action, { chatId: origin.chatId, messageId: origin.messageId, parentTurnId: options.parentTurnId });
       }
       if (action.type === "cancel_job") {
         const result = await this.subagents.requestCancel(action.jobId);
@@ -1085,8 +1164,8 @@ export class ServiceSupervisor {
         return;
       }
       const health = await this.codex.health();
-      await this.factors.recoverRuntimesOnStartup().catch((error) => {
-        this.logger.warn({ component: "factors", event: "restart_recovery_failed", error }, "factor runtime recovery after Codex restart failed");
+      await this.employees.recoverRuntimesOnStartup().catch((error) => {
+        this.logger.warn({ component: "employees", event: "restart_recovery_failed", error }, "employee runtime recovery after Codex restart failed");
       });
       // After a crash the in-memory thread on the app-server is gone, so the
       // restarted codex has either resumed our stored thread or started a
@@ -1499,40 +1578,44 @@ export class ServiceSupervisor {
       ].join("\n")
       : "";
     const activeSubagents = this.formatActiveSubagentSnapshot();
-    const factorRuntimes = this.formatFactorRuntimeSnapshot();
-    return `${header}${replyContext ? `\n\n${replyContext}` : ""}${factorRuntimes ? `\n\n${factorRuntimes}` : ""}${activeSubagents ? `\n\n${activeSubagents}` : ""}\n\nUser content:\n${event.text}${attachments}`;
+    const employeeRuntimes = this.formatEmployeeRuntimeSnapshot();
+    return `${header}${replyContext ? `\n\n${replyContext}` : ""}${employeeRuntimes ? `\n\n${employeeRuntimes}` : ""}${activeSubagents ? `\n\n${activeSubagents}` : ""}\n\nUser content:\n${event.text}${attachments}`;
   }
 
-  private formatFactorRuntimeSnapshot(): string {
-    const snapshot = this.factors.runtimeSnapshot(12);
+  private formatEmployeeRuntimeSnapshot(): string {
+    const snapshot = this.employees.runtimeSnapshot(12);
     const lines = [
-      "Available factors (compact runtime snapshot; durable/non-ephemeral threads when enabled):",
-      "Use for durable domain routing/context. Service commands: `factors`, `factor status <id>`, `factor start <id>`, `factor steer <id> <text>`, `factor stop <id>`. No Factor directive or rich external-account tools are implemented; do not claim email/calendar/CRM/project mutations are available."
+      "Available employees (compact runtime snapshot; durable/non-ephemeral threads when enabled):",
+      "Use for durable domain routing/context. Service commands: `employees`, `employee status <id>`, `employee start <id>`, `employee steer <id> <text>`, `employee stop <id>`. Employees may request child subagents only through the service-owned SubagentManager; main loop should steer the owning Employee rather than arbitrary Employee-owned child jobs unless explicitly requested."
     ];
-    if (snapshot.factors.length === 0) {
+    if (snapshot.employees.length === 0) {
       lines.push("- none configured");
       return lines.join("\n");
     }
-    for (const factor of snapshot.factors) lines.push(this.formatFactorRuntimeSnapshotLine(factor));
-    if (snapshot.omitted > 0) lines.push(`- ${snapshot.omitted} more factor(s) omitted; use the service-level \`factors\` command for full status.`);
+    for (const employee of snapshot.employees) lines.push(this.formatEmployeeRuntimeSnapshotLine(employee));
+    if (snapshot.omitted > 0) lines.push(`- ${snapshot.omitted} more employee(s) omitted; use the service-level \`employees\` command for full status.`);
     return lines.join("\n");
   }
 
-  private formatFactorRuntimeSnapshotLine(factor: ReturnType<FactorManager["runtimeSnapshot"]>["factors"][number]): string {
+  private formatEmployeeRuntimeSnapshotLine(employee: ReturnType<EmployeeManager["runtimeSnapshot"]>["employees"][number]): string {
     const parts = [
-      `id=${factor.id}`,
-      `name=${JSON.stringify(factor.name)}`,
-      `status=${factor.status}`,
-      `running=${factor.running}`,
-      `resumable=${factor.resumable}`,
-      `enabled=${factor.enabled}`,
-      `profile=${factor.profile}`,
-      `model=${factor.model}`,
-      `effort=${factor.effort}`
+      `id=${employee.id}`,
+      `name=${JSON.stringify(employee.name)}`,
+      `status=${employee.status}`,
+      `running=${employee.running}`,
+      `resumable=${employee.resumable}`,
+      `enabled=${employee.enabled}`,
+      `profile=${employee.profile}`,
+      `model=${employee.model}`,
+      `effort=${employee.effort}`
     ];
-    if (factor.backendThreadId) parts.push(`thread=${factor.backendThreadId}`);
-    if (factor.description) parts.push(`purpose=${JSON.stringify(this.compactSnapshotText(factor.description))}`);
-    if (factor.lastError) parts.push(`lastError=${JSON.stringify(this.compactSnapshotText(factor.lastError, 100))}`);
+    if (employee.backendThreadId) parts.push(`thread=${employee.backendThreadId}`);
+    const childJobs = employee.childJobs ?? { active: 0, total: 0, refs: [] };
+    parts.push(`child_jobs=${childJobs.active}/${childJobs.total}`);
+    if (childJobs.refs.length) parts.push(`child_refs=${JSON.stringify(childJobs.refs.join(","))}`);
+    if (employee.pendingChildResults) parts.push(`pending_child_results=${employee.pendingChildResults}`);
+    if (employee.description) parts.push(`purpose=${JSON.stringify(this.compactSnapshotText(employee.description))}`);
+    if (employee.lastError) parts.push(`lastError=${JSON.stringify(this.compactSnapshotText(employee.lastError, 100))}`);
     return `- ${parts.join(" ")}`;
   }
 
@@ -1541,7 +1624,7 @@ export class ServiceSupervisor {
     if (snapshot.jobs.length === 0) return "";
     const lines = [
       "Active subagent jobs (compact routing snapshot; active/queued only):",
-      "Use for natural-language steering: emit steer_subagent only when exactly one steerable=true job matches the user's request. If none or multiple match, ask which job or tell the user to run `agent steer <ref> <text>`."
+      "Use for natural-language steering: emit steer_subagent only when exactly one steerable=true non-Employee child job matches the user's request. If a job has owner=employee:<id>, prefer `employee steer <id> <text>` and do not steer that child directly unless the user explicitly asks to control that exact nested job. If none or multiple match, ask which job or tell the user to run `agent steer <ref> <text>`."
     ];
     for (const job of snapshot.jobs) lines.push(this.formatActiveSubagentSnapshotLine(job));
     if (snapshot.omitted > 0) lines.push(`- ${snapshot.omitted} more active job(s) omitted; use the service-level \`agents\` command for full status.`);
@@ -1555,6 +1638,8 @@ export class ServiceSupervisor {
       `status=${job.status}`,
       `profile=${job.profile}`,
       `backend=${job.backend}`,
+      `owner=${(job.ownerType ?? "main")}:${job.ownerId ?? job.ownerType ?? "main"}`,
+      `result=${job.resultTarget ?? "main"}`,
       `steerable=${job.steerable}`,
       `elapsed=${formatDurationSeconds(job.elapsedSec)}`,
       `created=${job.createdAt ?? "unknown"}`
@@ -1563,6 +1648,8 @@ export class ServiceSupervisor {
     if (job.effort) parts.push(`effort=${job.effort}`);
     if (job.originChatId !== undefined) parts.push(`origin_chat_id=${job.originChatId}`);
     if (job.originMessageId !== undefined) parts.push(`origin_message_id=${job.originMessageId}`);
+    if (job.ownerRequestId) parts.push(`owner_request_id=${job.ownerRequestId}`);
+    if (job.parentTurnId) parts.push(`parent_turn_id=${job.parentTurnId}`);
     if (job.summary) parts.push(`summary=${JSON.stringify(this.compactSnapshotText(job.summary))}`);
     return `- ${parts.join(" ")}`;
   }
@@ -1613,11 +1700,11 @@ export class ServiceSupervisor {
     return new DisabledTranscriber();
   }
 
-  private async handleFactorCommandEvent(event: UserEvent, command: Exclude<FactorCommand, { isFactor: false }>): Promise<void> {
+  private async handleEmployeeCommandEvent(event: UserEvent, command: Exclude<EmployeeCommand, { isEmployee: false }>): Promise<void> {
     const chatId = event.chatId;
     if (!chatId) return;
     const proposedBy = event.userId ? `telegram:${event.userId}` : "telegram";
-    const text = await this.factors.handleCommand(command, proposedBy);
+    const text = await this.employees.handleCommand(command, proposedBy);
     await this.telegram.sendText(chatId, text, event.messageId);
   }
 

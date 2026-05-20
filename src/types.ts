@@ -10,6 +10,8 @@ export type Route =
   | "silent";
 
 export type SubagentBackendKind = "codex_exec" | "codex_app_server";
+export type SubagentOwnerType = "main" | "loop" | "monitor" | "employee";
+export type SubagentResultTarget = "main" | "user" | "employee" | "admins" | "store_only" | "silent";
 
 export interface Attachment {
   kind: "image" | "document" | "voice" | "audio";
@@ -147,6 +149,11 @@ export interface SubagentJob {
   id: string;
   profile: string;
   route: Route;
+  ownerType?: SubagentOwnerType;
+  ownerId?: string;
+  ownerRequestId?: string;
+  parentTurnId?: string;
+  resultTarget?: SubagentResultTarget;
   status: "queued" | "running" | "cancelling" | "completed" | "failed" | "cancelled" | "timed_out" | "abandoned";
   promptPath: string;
   artifactDir: string;
@@ -179,20 +186,20 @@ export interface SubagentJob {
   steerCount?: number;
 }
 
-export type FactorStatus = "disabled" | "idle" | "proposal_pending" | "running" | "stopped" | "error";
-export type FactorProposalAction = "start" | "stop" | "steer" | "warmup" | "compact";
+export type EmployeeStatus = "disabled" | "idle" | "proposal_pending" | "running" | "stopped" | "error";
+export type EmployeeProposalAction = "start" | "stop" | "steer" | "warmup" | "compact";
 
-export interface FactorProposal {
-  action: FactorProposalAction;
+export interface EmployeeProposal {
+  action: EmployeeProposalAction;
   text?: string;
   proposedAt: string;
   proposedBy?: string;
   reason: string;
 }
 
-export interface FactorRuntimeState {
+export interface EmployeeRuntimeState {
   id: string;
-  status: FactorStatus;
+  status: EmployeeStatus;
   enabled: boolean;
   directory: string;
   profile: string;
@@ -201,7 +208,7 @@ export interface FactorRuntimeState {
   startup: "on_demand" | "always";
   updatedAt: string;
   runtimeMode: "scaffold_only" | "app_server";
-  lastProposal?: FactorProposal;
+  lastProposal?: EmployeeProposal;
   lastError?: string;
   activeTurnId?: string;
   backendThreadId?: string;
@@ -211,6 +218,20 @@ export interface FactorRuntimeState {
   lastSteeredAt?: string;
   lastResumeError?: string;
   pid?: number;
+  pendingChildResults?: EmployeePendingChildResult[];
+  lastChildResultAt?: string;
+  lastServiceActionAt?: string;
+  lastServiceActionError?: string;
+}
+
+export interface EmployeePendingChildResult {
+  jobId: string;
+  ownerRequestId?: string;
+  status: SubagentJob["status"];
+  resultPath: string;
+  resultPreview: string;
+  storedAt: string;
+  reason: string;
 }
 
 export interface LoopRun {

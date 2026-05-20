@@ -5,7 +5,7 @@ import { AppConfig, resolveConfigPath } from "./config.js";
 import { BehaviorPack } from "./behavior.js";
 import { DirectiveAction } from "./directives.js";
 import { StateStore } from "./state.js";
-import { Route, SubagentBackendKind, SubagentJob } from "./types.js";
+import { Route, SubagentBackendKind, SubagentJob, SubagentOwnerType, SubagentResultTarget } from "./types.js";
 import {
   ChildAgentBackend,
   ChildAgentFinish,
@@ -30,6 +30,11 @@ interface DispatchInput {
   profile: string;
   prompt: string;
   route: Route;
+  ownerType?: SubagentOwnerType;
+  ownerId?: string;
+  ownerRequestId?: string;
+  parentTurnId?: string;
+  resultTarget?: SubagentResultTarget;
   timeoutSec?: number;
   model?: string;
   effort?: string;
@@ -42,6 +47,8 @@ interface DispatchInput {
 interface SubagentCallbacks {
   onReturnToMain(job: SubagentJob, result: string): Promise<void>;
   onSendToUser(job: SubagentJob, result: string): Promise<void>;
+  onReturnToEmployee?(job: SubagentJob, result: string): Promise<void>;
+  onSendToAdmins?(job: SubagentJob, result: string): Promise<void>;
   onStatus?(job: SubagentJob, message: string): Promise<void>;
 }
 
@@ -70,6 +77,7 @@ export type CancelJobResultStatus =
   | "success"
   | "not_found"
   | "ambiguous"
+  | "forbidden"
   | "already_terminal"
   | "already_cancelling";
 
@@ -86,6 +94,7 @@ export type SteerJobResultStatus =
   | "success"
   | "not_found"
   | "ambiguous"
+  | "forbidden"
   | "not_running"
   | "unsupported_backend"
   | "not_steerable"
@@ -119,6 +128,17 @@ export interface ActiveSubagentJobSnapshot {
   originMessageId?: number;
   model?: string;
   effort?: string;
+  ownerType: SubagentOwnerType;
+  ownerId?: string;
+  ownerRequestId?: string;
+  parentTurnId?: string;
+  resultTarget: SubagentResultTarget;
+}
+
+export interface SubagentControlActor {
+  ownerType?: SubagentOwnerType | "admin";
+  ownerId?: string;
+  allowCrossOwner?: boolean;
 }
 
 export interface ActiveSubagentSnapshot {
@@ -156,11 +176,19 @@ export class SubagentManager {
     };
   }
 
-  async dispatchFromDirective(action: Extract<DirectiveAction, { type: "dispatch_subagent" }>, origin?: { chatId?: number; messageId?: number }): Promise<string> {
+  async dispatchFromDirective(
+    action: Extract<DirectiveAction, { type: "dispatch_subagent" }>,
+    origin?: { chatId?: number; messageId?: number; parentTurnId?: string }
+  ): Promise<string> {
     return this.dispatch({
       profile: action.profile,
       prompt: action.prompt,
       route: action.route,
+      ownerType: "main",
+      ownerId: "main",
+      ownerRequestId: action.idempotencyKey,
+      parentTurnId: origin?.parentTurnId,
+      resultTarget: this.resultTargetForRoute(action.route),
       timeoutSec: action.timeoutSec,
       model: action.model,
       effort: action.effort,
@@ -189,10 +217,18 @@ export class SubagentManager {
     const artifactDir = resolveConfigPath(this.config, join(this.config.subagents.artifactDir, input.id));
     const model = this.resolveModel(input.model);
     const effort = this.resolveEffort(input.effort);
+    const ownerType = this.normalizeOwnerType(input.ownerType);
+    const ownerId = input.ownerId ?? this.defaultOwnerId(ownerType);
+    const resultTarget = input.resultTarget ?? this.resultTargetForRoute(input.route);
     const queuedJob: SubagentJob = {
       id: input.id,
       profile: input.profile,
       route: input.route,
+      ownerType,
+      ownerId,
+      ownerRequestId: input.ownerRequestId,
+      parentTurnId: input.parentTurnId,
+      resultTarget,
       status: "queued",
       promptPath: join(artifactDir, "prompt.md"),
       artifactDir,
@@ -213,6 +249,22 @@ export class SubagentManager {
 
   listJobs(): SubagentJob[] {
     return [...this.jobs.values()].sort((a, b) => this.jobSortTime(b).localeCompare(this.jobSortTime(a)));
+  }
+
+  listJobsForOwner(ownerType: SubagentOwnerType, ownerId: string): SubagentJob[] {
+    return this.listJobs().filter((job) => this.jobOwnerType(job) === ownerType && job.ownerId === ownerId);
+  }
+
+  async cancelActiveJobsForOwner(ownerType: SubagentOwnerType, ownerId: string, reason: string): Promise<CancelJobResult[]> {
+    const jobs = this.listJobsForOwner(ownerType, ownerId).filter((job) => ACTIVE_JOB_STATUSES.has(job.status));
+    const results: CancelJobResult[] = [];
+    for (const job of jobs) {
+      results.push(await this.requestCancel(job.id, {
+        reason,
+        actor: { ownerType, ownerId }
+      }));
+    }
+    return results;
   }
 
   activeJobSnapshots(limit = 20, nowMs = Date.now()): ActiveSubagentSnapshot {
@@ -309,7 +361,7 @@ export class SubagentManager {
     return { status: "ambiguous", ref, candidates: this.candidatesFor(candidates) };
   }
 
-  async requestCancel(ref: string, options: { reason?: string } = {}): Promise<CancelJobResult> {
+  async requestCancel(ref: string, options: { reason?: string; actor?: SubagentControlActor } = {}): Promise<CancelJobResult> {
     const resolution = this.resolveJobRef(ref);
     if (resolution.status === "not_found") {
       return { status: "not_found", ref, message: `No subagent job matched "${ref}".` };
@@ -324,6 +376,15 @@ export class SubagentManager {
     }
 
     const job = resolution.job;
+    const authorization = this.authorizeJobControl(job, options.actor);
+    if (!authorization.allowed) {
+      return {
+        status: "forbidden",
+        ref,
+        job,
+        message: authorization.message
+      };
+    }
     const previousStatus = job.status;
     const reason = options.reason ?? "user";
     if (TERMINAL_JOB_STATUSES.has(job.status)) {
@@ -412,7 +473,7 @@ export class SubagentManager {
     return result.status === "success";
   }
 
-  async steerJob(ref: string, text: string): Promise<SteerJobResult> {
+  async steerJob(ref: string, text: string, options: { actor?: SubagentControlActor } = {}): Promise<SteerJobResult> {
     const steeringText = text.trim();
     const resolution = this.resolveJobRef(ref);
     if (resolution.status === "not_found") {
@@ -427,6 +488,8 @@ export class SubagentManager {
       };
     }
     const job = resolution.job;
+    const authorization = this.authorizeJobControl(job, options.actor);
+    if (!authorization.allowed) return { status: "forbidden", ref, job, message: authorization.message };
     if (!steeringText) {
       return { status: "failed", ref, job, message: "Steering text cannot be empty." };
     }
@@ -511,10 +574,18 @@ export class SubagentManager {
     const model = this.resolveModel(input.model);
     const effort = this.resolveEffort(input.effort);
     const backendKind = this.backendForJob(id);
+    const ownerType = this.normalizeOwnerType(input.ownerType ?? this.jobs.get(id)?.ownerType);
+    const ownerId = input.ownerId ?? this.jobs.get(id)?.ownerId ?? this.defaultOwnerId(ownerType);
+    const resultTarget = input.resultTarget ?? this.jobs.get(id)?.resultTarget ?? this.resultTargetForRoute(input.route);
     const job: SubagentJob = this.jobs.get(id) ?? {
       id,
       profile: input.profile,
       route: input.route,
+      ownerType,
+      ownerId,
+      ownerRequestId: input.ownerRequestId,
+      parentTurnId: input.parentTurnId,
+      resultTarget,
       status: "queued",
       promptPath,
       artifactDir,
@@ -529,6 +600,11 @@ export class SubagentManager {
     Object.assign(job, {
       profile: input.profile,
       route: input.route,
+      ownerType,
+      ownerId,
+      ownerRequestId: input.ownerRequestId ?? job.ownerRequestId,
+      parentTurnId: input.parentTurnId ?? job.parentTurnId,
+      resultTarget,
       status: "running" as const,
       promptPath,
       artifactDir,
@@ -619,10 +695,13 @@ export class SubagentManager {
   private async deliverTerminalResult(job: SubagentJob, result: string): Promise<void> {
     try {
       if (!["completed", "failed", "cancelled", "timed_out"].includes(job.status)) return;
-      if (job.route === "return_to_main") await this.callbacks.onReturnToMain(job, result);
-      if (job.route === "send_to_user") await this.callbacks.onSendToUser(job, result);
+      const target = this.jobResultTarget(job);
+      if (target === "main") await this.callbacks.onReturnToMain(job, result);
+      if (target === "user") await this.callbacks.onSendToUser(job, result);
+      if (target === "employee") await this.callbacks.onReturnToEmployee?.(job, result);
+      if (target === "admins") await this.callbacks.onSendToAdmins?.(job, result);
     } catch (error) {
-      this.logger.error({ component: "subagents", event: "callback_failed", jobId: job.id, route: job.route, error }, "subagent result delivery failed");
+      this.logger.error({ component: "subagents", event: "callback_failed", jobId: job.id, route: job.route, resultTarget: this.jobResultTarget(job), error }, "subagent result delivery failed");
     }
   }
 
@@ -656,7 +735,12 @@ export class SubagentManager {
       originChatId: job.originChatId,
       originMessageId: job.originMessageId,
       model: job.model,
-      effort: job.effort
+      effort: job.effort,
+      ownerType: this.jobOwnerType(job),
+      ownerId: job.ownerId,
+      ownerRequestId: job.ownerRequestId,
+      parentTurnId: job.parentTurnId,
+      resultTarget: this.jobResultTarget(job)
     };
   }
 
@@ -722,5 +806,52 @@ export class SubagentManager {
 
   private cancelGraceMs(kind: SubagentBackendKind): number {
     return kind === "codex_app_server" ? this.config.subagents.childInterruptGraceMs ?? SIGKILL_GRACE_MS : SIGKILL_GRACE_MS;
+  }
+
+  private normalizeOwnerType(value: unknown): SubagentOwnerType {
+    if (value === "factor") return "employee";
+    if (value === "loop" || value === "monitor" || value === "employee") return value;
+    return "main";
+  }
+
+  private defaultOwnerId(ownerType: SubagentOwnerType): string {
+    return ownerType;
+  }
+
+  private resultTargetForRoute(route: Route): SubagentResultTarget {
+    if (route === "send_to_user") return "user";
+    if (route === "send_to_admins") return "admins";
+    if (route === "store_only") return "store_only";
+    if (route === "silent") return "silent";
+    return "main";
+  }
+
+  private jobOwnerType(job: SubagentJob): SubagentOwnerType {
+    return this.normalizeOwnerType(job.ownerType);
+  }
+
+  private jobResultTarget(job: SubagentJob): SubagentResultTarget {
+    if ((job.resultTarget as unknown) === "factor") return "employee";
+    return job.resultTarget ?? this.resultTargetForRoute(job.route);
+  }
+
+  private authorizeJobControl(job: SubagentJob, actor?: SubagentControlActor): { allowed: true } | { allowed: false; message: string } {
+    if (!actor || actor.allowCrossOwner || actor.ownerType === "admin" || actor.ownerType === "main" || actor.ownerType === undefined) {
+      return { allowed: true };
+    }
+    if (actor.ownerType === "employee") {
+      const ownerType = this.jobOwnerType(job);
+      if (ownerType === "employee" && job.ownerId === actor.ownerId) return { allowed: true };
+      return {
+        allowed: false,
+        message: `Employee ${actor.ownerId ?? "unknown"} cannot control subagent job ${job.id}; owner=${ownerType}:${job.ownerId ?? this.defaultOwnerId(ownerType)}.`
+      };
+    }
+    const ownerType = this.jobOwnerType(job);
+    if (ownerType === actor.ownerType && job.ownerId === actor.ownerId) return { allowed: true };
+    return {
+      allowed: false,
+      message: `Owner ${actor.ownerType}:${actor.ownerId ?? "unknown"} cannot control subagent job ${job.id}; owner=${ownerType}:${job.ownerId ?? this.defaultOwnerId(ownerType)}.`
+    };
   }
 }

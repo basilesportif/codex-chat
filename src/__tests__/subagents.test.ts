@@ -153,6 +153,110 @@ describe("subagents", () => {
     expect(manager.listJobs()[0]).toMatchObject({ model: "gpt-5.5", effort: "xhigh", summary: "test task" });
   });
 
+  test("records owner and result metadata with compatible main defaults", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
+    tempDirs.push(root);
+    const spawn = vi.fn(() => fakeChild());
+    vi.doMock("node:child_process", async () => {
+      const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+      return { ...actual, spawn };
+    });
+    const { SubagentManager } = await import("../subagents.js");
+    const config = makeConfig(root, 0);
+    const state = { saveJob: vi.fn().mockResolvedValue(undefined) };
+    const manager = new SubagentManager(
+      config,
+      { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") } as never,
+      state as never,
+      fakeLogger() as never,
+      { onReturnToMain: vi.fn(), onSendToUser: vi.fn() }
+    );
+
+    await manager.dispatch({ profile: "x", prompt: "a", route: "return_to_main" });
+
+    expect(state.saveJob.mock.calls[0]?.[0]).toMatchObject({
+      ownerType: "main",
+      ownerId: "main",
+      resultTarget: "main",
+      status: "queued"
+    });
+    expect(manager.listJobs()[0]).toMatchObject({ ownerType: "main", ownerId: "main", resultTarget: "main" });
+  });
+
+  test("routes Employee child terminal results back to the Employee callback", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
+    tempDirs.push(root);
+    const children: ReturnType<typeof fakeChild>[] = [];
+    const spawn = vi.fn(() => {
+      const child = fakeChild();
+      children.push(child);
+      return child;
+    });
+    vi.doMock("node:child_process", async () => {
+      const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+      return { ...actual, spawn };
+    });
+    const { SubagentManager } = await import("../subagents.js");
+    const config = makeConfig(root, 1);
+    const onReturnToMain = vi.fn().mockResolvedValue(undefined);
+    const onReturnToEmployee = vi.fn().mockResolvedValue(undefined);
+    const manager = new SubagentManager(
+      config,
+      { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") } as never,
+      { saveJob: vi.fn().mockResolvedValue(undefined) } as never,
+      fakeLogger() as never,
+      { onReturnToMain, onSendToUser: vi.fn(), onReturnToEmployee }
+    );
+
+    const id = await manager.dispatch({
+      profile: "researcher",
+      prompt: "child work",
+      route: "return_to_main",
+      ownerType: "employee",
+      ownerId: "email-calendar",
+      ownerRequestId: "req-1",
+      parentTurnId: "turn-employee",
+      resultTarget: "employee"
+    });
+    await waitFor(() => children.length === 1);
+    const job = manager.listJobs()[0]!;
+    await writeFile(join(job.artifactDir, "last-message.md"), "child result");
+    children[0]!.emit("exit", 0, null);
+    await waitFor(() => onReturnToEmployee.mock.calls.length === 1);
+
+    expect(onReturnToMain).not.toHaveBeenCalled();
+    expect(onReturnToEmployee).toHaveBeenCalledWith(
+      expect.objectContaining({ id, ownerType: "employee", ownerId: "email-calendar", ownerRequestId: "req-1", resultTarget: "employee", status: "completed" }),
+      "child result"
+    );
+  });
+
+  test("Employee actors can cancel or steer only their own child jobs", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
+    tempDirs.push(root);
+    const { SubagentManager } = await import("../subagents.js");
+    const manager = new SubagentManager(
+      makeConfig(root, 0),
+      { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") } as never,
+      { saveJob: vi.fn().mockResolvedValue(undefined) } as never,
+      fakeLogger() as never,
+      { onReturnToMain: vi.fn(), onSendToUser: vi.fn() }
+    );
+    manager.addJobs([
+      { id: "job_aaaa0000000000000000000000000000", profile: "researcher", route: "return_to_main", ownerType: "employee", ownerId: "employee-a", resultTarget: "employee", status: "queued", promptPath: "/tmp/p", artifactDir: "/tmp/a" },
+      { id: "job_bbbb0000000000000000000000000000", profile: "debugger", route: "return_to_main", ownerType: "employee", ownerId: "employee-b", resultTarget: "employee", status: "running", promptPath: "/tmp/p", artifactDir: "/tmp/a", backend: "codex_exec" }
+    ]);
+
+    await expect(manager.requestCancel("aaaa", { actor: { ownerType: "employee", ownerId: "employee-b" } }))
+      .resolves.toMatchObject({ status: "forbidden", job: { id: "job_aaaa0000000000000000000000000000" } });
+    await expect(manager.requestCancel("aaaa", { actor: { ownerType: "employee", ownerId: "employee-a" } }))
+      .resolves.toMatchObject({ status: "success", job: { status: "cancelled" } });
+    await expect(manager.steerJob("bbbb", "status", { actor: { ownerType: "employee", ownerId: "employee-a" } }))
+      .resolves.toMatchObject({ status: "forbidden" });
+    await expect(manager.steerJob("bbbb", "status", { actor: { ownerType: "employee", ownerId: "employee-b" } }))
+      .resolves.toMatchObject({ status: "unsupported_backend" });
+  });
+
   test("adds remote repo authority rules to subagent prompts", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
     tempDirs.push(root);

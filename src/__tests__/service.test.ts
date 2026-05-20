@@ -150,7 +150,7 @@ describe("service supervisor", () => {
     expect(turn.status).toBe("abandoned");
   });
 
-  test("handles Factor scaffold list command before Codex", async () => {
+  test("handles Employee scaffold list command before Codex", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
     const service = new ServiceSupervisor(config, logger);
@@ -158,10 +158,49 @@ describe("service supervisor", () => {
     const sendTurn = vi.spyOn(service.codex, "sendTurn");
     const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
 
-    await service.enqueueUserEvent(userEvent(130, "factors"));
+    await service.enqueueUserEvent(userEvent(130, "employees"));
 
-    expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("Factors: 0 configured"), 130);
+    expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("Employees: 0 configured"), 130);
     expect(sendTurn).not.toHaveBeenCalled();
+  });
+
+  test("Employee child subagent requests dispatch through service-owned SubagentManager metadata", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    const dispatch = vi.spyOn((service as unknown as { subagents: { dispatch(input: unknown): Promise<string> } }).subagents, "dispatch")
+      .mockResolvedValue("job_employee_child");
+    const serviceActions = (service as unknown as {
+      employees: {
+        serviceActions: {
+          requestSubagent(input: {
+            employeeId: string;
+            requestId: string;
+            profile: string;
+            prompt: string;
+            parentTurnId?: string;
+          }): Promise<string>;
+        };
+      };
+    }).employees.serviceActions;
+
+    await expect(serviceActions.requestSubagent({
+      employeeId: "email-calendar",
+      requestId: "req-service-1",
+      profile: "researcher",
+      prompt: "inspect",
+      parentTurnId: "turn-service-1"
+    })).resolves.toBe("job_employee_child");
+
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({
+      ownerType: "employee",
+      ownerId: "email-calendar",
+      ownerRequestId: "req-service-1",
+      parentTurnId: "turn-service-1",
+      resultTarget: "employee",
+      route: "return_to_main"
+    }));
   });
 
   test("persists queued Telegram events and notifies on restart recovery", async () => {
@@ -478,23 +517,23 @@ describe("service supervisor", () => {
     );
 
     expect(prompt).toContain("Active subagent jobs (compact routing snapshot; active/queued only):");
-    expect(prompt).toContain("emit steer_subagent only when exactly one steerable=true job matches");
+    expect(prompt).toContain("emit steer_subagent only when exactly one steerable=true non-Employee child job matches");
     expect(prompt).toContain("agent steer <ref> <text>");
-    expect(prompt).toContain("ref=0b8020bf id=job_0b8020bf704f422fbb82c9bcf3cde3aa status=running profile=implementer backend=codex_app_server steerable=true elapsed=3:05 created=2026-05-19T12:00:00.000Z model=gpt-5.5 effort=medium origin_chat_id=253768951 origin_message_id=700 summary=\"Implement steering snapshot\"");
-    expect(prompt).toContain("ref=abcd1234 id=job_abcd1234000000000000000000000000 status=queued profile=researcher backend=codex_exec steerable=false elapsed=1:05 created=2026-05-19T12:02:00.000Z summary=\"Research docs\"");
+    expect(prompt).toContain("ref=0b8020bf id=job_0b8020bf704f422fbb82c9bcf3cde3aa status=running profile=implementer backend=codex_app_server owner=main:main result=main steerable=true elapsed=3:05 created=2026-05-19T12:00:00.000Z model=gpt-5.5 effort=medium origin_chat_id=253768951 origin_message_id=700 summary=\"Implement steering snapshot\"");
+    expect(prompt).toContain("ref=abcd1234 id=job_abcd1234000000000000000000000000 status=queued profile=researcher backend=codex_exec owner=main:main result=main steerable=false elapsed=1:05 created=2026-05-19T12:02:00.000Z summary=\"Research docs\"");
     expect(prompt.indexOf("Active subagent jobs")).toBeLessThan(prompt.indexOf("User content:"));
   });
 
-  test("injects compact Factor routing context before user content", async () => {
+  test("injects compact Employee routing context before user content", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
     const service = new ServiceSupervisor(config, logger);
     (service as unknown as {
-      factors: {
+      employees: {
         runtimeSnapshot(limit?: number): unknown;
       };
-    }).factors.runtimeSnapshot = vi.fn().mockReturnValue({
-      factors: [
+    }).employees.runtimeSnapshot = vi.fn().mockReturnValue({
+      employees: [
         {
           id: "email-calendar",
           name: "Email/calendar",
@@ -505,7 +544,7 @@ describe("service supervisor", () => {
           profile: "email-calendar",
           model: "gpt-5.5",
           effort: "high",
-          backendThreadId: "thread-factor-1",
+          backendThreadId: "thread-employee-1",
           description: "Triage email/calendar context without mutations."
         }
       ],
@@ -513,13 +552,13 @@ describe("service supervisor", () => {
     });
 
     const prompt = (service as unknown as { formatEventForCodex(event: UserEvent): string }).formatEventForCodex(
-      userEvent(702, "ask the email factor what changed today")
+      userEvent(702, "ask the email employee what changed today")
     );
 
-    expect(prompt).toContain("Available factors (compact runtime snapshot; durable/non-ephemeral threads when enabled):");
-    expect(prompt).toContain("factor steer <id> <text>");
-    expect(prompt).toContain("id=email-calendar name=\"Email/calendar\" status=running running=true resumable=true enabled=true profile=email-calendar model=gpt-5.5 effort=high thread=thread-factor-1 purpose=\"Triage email/calendar context without mutations.\"");
-    expect(prompt.indexOf("Available factors")).toBeLessThan(prompt.indexOf("User content:"));
+    expect(prompt).toContain("Available employees (compact runtime snapshot; durable/non-ephemeral threads when enabled):");
+    expect(prompt).toContain("employee steer <id> <text>");
+    expect(prompt).toContain("id=email-calendar name=\"Email/calendar\" status=running running=true resumable=true enabled=true profile=email-calendar model=gpt-5.5 effort=high thread=thread-employee-1 child_jobs=0/0 purpose=\"Triage email/calendar context without mutations.\"");
+    expect(prompt.indexOf("Available employees")).toBeLessThan(prompt.indexOf("User content:"));
   });
 
   test.each([

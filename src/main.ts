@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { Command } from "commander";
 import { loadConfig, ensureConfiguredDirectories, writeDefaultConfigFilesIfMissing, resolveConfigPath } from "./config.js";
 import { createLogger } from "./logger.js";
-import { FactorManager } from "./factors.js";
+import { EmployeeManager } from "./employees.js";
 import { sendIpcMessage, type IpcMessage } from "./ipc.js";
 import { runLoopCli, syncCron, validateLoops } from "./loops.js";
 import { validateMonitors } from "./monitors.js";
@@ -140,64 +140,64 @@ monitors.command("validate")
     process.stdout.write(`valid monitors: ${parsed.monitors.length}\n`);
   });
 
-const factors = program.command("factors").description("durable Factor runtime/scaffold management");
-factors.command("list")
-  .description("list configured Factors")
+const employees = program.command("employees").alias("factors").description("durable Employee runtime/scaffold management");
+employees.command("list")
+  .description("list configured Employees")
   .option("--json", "print JSON")
   .action(async (options: { json?: boolean }) => {
-    const manager = await loadFactorManager();
-    if (options.json) process.stdout.write(`${JSON.stringify(manager.listFactors(), null, 2)}\n`);
+    const manager = await loadEmployeeManager();
+    if (options.json) process.stdout.write(`${JSON.stringify(manager.listEmployees(), null, 2)}\n`);
     else process.stdout.write(`${await manager.formatList()}\n`);
   });
-factors.command("status")
-  .argument("<id>", "factor id or prefix")
-  .description("show a Factor runtime/scaffold status")
+employees.command("status")
+  .argument("<id>", "employee id or prefix")
+  .description("show an Employee runtime/scaffold status")
   .option("--json", "print JSON state")
   .action(async (id: string, options: { json?: boolean }) => {
-    const manager = await loadFactorManager();
-    const resolution = manager.resolveFactorRef(id);
+    const manager = await loadEmployeeManager();
+    const resolution = manager.resolveEmployeeRef(id);
     if (options.json) {
       if (resolution.status !== "matched") {
         process.stdout.write(`${JSON.stringify(resolution, null, 2)}\n`);
         if (resolution.status === "not_found") process.exitCode = 1;
         return;
       }
-      const state = await manager.getFactorState(resolution.factor.id);
-      const directory = await manager.validateDirectory(resolution.factor.id);
-      process.stdout.write(`${JSON.stringify({ factor: resolution.factor, state, directory }, null, 2)}\n`);
+      const state = await manager.getEmployeeState(resolution.employee.id);
+      const directory = await manager.validateDirectory(resolution.employee.id);
+      process.stdout.write(`${JSON.stringify({ employee: resolution.employee, state, directory }, null, 2)}\n`);
       return;
     }
     process.stdout.write(`${await manager.formatStatus(id)}\n`);
   });
-factors.command("start")
-  .argument("<id>", "factor id or prefix")
-  .description("ask the running service to start/resume a Factor runtime")
+employees.command("start")
+  .argument("<id>", "employee id or prefix")
+  .description("ask the running service to start/resume an Employee runtime")
   .action(async (id: string) => {
-    const result = await sendFactorIpc("factor_start", { factorId: id });
-    process.stdout.write(`${formatIpcFactorResult(result)}\n`);
+    const result = await sendEmployeeIpc("employee_start", { employeeId: id });
+    process.stdout.write(`${formatIpcEmployeeResult(result)}\n`);
   });
-factors.command("stop")
-  .argument("<id>", "factor id or prefix")
-  .description("ask the running service to stop Factor runtime management")
+employees.command("stop")
+  .argument("<id>", "employee id or prefix")
+  .description("ask the running service to stop Employee runtime management")
   .action(async (id: string) => {
-    const result = await sendFactorIpc("factor_stop", { factorId: id });
-    process.stdout.write(`${formatIpcFactorResult(result)}\n`);
+    const result = await sendEmployeeIpc("employee_stop", { employeeId: id });
+    process.stdout.write(`${formatIpcEmployeeResult(result)}\n`);
   });
-factors.command("steer")
-  .argument("<id>", "factor id or prefix")
+employees.command("steer")
+  .argument("<id>", "employee id or prefix")
   .argument("<text...>", "steering/query text")
-  .description("ask the running service to send a turn to a Factor runtime")
+  .description("ask the running service to send a turn to an Employee runtime")
   .action(async (id: string, textParts: string[]) => {
-    const result = await sendFactorIpc("factor_steer", { factorId: id, text: textParts.join(" ") });
-    process.stdout.write(`${formatIpcFactorResult(result)}\n`);
+    const result = await sendEmployeeIpc("employee_steer", { employeeId: id, text: textParts.join(" ") });
+    process.stdout.write(`${formatIpcEmployeeResult(result)}\n`);
   });
-factors.command("propose")
-  .argument("<id>", "factor id or prefix")
+employees.command("propose")
+  .argument("<id>", "employee id or prefix")
   .argument("<action>", "proposal action: start, stop, steer, warmup, compact")
   .argument("[text...]", "proposal text for steer")
-  .description("record a proposal only; no Factor runtime/account mutation is executed")
+  .description("record a proposal only; no Employee runtime/account mutation is executed")
   .action(async (id: string, action: string, textParts: string[]) => {
-    const manager = await loadFactorManager();
+    const manager = await loadEmployeeManager();
     const result = await manager.propose(action as "start" | "stop" | "steer" | "warmup" | "compact", id, textParts.join(" "), "cli");
     process.stdout.write(`${result.message}\n`);
     if (result.status !== "proposal") process.exitCode = 1;
@@ -270,31 +270,31 @@ function runCapture(command: string, args: string[]): Promise<string> {
   });
 }
 
-async function loadFactorManager(): Promise<FactorManager> {
+async function loadEmployeeManager(): Promise<EmployeeManager> {
   const config = await loadConfig(program.opts().config);
   await ensureConfiguredDirectories(config);
   const state = new StateStore(config);
   await state.init();
   const logger = createLogger("silent", config.security.redactSecretsInLogs);
-  const manager = new FactorManager(config, state, logger);
+  const manager = new EmployeeManager(config, state, logger);
   await manager.init();
   return manager;
 }
 
-async function sendFactorIpc(
-  type: "factor_start" | "factor_stop" | "factor_steer",
-  payload: { factorId: string; text?: string }
+async function sendEmployeeIpc(
+  type: "employee_start" | "employee_stop" | "employee_steer",
+  payload: { employeeId: string; text?: string }
 ): Promise<unknown> {
   const config = await loadConfig(program.opts().config);
   const socketPath = resolveConfigPath(config, config.service.ipcSocket);
   try {
     return await sendIpcMessage(socketPath, { type, ...payload } as IpcMessage);
   } catch (error) {
-    throw new Error(`Could not reach running codex-chat service at ${socketPath}; start the service before using factors start/stop/steer. ${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(`Could not reach running codex-chat service at ${socketPath}; start the service before using employees start/stop/steer. ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
-function formatIpcFactorResult(result: unknown): string {
+function formatIpcEmployeeResult(result: unknown): string {
   if (result && typeof result === "object" && "message" in result && typeof (result as { message?: unknown }).message === "string") {
     return (result as { message: string }).message;
   }

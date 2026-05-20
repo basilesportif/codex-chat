@@ -1,4 +1,4 @@
-# Steerable Subagents and Durable Factors Plan
+# Steerable Subagents and Durable Employees Plan
 
 Date: 2026-05-19
 
@@ -9,9 +9,9 @@ This plan covers Tim's proposed codex-chat architecture upgrade:
 1. Replace one-shot child `codex exec` subagents with steerable child `codex app-server` workers.
 2. Keep current `job_*` IDs and the existing Telegram/job UI.
 3. Add steering first, from Telegram initially and then from directives plus IPC/API.
-4. Fully outline durable Factors, but defer Factor runtime implementation until steerable child workers are proven.
+4. Fully outline durable Employees, but defer Employee runtime implementation until steerable child workers are proven.
 
-The previous architecture review summary remains the ordering rule: steerable child `codex app-server` workers first; durable Factors second.
+The previous architecture review summary remains the ordering rule: steerable child `codex app-server` workers first; durable Employees second.
 
 This document is intentionally implementation-oriented. It names the current repo surfaces that should be changed later, but it does not implement any code.
 
@@ -36,28 +36,57 @@ The steerable-subagents foundation is implemented behind a safe backend flag:
   emit `steer_subagent` only for one matching `steerable=true` job; otherwise
   ask for clarification or point the user to `agent steer <ref> <text>`.
 
-The app-server backend is intentionally opt-in and minimal: one child app-server process per active job over a loopback WebSocket. Factors runtime remains deferred.
+The app-server backend is intentionally opt-in and minimal: one child app-server process per active job over a loopback WebSocket. Employee runtime now exists as a guarded scaffold with central service-owned child-subagent orchestration.
 
-## 2026-05-19 Factor Scaffold Implementation Note
+## 2026-05-20 Employee Orchestration Implementation Note
 
-The first safe Factor scaffold is implemented without starting durable Factor
-runtimes:
+Employee terminology is canonical across code, docs, config, commands, and
+user-facing output. Legacy `[factors]` config and `factor ...` command aliases
+remain accepted only for backward compatibility.
 
-- `[factors]` and `[factors.<id>]` config parse per-Factor directories,
+Implemented architecture:
+
+- `EmployeeManager` owns durable Employee runtime state and Employee turns.
+- `SubagentManager` remains the only owner of actual subagent execution.
+- Employee runtimes may request child work only by emitting a
+  `codex-chat-employee-service` JSON envelope with `request_subagent`,
+  `cancel_subagent`, or `steer_subagent`.
+- The service validates Employee capabilities, dispatches child jobs through
+  `SubagentManager`, and records owner metadata: `ownerType=employee`,
+  `ownerId=<employee-id>`, `ownerRequestId`, `parentTurnId`, and
+  `resultTarget=employee`.
+- Employees can cancel/steer only child jobs they own unless an admin/main
+  service path explicitly intervenes.
+- Terminal child results route back to the owning Employee as a new Employee
+  turn. If the Employee runtime is stopped, not resumable, or busy, the result
+  is stored under state and surfaced in `employee status`.
+- Stopping an Employee cascades cancellation to active child jobs it owns with
+  reason `employee_stopped`.
+- Active subagent snapshots and `agents detail` are owner-aware. Main-loop
+  steering guidance says to steer the owning Employee rather than arbitrary
+  Employee child jobs unless Tim explicitly asks for that nested child.
+
+## 2026-05-19 Employee Scaffold Implementation Note
+
+The first safe Employee scaffold was implemented without starting durable Employee
+runtimes. It has since been extended with the guarded app-server runtime and
+centralized child-subagent orchestration described above:
+
+- `[employees]` and `[employees.<id>]` config parse per-Employee directories,
   enabled flags, profile/model/effort, startup mode, warmup prompt/file,
   Git fields, memory/compaction policy placeholders, and capabilities/ACL
   placeholders.
-- Runtime/proposal state is stored under `data/state/factors/<id>.json`; Factor
-  content remains in each configured Factor directory (`data/factors/<id>` by
+- Runtime/proposal state is stored under `data/state/employees/<id>.json`; Employee
+  content remains in each configured Employee directory (`data/employees/<id>` by
   default, or an absolute path).
-- Service, Telegram, and CLI management surfaces can list/status and record
-  start/stop/steer/warmup/compact proposals, but they do not start a Factor
-  process or call external accounts.
+- Service, Telegram, and CLI management surfaces can list/status and now
+  start/resume/stop/steer when enabled; they fall back to proposal recording
+  when no runtime client is attached. They still do not call external accounts.
 - The email/calendar example stays disabled and scaffold-only. No email,
   calendar, project, todo, CRM, Git push, or canonical assistant workspace
   mutation is implemented by this pass.
 
-This preserves rollback: leave `factors.enabled = false` (the default) or set it
+This preserves rollback: leave `employees.enabled = false` (the default) or set it
 back to false before restart. The existing `codex_exec`/`codex_app_server`
 subagent backend flag is unchanged.
 
@@ -238,7 +267,7 @@ Acceptance criteria:
 
 Goal: expose top-level steering without changing the `job_*` UI.
 
-Steering is top-level only for this phase. If a Factor or child later spawns its own sub-agent, the top-level user steers the top-level child or Factor. That child or Factor can then decide whether to steer its own nested work.
+Steering is top-level only for this phase. If an Employee or child later spawns its own sub-agent, the top-level user steers the top-level child or Employee. That child or Employee can then decide whether to steer its own nested work.
 
 Telegram first:
 
@@ -379,39 +408,39 @@ Acceptance criteria:
 - Existing service users do not need to learn a new job ID model.
 - Exec fallback is explicit, tested, and documented as non-steerable.
 
-## Phase 7: Factor RFC and Scaffold After Steering Works
+## Phase 7: Employee RFC and Scaffold After Steering Works
 
-Goal: define durable Factors fully, but defer runtime implementation until child steering works reliably.
+Goal: define durable Employees fully, but defer runtime implementation until child steering works reliably.
 
-Factor definition:
+Employee definition:
 
 ```text
-Factor = named domain responsibility
+Employee = named domain responsibility
        + configurable dedicated directory
        + restartable Codex app-server runtime
        + warmup routine
-       + compacted/refactored durable knowledge
+       + compacted/refreshed durable knowledge
        + Git-backed persistence policy
        + steerable active turns
 ```
 
-Important constraint from Tim: Factor directories are configurable per Factor and can be changed in config at any time. They live on the main assistant server where the Factor runs. Memory can be increased if needed.
+Important constraint from Tim: Employee directories are configurable per Employee and can be changed in config at any time. They live on the main assistant server where the Employee runs. Memory can be increased if needed.
 
 Config sketch:
 
 ```toml
-[factors]
+[employees]
 enabled = false
-rootDir = "data/factors"
-socketDir = "data/run/factors"
+rootDir = "data/employees"
+socketDir = "data/run/employees"
 defaultModel = "gpt-5.5"
 defaultEffort = "medium"
 maxActive = 2
 
-[factors.email-calendar]
+[employees.email-calendar]
 enabled = true
 name = "Email/calendar"
-directory = "/home/tim/.assistant-claude/workspace/factors/email-calendar"
+directory = "/home/tim/.assistant-claude/workspace/employees/email-calendar"
 profile = "email-calendar"
 model = "gpt-5.5"
 effort = "high"
@@ -425,10 +454,10 @@ compactAfterTask = true
 Directory contract:
 
 ```text
-<factor-dir>/
+<employee-dir>/
   AGENTS.md
   README.md
-  factor.json
+  employee.json
   state/
     current_state.md
     open_loops.md
@@ -453,26 +482,26 @@ Directory contract:
 
 Resource assumptions:
 
-- Factors run on the same main assistant server as codex-chat unless explicitly changed later.
-- Each active Factor may own a child `codex app-server` process, a local socket, logs, and a working directory.
-- The local server must have enough memory for the configured active Factor count plus the main app-server and ephemeral subagents.
-- Factor runtime should use local Unix sockets only; no remote WebSocket exposure is part of the initial design.
-- Config changes to a Factor directory should be picked up on restart or explicit reload. If a directory changes while a Factor is active, stop the old runtime cleanly before starting against the new directory.
+- Employees run on the same main assistant server as codex-chat unless explicitly changed later.
+- Each active Employee may own a child `codex app-server` process, a local socket, logs, and a working directory.
+- The local server must have enough memory for the configured active Employee count plus the main app-server and ephemeral subagents.
+- Employee runtime should use local Unix sockets only; no remote WebSocket exposure is part of the initial design.
+- Config changes to an Employee directory should be picked up on restart or explicit reload. If a directory changes while an Employee is active, stop the old runtime cleanly before starting against the new directory.
 
 Persistence and Git:
 
-- A Factor's continuity comes from files in its directory, not from assuming a permanent model context.
+- An Employee's continuity comes from files in its directory, not from assuming a permanent model context.
 - Git persistence should be private by default.
-- Support either one repo per Factor or one monorepo with one directory per Factor.
+- Support either one repo per Employee or one monorepo with one directory per Employee.
 - Commit after successful compaction or explicit save points, not after every scratch edit.
 - Never commit credentials, OAuth tokens, raw secrets, socket paths, or local pid files.
-- Sensitive Factors such as email/calendar should prefer summaries and source pointers over raw email bodies.
+- Sensitive Employees such as email/calendar should prefer summaries and source pointers over raw email bodies.
 - Provide a delete/forget workflow before enabling broad personal-data persistence.
-- The supervisor should own safe Git operations rather than letting arbitrary Factor shell commands hide persistence behavior.
+- The supervisor should own safe Git operations rather than letting arbitrary Employee shell commands hide persistence behavior.
 
 Compaction:
 
-- Warmup reads `factor.json`, `AGENTS.md`, compacted durable context, `state/current_state.md`, and `state/open_loops.md`.
+- Warmup reads `employee.json`, `AGENTS.md`, compacted durable context, `state/current_state.md`, and `state/open_loops.md`.
 - Warmup writes or refreshes `state/runtime_briefing.md`.
 - Compaction should run after task completion, before Git persistence, and on a configured maintenance interval.
 - Compaction should promote durable facts out of raw logs, remove duplication, mark stale facts instead of deleting blindly, and keep operational state short.
@@ -480,12 +509,16 @@ Compaction:
 
 Steering model:
 
-- Factor turns use the same top-level steering path as subagents.
-- Steering is top-level only initially.
-- If a Factor spawns a nested subagent, the Factor can steer that subagent itself, or the top-level user can ask the Factor to steer it by steering the Factor.
-- Do not expose arbitrary nested-agent steering from the top-level service in the first Factor pass.
+- Employee turns use the same top-level steering path as subagents.
+- Employee child subagents are centrally owned by `SubagentManager` and tagged
+  with Employee owner metadata.
+- If an Employee needs nested work, it emits service actions; it does not spawn
+  subagents directly.
+- The top-level user should generally steer the Employee, not arbitrary
+  Employee-owned child jobs. Direct nested-child steering is available only when
+  explicitly requested and authorized by owner/admin rules.
 
-First pilot: email/calendar Factor
+First pilot: email/calendar Employee
 
 - Domain: checking email/calendar state, summarizing open loops, preparing suggested replies, and tracking recurring scheduling context.
 - Directory: configurable, likely under assistant-agent-data or another Tim-controlled private path.
@@ -495,22 +528,24 @@ First pilot: email/calendar Factor
 
 Deferred full runtime implementation:
 
-- The current `FactorManager` is scaffold/proposal-only. Do not implement
-  `FactorSupervisor`, `FactorGitService`, `FactorMaintenanceService`, always-on
-  runtimes, or account integrations until Phase 6 acceptance criteria are met
-  and persistence/privacy policy is reviewed.
-- The first Factor work after Phase 6 should extend this scaffold with:
-  - app-server runtime lifecycle using the proven child backend model
+- The guarded app-server Employee runtime and child-subagent orchestration now
+  exist, but `EmployeeSupervisor`, `EmployeeGitService`,
+  `EmployeeMaintenanceService`, account integrations, autonomous scheduling,
+  and Git push automation remain deferred until persistence/privacy policy is
+  reviewed.
+- Future Employee work should add:
   - reviewed directory creation/migration tooling
-  - an example private `email-calendar` Factor directory
+  - an example private `email-calendar` Employee directory
+  - fake account connector tests before any real account access
   - no Git push automation until persistence policy is reviewed
 
 Acceptance criteria for the RFC/scaffold:
 
-- Factor directories are configurable per Factor.
+- Employee directories are configurable per Employee.
 - The email/calendar pilot has a concrete directory layout and policy file.
 - Runtime work remains disabled by default.
-- The plan explains how Factors will reuse child app-server steering rather than inventing a separate control path.
+- The plan explains how Employees reuse centralized child-subagent orchestration
+  rather than inventing a separate execution ownership path.
 
 ## Open Technical Decisions
 
@@ -523,8 +558,8 @@ Acceptance criteria for the RFC/scaffold:
 - Whether current IPC should be upgraded to request/response errors before adding `subagent_steer`, or whether a separate HTTP/API surface should be introduced later.
 - How much child app-server protocol logging is safe by default for sensitive prompts.
 - Whether completed app-server child artifacts with steering transcripts should respect existing `cleanupArtifacts` or be retained longer for early canary debugging.
-- Where Factor directories should live by default for Tim's deployment: under `data/factors`, assistant-agent-data, or a separate private repo checkout.
-- Factor Git topology: one repo per Factor versus one private monorepo.
+- Where Employee directories should live by default for Tim's deployment: under `data/employees`, assistant-agent-data, or a separate private repo checkout.
+- Employee Git topology: one repo per Employee versus one private monorepo.
 
 ## Overall Acceptance Criteria
 
@@ -536,5 +571,6 @@ The steering migration is complete when:
 - The same steering capability has directive and IPC/API schemas ready, with implementation following Telegram.
 - `agent kill <ref>` gracefully interrupts app-server jobs with `turn/interrupt` before process kill fallback.
 - Active turn tracking, restart handling, orphan cleanup, and artifacts make failures diagnosable.
-- Factor runtime implementation has not started before the steering backend is proven.
-- The email/calendar Factor pilot has an RFC/scaffold plan that covers configurable directories, local resource assumptions, Git/persistence, compaction, privacy, and top-level-only steering.
+- Employee runtime stays guarded and disabled by default, with child subagent
+  execution centrally owned by `SubagentManager`.
+- The email/calendar Employee pilot has an RFC/scaffold plan that covers configurable directories, local resource assumptions, Git/persistence, compaction, privacy, and owner-aware steering.

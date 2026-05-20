@@ -132,7 +132,7 @@ describe("codex clients", () => {
     await client.stop();
   });
 
-  test("starts Factor threads as non-ephemeral with extended history persistence", async () => {
+  test("starts Employee threads as non-ephemeral with extended history persistence", async () => {
     vi.resetModules();
     const spawn = vi.fn(() => fakeChild());
     const sent: Array<{ method: string; params: Record<string, unknown> }> = [];
@@ -155,7 +155,7 @@ describe("codex clients", () => {
           sent.push({ method: message.method, params: message.params });
           const serviceName = typeof message.params?.serviceName === "string" ? message.params.serviceName : "";
           const result = message.method === "thread/start"
-            ? { thread: { id: serviceName.startsWith("codex-chat-factor:") ? "factor-thread" : "main-thread" } }
+            ? { thread: { id: serviceName.startsWith("codex-chat-employee:") ? "employee-thread" : "main-thread" } }
             : {};
           queueMicrotask(() => this.emit("message", JSON.stringify({ id: message.id, result })));
         }
@@ -178,46 +178,46 @@ describe("codex clients", () => {
     const client = new AppServerCodexClient(testConfig("/tmp/codex-chat-test"), state as never, behavior as never, fakeLogger() as never);
 
     await client.start();
-    const result = await client.startFactorThread({
+    const result = await client.startEmployeeThread({
       id: "email-calendar",
       name: "Email/calendar",
       description: "Triage email/calendar context.",
-      directory: "/tmp/codex-chat-test/factors/email-calendar",
+      directory: "/tmp/codex-chat-test/employees/email-calendar",
       profile: "email-calendar",
-      model: "gpt-factor",
+      model: "gpt-employee",
       effort: "high",
-      serviceName: "codex-chat-factor:email-calendar",
+      serviceName: "codex-chat-employee:email-calendar",
       baseInstructions: "base",
       developerInstructions: "dev"
     });
 
-    expect(result.backendThreadId).toBe("factor-thread");
-    const factorStart = sent.find((message) => message.method === "thread/start" && message.params.serviceName === "codex-chat-factor:email-calendar");
-    expect(factorStart?.params).toMatchObject({
-      model: "gpt-factor",
-      cwd: "/tmp/codex-chat-test/factors/email-calendar",
-      serviceName: "codex-chat-factor:email-calendar",
+    expect(result.backendThreadId).toBe("employee-thread");
+    const employeeStart = sent.find((message) => message.method === "thread/start" && message.params.serviceName === "codex-chat-employee:email-calendar");
+    expect(employeeStart?.params).toMatchObject({
+      model: "gpt-employee",
+      cwd: "/tmp/codex-chat-test/employees/email-calendar",
+      serviceName: "codex-chat-employee:email-calendar",
       ephemeral: false,
       persistExtendedHistory: true
     });
-    expect((factorStart?.params.config as Record<string, unknown> | undefined)?.model_reasoning_effort).toBe("high");
-    await client.resumeFactorThread({
+    expect((employeeStart?.params.config as Record<string, unknown> | undefined)?.model_reasoning_effort).toBe("high");
+    await client.resumeEmployeeThread({
       id: "email-calendar",
       name: "Email/calendar",
-      directory: "/tmp/codex-chat-test/factors/email-calendar",
+      directory: "/tmp/codex-chat-test/employees/email-calendar",
       profile: "email-calendar",
-      model: "gpt-factor",
+      model: "gpt-employee",
       effort: "high",
-      serviceName: "codex-chat-factor:email-calendar",
+      serviceName: "codex-chat-employee:email-calendar",
       baseInstructions: "base",
       developerInstructions: "dev",
-      backendThreadId: "factor-thread"
+      backendThreadId: "employee-thread"
     });
-    const factorResume = sent.find((message) => message.method === "thread/resume" && message.params.threadId === "factor-thread");
-    expect(factorResume?.params).toMatchObject({
-      threadId: "factor-thread",
-      model: "gpt-factor",
-      cwd: "/tmp/codex-chat-test/factors/email-calendar",
+    const employeeResume = sent.find((message) => message.method === "thread/resume" && message.params.threadId === "employee-thread");
+    expect(employeeResume?.params).toMatchObject({
+      threadId: "employee-thread",
+      model: "gpt-employee",
+      cwd: "/tmp/codex-chat-test/employees/email-calendar",
       persistExtendedHistory: true
     });
     await client.stop();

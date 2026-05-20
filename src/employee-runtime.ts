@@ -1,6 +1,6 @@
 import type { Attachment, CodexEvent } from "./types.js";
 
-export interface FactorThreadSpec {
+export interface EmployeeThreadSpec {
   id: string;
   name: string;
   description?: string;
@@ -14,23 +14,23 @@ export interface FactorThreadSpec {
   persistRawLogs?: boolean;
 }
 
-export interface FactorThreadStartResult {
+export interface EmployeeThreadStartResult {
   backendThreadId: string;
 }
 
-export interface FactorThreadResumeInput extends FactorThreadSpec {
+export interface EmployeeThreadResumeInput extends EmployeeThreadSpec {
   backendThreadId: string;
 }
 
-export interface FactorTurnInput extends FactorThreadSpec {
+export interface EmployeeTurnInput extends EmployeeThreadSpec {
   backendThreadId: string;
   text: string;
   attachments?: Attachment[];
   onTurnStarted?(turnId: string): void | Promise<void>;
 }
 
-export interface FactorRuntimeClient {
-  startFactorThread(input: FactorThreadSpec): Promise<FactorThreadStartResult>;
-  resumeFactorThread(input: FactorThreadResumeInput): Promise<void>;
-  sendFactorTurn(input: FactorTurnInput): AsyncIterable<CodexEvent>;
+export interface EmployeeRuntimeClient {
+  startEmployeeThread(input: EmployeeThreadSpec): Promise<EmployeeThreadStartResult>;
+  resumeEmployeeThread(input: EmployeeThreadResumeInput): Promise<void>;
+  sendEmployeeTurn(input: EmployeeTurnInput): AsyncIterable<CodexEvent>;
 }

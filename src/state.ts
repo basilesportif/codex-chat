@@ -1,7 +1,7 @@
 import { appendFile, mkdir, readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { AppConfig, resolveConfigPath } from "./config.js";
-import { FactorRuntimeState, LoopRun, MonitorEvent, StoredAction, SubagentBackendKind, SubagentJob } from "./types.js";
+import { EmployeeRuntimeState, LoopRun, MonitorEvent, StoredAction, SubagentBackendKind, SubagentJob } from "./types.js";
 import { atomicWriteJson, atomicWriteText, ensureDir, nowIso, pathExists, removeIfExists } from "./util.js";
 
 const pairingCodePath = "data/pairing_code.txt";
@@ -23,7 +23,7 @@ export class StateStore {
 
   async init(): Promise<void> {
     await ensureDir(this.root);
-    for (const dir of ["messages", "files", "turns", "queued_turns", "jobs", "factors", "loop_runs", "monitor_events", "actions"]) {
+    for (const dir of ["messages", "files", "turns", "queued_turns", "jobs", "employees", "employee_child_results", "loop_runs", "monitor_events", "actions"]) {
       await ensureDir(join(this.root, dir));
     }
     if (!(await pathExists(join(this.root, "schema.json")))) {
@@ -97,27 +97,43 @@ export class StateStore {
     return jobs;
   }
 
-  async saveFactorState(factor: FactorRuntimeState): Promise<void> {
-    await this.writeJson(`factors/${factor.id}.json`, factor);
+  async saveEmployeeState(employee: EmployeeRuntimeState): Promise<void> {
+    await this.writeJson(`employees/${employee.id}.json`, employee);
   }
 
-  async readFactorState(id: string): Promise<FactorRuntimeState | undefined> {
-    return this.readJson<FactorRuntimeState | undefined>(`factors/${id}.json`, undefined);
+  async readEmployeeState(id: string): Promise<EmployeeRuntimeState | undefined> {
+    return (
+      await this.readJson<EmployeeRuntimeState | undefined>(`employees/${id}.json`, undefined)
+    ) ?? await this.readJson<EmployeeRuntimeState | undefined>(`factors/${id}.json`, undefined);
   }
 
-  async listFactorStates(): Promise<FactorRuntimeState[]> {
-    const dir = this.path("factors");
-    const files = await readdir(dir).catch(() => []);
-    const factors: FactorRuntimeState[] = [];
-    for (const file of files) {
+  async listEmployeeStates(): Promise<EmployeeRuntimeState[]> {
+    const files = [
+      ...(await readdir(this.path("employees")).catch(() => [])).map((file) => ({ dir: this.path("employees"), file })),
+      ...(await readdir(this.path("factors")).catch(() => [])).map((file) => ({ dir: this.path("factors"), file }))
+    ];
+    const employees: EmployeeRuntimeState[] = [];
+    const seen = new Set<string>();
+    for (const { dir, file } of files) {
       if (!file.endsWith(".json")) continue;
       try {
-        factors.push(JSON.parse(await readFile(join(dir, file), "utf8")) as FactorRuntimeState);
+        const employee = JSON.parse(await readFile(join(dir, file), "utf8")) as EmployeeRuntimeState;
+        if (seen.has(employee.id)) continue;
+        seen.add(employee.id);
+        employees.push(employee);
       } catch {
-        // Ignore malformed historical factor state files.
+        // Ignore malformed historical employee state files.
       }
     }
-    return factors;
+    return employees;
+  }
+
+  async saveEmployeeChildResult(employeeId: string, jobId: string, value: unknown): Promise<string> {
+    const safeEmployeeId = employeeId.replace(/[^A-Za-z0-9._-]/g, "_");
+    const safeJobId = jobId.replace(/[^A-Za-z0-9._-]/g, "_");
+    const rel = `employee_child_results/${safeEmployeeId}/${safeJobId}-${Date.now()}.json`;
+    await this.writeJson(rel, value);
+    return this.path(rel);
   }
 
   async saveLoopRun(run: LoopRun): Promise<void> {

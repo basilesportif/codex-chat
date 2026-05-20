@@ -61,7 +61,7 @@ export type LoopsConfig = z.infer<typeof loopsConfigSchema>;
 interface LoopCallbacks {
   enqueueMain(text: string, metadata?: Record<string, unknown>): Promise<void>;
   sendAdmins(text: string): Promise<void>;
-  dispatchSubagent(input: { profile: string; prompt: string; route: Route; timeoutSec?: number; model?: string; effort?: string }): Promise<void>;
+  dispatchSubagent(input: { profile: string; prompt: string; route: Route; timeoutSec?: number; model?: string; effort?: string; ownerId?: string; ownerRequestId?: string }): Promise<void>;
 }
 
 export async function loadLoopsConfig(config: AppConfig): Promise<LoopsConfig> {
@@ -140,7 +140,7 @@ export class LoopManager {
     try {
       if (loop.type === "prompt") await this.handlePrompt(loop, route, run);
       if (loop.type === "command") await this.handleCommand(loop, route, run);
-      if (loop.type === "dispatch_subagent") await this.handleDispatch(loop, route);
+      if (loop.type === "dispatch_subagent") await this.handleDispatch(loop, route, run);
       run.status = "completed";
     } catch (error) {
       run.status = "failed";
@@ -216,7 +216,7 @@ export class LoopManager {
     run.outputPath = await this.writeRunOutput(run.id, eventText);
     if (route === "return_to_main") await this.callbacks.enqueueMain(eventText, { source: "loop", loopId: loop.id, runId: run.id });
     if (route === "send_to_admins" && !(loop.suppressEmptyOutput && prompt.trim() === "")) await this.callbacks.sendAdmins(eventText);
-    if (route === "dispatch_subagent") await this.callbacks.dispatchSubagent({ profile: loop.profile ?? "researcher", prompt: eventText, route: "return_to_main", timeoutSec: loop.timeoutSec, model: loop.model, effort: loop.effort });
+    if (route === "dispatch_subagent") await this.callbacks.dispatchSubagent({ profile: loop.profile ?? "researcher", prompt: eventText, route: "return_to_main", timeoutSec: loop.timeoutSec, model: loop.model, effort: loop.effort, ownerId: loop.id, ownerRequestId: run.id });
   }
 
   private async handleCommand(loop: LoopDefinition, route: Route, run: LoopRun): Promise<void> {
@@ -226,12 +226,12 @@ export class LoopManager {
     const eventText = [`Loop command completed: ${loop.id}`, `Command: ${loop.command} ${(loop.args ?? []).join(" ")}`, "", output].join("\n");
     if (route === "return_to_main") await this.callbacks.enqueueMain(eventText, { source: "loop", loopId: loop.id, runId: run.id });
     if (route === "send_to_admins" && !(loop.suppressEmptyOutput && output.trim() === "")) await this.callbacks.sendAdmins(eventText);
-    if (route === "dispatch_subagent") await this.callbacks.dispatchSubagent({ profile: loop.profile ?? "debugger", prompt: eventText, route: "return_to_main", timeoutSec: loop.timeoutSec, model: loop.model, effort: loop.effort });
+    if (route === "dispatch_subagent") await this.callbacks.dispatchSubagent({ profile: loop.profile ?? "debugger", prompt: eventText, route: "return_to_main", timeoutSec: loop.timeoutSec, model: loop.model, effort: loop.effort, ownerId: loop.id, ownerRequestId: run.id });
   }
 
-  private async handleDispatch(loop: LoopDefinition, route: Route): Promise<void> {
+  private async handleDispatch(loop: LoopDefinition, route: Route, run: LoopRun): Promise<void> {
     const prompt = loop.promptFile ? await readFile(resolveConfigPath(this.config, loop.promptFile), "utf8") : loop.prompt ?? "";
-    await this.callbacks.dispatchSubagent({ profile: loop.profile ?? "researcher", prompt, route, timeoutSec: loop.timeoutSec, model: loop.model, effort: loop.effort });
+    await this.callbacks.dispatchSubagent({ profile: loop.profile ?? "researcher", prompt, route, timeoutSec: loop.timeoutSec, model: loop.model, effort: loop.effort, ownerId: loop.id, ownerRequestId: run.id });
   }
 
   private async writeRunOutput(runId: string, output: string): Promise<string> {

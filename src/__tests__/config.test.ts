@@ -112,24 +112,24 @@ backend = "codex_exec"
     expect(config.subagents.backend).toBe("codex_app_server");
   });
 
-  test("parses dynamic Factor config tables into definitions", async () => {
+  test("parses dynamic Employee config tables into definitions", async () => {
     const path = await tempConfig(`
 version = 1
 
-[factors]
+[employees]
 enabled = true
-rootDir = "factor-root"
-socketDir = "factor-sockets"
-defaultModel = "gpt-factor-default"
+rootDir = "employee-root"
+socketDir = "employee-sockets"
+defaultModel = "gpt-employee-default"
 defaultEffort = "low"
 maxActive = 1
 
-[factors.email-calendar]
+[employees.email-calendar]
 enabled = true
 name = "Email/calendar"
-directory = "/tmp/email-calendar-factor"
+directory = "/tmp/email-calendar-employee"
 profile = "email-calendar"
-model = "gpt-factor"
+model = "gpt-employee"
 effort = "high"
 startup = "on_demand"
 warmupPrompt = "Read the briefing."
@@ -137,45 +137,63 @@ warmupFile = "warmup.md"
 persistRawLogs = false
 compactAfterTask = true
 
-[factors.email-calendar.memory]
+[employees.email-calendar.memory]
 enabled = true
 persistRawLogs = false
 notes = "summaries only"
 
-[factors.email-calendar.capabilities]
+[employees.email-calendar.capabilities]
 allowed = ["draft_replies"]
 denied = ["calendar_mutations"]
 `);
 
     const config = await loadConfig(path);
-    const factor = config.factors.definitions["email-calendar"];
+    const employee = config.employees.definitions["email-calendar"];
 
-    expect(config.factors.enabled).toBe(true);
-    expect(config.factors.rootDir).toBe("factor-root");
-    expect(config.factors.maxActive).toBe(1);
-    expect(factor?.enabled).toBe(true);
-    expect(factor?.name).toBe("Email/calendar");
-    expect(factor?.directory).toBe("/tmp/email-calendar-factor");
-    expect(factor?.profile).toBe("email-calendar");
-    expect(factor?.model).toBe("gpt-factor");
-    expect(factor?.effort).toBe("high");
-    expect(factor?.memory.notes).toBe("summaries only");
-    expect(factor?.capabilities.allowed).toEqual(["draft_replies"]);
-    expect(factor?.capabilities.denied).toEqual(["calendar_mutations"]);
+    expect(config.employees.enabled).toBe(true);
+    expect(config.employees.rootDir).toBe("employee-root");
+    expect(config.employees.maxActive).toBe(1);
+    expect(employee?.enabled).toBe(true);
+    expect(employee?.name).toBe("Email/calendar");
+    expect(employee?.directory).toBe("/tmp/email-calendar-employee");
+    expect(employee?.profile).toBe("email-calendar");
+    expect(employee?.model).toBe("gpt-employee");
+    expect(employee?.effort).toBe("high");
+    expect(employee?.memory.notes).toBe("summaries only");
+    expect(employee?.capabilities.allowed).toEqual(["draft_replies"]);
+    expect(employee?.capabilities.denied).toEqual(["calendar_mutations"]);
   });
 
-  test("rejects unsafe Factor IDs", async () => {
+  test("rejects unsafe Employee IDs", async () => {
+    const path = await tempConfig(`
+version = 1
+
+[employees]
+enabled = true
+
+[employees."../outside"]
+enabled = true
+`);
+
+    await expect(loadConfig(path)).rejects.toThrow(/Employee IDs/);
+  });
+
+  test("accepts legacy factors config as an Employee compatibility alias", async () => {
     const path = await tempConfig(`
 version = 1
 
 [factors]
 enabled = true
 
-[factors."../outside"]
+[factors.legacy]
 enabled = true
+name = "Legacy employee"
 `);
 
-    await expect(loadConfig(path)).rejects.toThrow(/Factor IDs/);
+    const config = await loadConfig(path);
+
+    expect(config.employees.enabled).toBe(true);
+    expect(config.employees.definitions.legacy?.name).toBe("Legacy employee");
   });
 
   test("adds Telegram user ID lists from environment", async () => {

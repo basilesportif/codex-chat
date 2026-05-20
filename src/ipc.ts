@@ -6,6 +6,10 @@ import { pathExists } from "./util.js";
 export type IpcMessage =
   | { type: "loop_run"; loopId: string; scheduledAt?: string }
   | { type: "subagent_steer"; jobId: string; text: string }
+  | { type: "employee_start"; employeeId: string }
+  | { type: "employee_stop"; employeeId: string }
+  | { type: "employee_steer"; employeeId: string; text: string }
+  | { type: "employee_status"; employeeId: string }
   | { type: "factor_start"; factorId: string }
   | { type: "factor_stop"; factorId: string }
   | { type: "factor_steer"; factorId: string; text: string }

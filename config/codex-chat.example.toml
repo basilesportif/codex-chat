@@ -68,24 +68,24 @@ childInterruptGraceMs = 5000
 allowedProfiles = []
 cleanupArtifacts = true
 
-[factors]
-# Durable Factors are disabled by default. When enabled, the service can start
-# minimal non-ephemeral app-server threads and persist per-Factor thread IDs.
+[employees]
+# Durable Employees are disabled by default. When enabled, the service can start
+# minimal non-ephemeral app-server threads and persist per-Employee thread IDs.
 # External account integrations, rich tools, autonomous scheduling, mutations,
 # and compaction are intentionally not implemented here.
 enabled = false
-rootDir = "data/factors"
-socketDir = "data/run/factors"
+rootDir = "data/employees"
+socketDir = "data/run/employees"
 defaultModel = "gpt-5.5"
 defaultEffort = "medium"
 maxActive = 2
 
-[factors.email-calendar]
+[employees.email-calendar]
 enabled = false
 name = "Email/calendar"
 description = "Triage email/calendar context and draft recommendations without mutating external accounts."
 # May be absolute; relative paths resolve from the codex-chat repo root.
-directory = "data/factors/email-calendar"
+directory = "data/employees/email-calendar"
 profile = "email-calendar"
 model = "gpt-5.5"
 effort = "high"
@@ -97,22 +97,24 @@ gitBranch = "main"
 persistRawLogs = false
 compactAfterTask = true
 
-[factors.email-calendar.memory]
+[employees.email-calendar.memory]
 enabled = true
 persistRawLogs = false
 notes = "Summaries and source pointers first; raw email/calendar bodies only by explicit future policy."
 
-[factors.email-calendar.compaction]
+[employees.email-calendar.compaction]
 compactAfterTask = true
 interval = "manual"
 notes = "Placeholder only; no compaction worker runs in scaffold mode."
 
-[factors.email-calendar.capabilities]
+[employees.email-calendar.capabilities]
+# Add "subagents" (or specific request_subagent/cancel_subagent/steer_subagent)
+# when this Employee is allowed to request centrally-managed child subagents.
 allowed = []
 denied = ["external_account_calls", "calendar_mutations", "crm_mutations", "todo_mutations"]
 notes = "Placeholder ACL/capability model for future pilots."
 
-[factors.email-calendar.acl]
+[employees.email-calendar.acl]
 telegramUserIds = []
 adminUserIds = []
 notes = "Placeholder ACL; no external account mutations are implemented by the minimal runtime."

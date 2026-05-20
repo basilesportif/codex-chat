@@ -9,18 +9,18 @@ const sandboxSchema = z.enum(["read-only", "workspace-write", "danger-full-acces
 const approvalSchema = z.enum(["untrusted", "on-failure", "on-request", "never"]);
 const telegramUserIdSchema = z.union([z.number().int(), z.string().min(1)]);
 const subagentBackendSchema = z.enum(["codex_exec", "codex_app_server"]);
-const factorStartupSchema = z.enum(["on_demand", "always"]);
-const factorIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$/, "Factor IDs may contain only letters, numbers, dot, underscore, and dash");
+const employeeStartupSchema = z.enum(["on_demand", "always"]);
+const employeeIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$/, "Employee IDs may contain only letters, numbers, dot, underscore, and dash");
 
-const factorMemoryPolicySchema = z.object({
-  // Placeholder policy: consumed by future Factor compaction/runtime work.
+const employeeMemoryPolicySchema = z.object({
+  // Placeholder policy: consumed by future Employee compaction/runtime work.
   enabled: z.boolean().default(true),
   persistRawLogs: z.boolean().default(false),
   retentionDays: z.number().int().positive().optional(),
   notes: z.string().default("")
 }).default({ enabled: true, persistRawLogs: false, notes: "" });
 
-const factorCompactionPolicySchema = z.object({
+const employeeCompactionPolicySchema = z.object({
   // Placeholder policy: no compaction worker is started by this scaffold.
   compactAfterTask: z.boolean().default(true),
   interval: z.string().default("manual"),
@@ -28,21 +28,21 @@ const factorCompactionPolicySchema = z.object({
   notes: z.string().default("")
 }).default({ compactAfterTask: true, interval: "manual", notes: "" });
 
-const factorCapabilitiesPolicySchema = z.object({
+const employeeCapabilitiesPolicySchema = z.object({
   // Placeholder allow/deny lists for future tool/account integrations.
   allowed: z.array(z.string()).default([]),
   denied: z.array(z.string()).default([]),
   notes: z.string().default("")
 }).default({ allowed: [], denied: [], notes: "" });
 
-const factorAclPolicySchema = z.object({
+const employeeAclPolicySchema = z.object({
   // Placeholder ACL: management surfaces are proposal-only in this scaffold.
   telegramUserIds: z.array(telegramUserIdSchema).default([]),
   adminUserIds: z.array(telegramUserIdSchema).default([]),
   notes: z.string().default("")
 }).default({ telegramUserIds: [], adminUserIds: [], notes: "" });
 
-const factorDefinitionSchema = z.object({
+const employeeDefinitionSchema = z.object({
   enabled: z.boolean().default(false),
   name: z.string().default(""),
   description: z.string().default(""),
@@ -51,17 +51,17 @@ const factorDefinitionSchema = z.object({
   profile: z.string().default(""),
   model: z.string().default(""),
   effort: effortSchema.optional(),
-  startup: factorStartupSchema.default("on_demand"),
+  startup: employeeStartupSchema.default("on_demand"),
   warmupPrompt: z.string().default(""),
   warmupFile: z.string().default(""),
   gitRemote: z.string().default(""),
   gitBranch: z.string().default("main"),
   persistRawLogs: z.boolean().default(false),
   compactAfterTask: z.boolean().default(true),
-  memory: factorMemoryPolicySchema,
-  compaction: factorCompactionPolicySchema,
-  capabilities: factorCapabilitiesPolicySchema,
-  acl: factorAclPolicySchema
+  memory: employeeMemoryPolicySchema,
+  compaction: employeeCompactionPolicySchema,
+  capabilities: employeeCapabilitiesPolicySchema,
+  acl: employeeAclPolicySchema
 }).strict();
 
 const configSchema = z.object({
@@ -129,14 +129,14 @@ const configSchema = z.object({
     allowedProfiles: z.array(z.string()).default([]),
     cleanupArtifacts: z.boolean().default(true)
   }),
-  factors: z.object({
+  employees: z.object({
     enabled: z.boolean().default(false),
-    rootDir: z.string().default("data/factors"),
-    socketDir: z.string().default("data/run/factors"),
+    rootDir: z.string().default("data/employees"),
+    socketDir: z.string().default("data/run/employees"),
     defaultModel: z.string().default("gpt-5.5"),
     defaultEffort: effortSchema.default("medium"),
     maxActive: z.number().int().nonnegative().default(2),
-    definitions: z.record(factorIdSchema, factorDefinitionSchema).default({})
+    definitions: z.record(employeeIdSchema, employeeDefinitionSchema).default({})
   }),
   loops: z.object({
     enabled: z.boolean().default(true),
@@ -175,7 +175,7 @@ export type AppConfig = z.infer<typeof configSchema> & {
   telegramBotToken?: string;
   openaiApiKey?: string;
 };
-export type FactorDefinitionConfig = z.infer<typeof factorDefinitionSchema>;
+export type EmployeeDefinitionConfig = z.infer<typeof employeeDefinitionSchema>;
 
 const defaultConfig = configSchema.parse({
   version: 1,
@@ -238,10 +238,10 @@ const defaultConfig = configSchema.parse({
     allowedProfiles: [],
     cleanupArtifacts: true
   },
-  factors: {
+  employees: {
     enabled: false,
-    rootDir: "data/factors",
-    socketDir: "data/run/factors",
+    rootDir: "data/employees",
+    socketDir: "data/run/employees",
     defaultModel: "gpt-5.5",
     defaultEffort: "medium",
     maxActive: 2,
@@ -334,7 +334,7 @@ function uniqueTelegramUserIds(values: Array<number | string>): Array<number | s
   return out;
 }
 
-const factorTopLevelKeys = new Set([
+const employeeTopLevelKeys = new Set([
   "enabled",
   "rootDir",
   "socketDir",
@@ -348,28 +348,33 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function normalizeParsedFactorConfig(parsed: unknown): unknown {
-  if (!isPlainRecord(parsed) || !isPlainRecord(parsed.factors)) return parsed;
-  const factors = parsed.factors;
-  const existingDefinitions = isPlainRecord(factors.definitions) ? factors.definitions : {};
+function normalizeParsedEmployeeConfig(parsed: unknown): unknown {
+  if (!isPlainRecord(parsed)) return parsed;
+  if (!isPlainRecord(parsed.employees) && isPlainRecord((parsed as Record<string, unknown>).factors)) {
+    // Backward compatibility for pre-Employee configs.
+    parsed.employees = (parsed as Record<string, unknown>).factors;
+  }
+  if (!isPlainRecord(parsed.employees)) return parsed;
+  const employees = parsed.employees;
+  const existingDefinitions = isPlainRecord(employees.definitions) ? employees.definitions : {};
   const definitions: Record<string, unknown> = { ...existingDefinitions };
   let changed = Object.keys(existingDefinitions).length > 0;
 
   // Support the plan's TOML shape:
   //
-  //   [factors.email-calendar]
+  //   [employees.email-calendar]
   //   enabled = true
   //
-  // Internally we normalize dynamic child tables into factors.definitions so
+  // Internally we normalize dynamic child tables into employees.definitions so
   // the validated AppConfig type stays explicit and safe.
-  for (const [key, value] of Object.entries(factors)) {
-    if (factorTopLevelKeys.has(key)) continue;
+  for (const [key, value] of Object.entries(employees)) {
+    if (employeeTopLevelKeys.has(key)) continue;
     if (!isPlainRecord(value)) continue;
     definitions[key] = value;
-    delete factors[key];
+    delete employees[key];
     changed = true;
   }
-  if (changed) factors.definitions = definitions;
+  if (changed) employees.definitions = definitions;
   return parsed;
 }
 
@@ -402,7 +407,7 @@ export async function loadConfig(configPath = "config/codex-chat.toml"): Promise
   const absoluteConfigPath = resolve(configPath);
   let parsed: unknown = {};
   if (await pathExists(absoluteConfigPath)) {
-    parsed = normalizeParsedFactorConfig(parseToml(await readFile(absoluteConfigPath, "utf8")));
+    parsed = normalizeParsedEmployeeConfig(parseToml(await readFile(absoluteConfigPath, "utf8")));
   }
   const merged = deepMerge(deepMerge(defaultConfig, parsed), collectEnvOverrides());
   const config = configSchema.parse(merged);
@@ -433,8 +438,8 @@ export async function ensureConfiguredDirectories(config: AppConfig): Promise<vo
     config.files.artifactDir,
     config.subagents.artifactDir,
     config.subagents.childSocketDir,
-    config.factors.rootDir,
-    config.factors.socketDir,
+    config.employees.rootDir,
+    config.employees.socketDir,
     "data/logs",
     "data/run",
     "data/spool/loops",

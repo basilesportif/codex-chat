@@ -36,7 +36,7 @@ describe("state store", () => {
 
     expect((await stat(join(root, "state"))).isDirectory()).toBe(true);
     expect((await stat(join(root, "state", "jobs"))).isDirectory()).toBe(true);
-    expect((await stat(join(root, "state", "factors"))).isDirectory()).toBe(true);
+    expect((await stat(join(root, "state", "employees"))).isDirectory()).toBe(true);
     expect(JSON.parse(await readFile(join(root, "state", "schema.json"), "utf8"))).toMatchObject({ version: 1 });
   });
 
@@ -88,17 +88,17 @@ describe("state store", () => {
     await expect(access(path)).rejects.toThrow();
   });
 
-  test("stores Factor runtime scaffold state under the state directory", async () => {
+  test("stores Employee runtime scaffold state under the state directory", async () => {
     const { StateStore } = await import("../state.js");
     const root = await tempRoot();
     const store = new StateStore(testConfig(root));
 
     await store.init();
-    await store.saveFactorState({
+    await store.saveEmployeeState({
       id: "email-calendar",
       status: "proposal_pending",
       enabled: true,
-      directory: join(root, "factor"),
+      directory: join(root, "employee"),
       profile: "email-calendar",
       model: "gpt-5.5",
       effort: "high",
@@ -113,9 +113,9 @@ describe("state store", () => {
       }
     });
 
-    const path = join(root, "state", "factors", "email-calendar.json");
+    const path = join(root, "state", "employees", "email-calendar.json");
     expect(JSON.parse(await readFile(path, "utf8"))).toMatchObject({ id: "email-calendar", runtimeMode: "scaffold_only" });
-    expect(await store.readFactorState("email-calendar")).toMatchObject({ status: "proposal_pending" });
-    expect(await store.listFactorStates()).toHaveLength(1);
+    expect(await store.readEmployeeState("email-calendar")).toMatchObject({ status: "proposal_pending" });
+    expect(await store.listEmployeeStates()).toHaveLength(1);
   });
 });

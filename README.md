@@ -30,11 +30,11 @@ codex-chat health --json
 codex-chat loop sync
 codex-chat loop run <id>
 codex-chat monitors validate
-codex-chat factors list
-codex-chat factors status <id>
-codex-chat factors start <id>
-codex-chat factors steer <id> <query>
-codex-chat factors propose <id> steer <proposal text>
+codex-chat employees list
+codex-chat employees status <id>
+codex-chat employees start <id>
+codex-chat employees steer <id> <query>
+codex-chat employees propose <id> steer <proposal text>
 codex-chat service install --user
 codex-chat jobs list
 ```
@@ -48,8 +48,8 @@ codex-chat jobs list
 - JSON state: `data/state/`
 - Telegram downloads: `data/files/`
 - Subagent artifacts: `data/subagents/`
-- Factor runtime root: `data/factors/`
-- Factor runtime state/proposals: `data/state/factors/`
+- Employee runtime root: `data/employees/`
+- Employee runtime state/proposals: `data/state/employees/`
 - Disposable generated-image staging: `data/artifacts/generated-images/`
 
 ## Subagent Backend Flag
@@ -87,34 +87,45 @@ line as soon as possible when they receive such a steering request, then keep
 working. For a non-cooperative/mechanical snapshot that does not depend on
 model output, use `agent status <ref>`.
 
-## Durable Factors
+## Durable Employees
 
-`[factors]` is a disabled-by-default feature flag for durable Factors: named,
-directory-backed domain agents such as an email/calendar Factor. The current
+`[employees]` is a disabled-by-default feature flag for durable Employees: named,
+directory-backed domain agents such as an email/calendar Employee. The current
 runtime is intentionally minimal:
 
-- config parsing supports `[factors.<id>]` with per-Factor `directory`,
+- config parsing supports `[employees.<id>]` with per-Employee `directory`,
   `enabled`, `profile`, `model`, `effort`, `startup`, `description`, warmup prompt/file,
   memory/compaction placeholders, and capabilities/ACL placeholders;
 - state, proposal, and saved app-server thread metadata live under
-  `data/state/factors/`;
-- Factor-owned files should live only in the configured Factor directory
-  (`data/factors/<id>` by default, or an absolute per-Factor path);
-- when `[factors]` and the individual Factor are enabled, `factor start <id>`
+  `data/state/employees/`;
+- Employee-owned files should live only in the configured Employee directory
+  (`data/employees/<id>` by default, or an absolute per-Employee path);
+- when `[employees]` and the individual Employee are enabled, `employee start <id>`
   starts or resumes a non-ephemeral Codex app-server thread using
   `persistExtendedHistory`; saved `backendThreadId` values are resumed on
-  service restart for running/`startup = "always"` Factors, and resume failure
+  service restart for running/`startup = "always"` Employees, and resume failure
   starts a fresh thread while recording `lastResumeError`;
-- `factors`, `factor status <id>`, `factor start <id>`, `factor stop <id>`, and
-  `factor steer <id> <text>` are service-level Telegram commands;
-- `codex-chat factors list|status|start|stop|steer|propose` provides local CLI
+- `employees`, `employee status <id>`, `employee start <id>`, `employee stop <id>`, and
+  `employee steer <id> <text>` are service-level Telegram commands;
+- `codex-chat employees list|status|start|stop|steer|propose` provides local CLI
   management; start/stop/steer are sent to the running service over IPC;
-- every main Codex turn includes a compact `Available factors` snapshot so the
-  main loop can see configured/running/resumable Factors and the service
+- every main Codex turn includes a compact `Available employees` snapshot so the
+  main loop can see configured/running/resumable Employees and the service
   commands used to steer them;
+- Employees can request child subagents only by emitting a
+  `codex-chat-employee-service` envelope with `request_subagent`,
+  `cancel_subagent`, or `steer_subagent`; the central SubagentManager remains
+  the only component that starts, steers, cancels, and records those jobs;
+- Employee child results are routed back to the owning Employee. If that runtime
+  is not running or is busy, the result is stored under state and surfaced in
+  `employee status <id>` instead of being dropped;
 - no email/calendar account call, project/todo/CRM mutation, rich tool,
   autonomous scheduler, Git push, or compaction worker is implemented by this
   minimal runtime.
+
+Backward compatibility: existing `[factors]` config and `factor ...` command
+aliases are still accepted, but new docs, examples, and output use
+Employee/employee terminology.
 
 Regular subagents remain ephemeral by default: app-server subagents use
 `ephemeral: true`, do not request extended history persistence, and are not
@@ -127,11 +138,13 @@ are queued, running, or cancelling subagent jobs. The snapshot is intentionally
 short and omits terminal history; use `agents detail` for active jobs plus the last 10 terminal jobs.
 
 Each active line includes the short ref, full `job_...` id, status, profile,
-backend, `steerable` boolean, elapsed and created times, summary, model/effort,
-and origin Telegram chat/message ids when available. Natural-language steering
-works from this context: the main loop emits `steer_subagent` only when exactly
-one `steerable=true` job matches the user's request. Otherwise it asks which job
-to steer or tells the user to run `agent steer <ref> <text>`.
+backend, owner/result metadata, `steerable` boolean, elapsed and created times,
+summary, model/effort, and origin Telegram chat/message ids when available.
+Natural-language steering works from this context: the main loop emits
+`steer_subagent` only when exactly one `steerable=true` non-Employee child job
+matches the user's request. For `owner=employee:<id>` jobs, prefer steering the
+Employee (`employee steer <id> <text>`) unless the user explicitly asks to
+control that exact nested child.
 
 ## Browser Verification
 

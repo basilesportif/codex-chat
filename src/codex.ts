@@ -4,7 +4,7 @@ import WebSocket from "ws";
 import type { Logger } from "pino";
 import { AppConfig } from "./config.js";
 import { BehaviorPack } from "./behavior.js";
-import type { FactorRuntimeClient, FactorThreadResumeInput, FactorThreadSpec, FactorThreadStartResult, FactorTurnInput } from "./factor-runtime.js";
+import type { EmployeeRuntimeClient, EmployeeThreadResumeInput, EmployeeThreadSpec, EmployeeThreadStartResult, EmployeeTurnInput } from "./employee-runtime.js";
 import { LogBuffer, scrubSecrets } from "./log-buffer.js";
 import { StateStore } from "./state.js";
 import { CodexClient, CodexEvent, CodexHealth, CodexTurnInput } from "./types.js";
@@ -71,7 +71,7 @@ export interface CodexCrashInfo {
 
 export type CodexCrashHandler = (reason: string, info: CodexCrashInfo) => void;
 
-export class AppServerCodexClient implements CodexClient, FactorRuntimeClient {
+export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient {
   private child?: ChildProcess;
   private ws?: WebSocket;
   private requestId = 1;
@@ -295,14 +295,14 @@ export class AppServerCodexClient implements CodexClient, FactorRuntimeClient {
     }
   }
 
-  async startFactorThread(input: FactorThreadSpec): Promise<FactorThreadStartResult> {
+  async startEmployeeThread(input: EmployeeThreadSpec): Promise<EmployeeThreadStartResult> {
     this.assertConnected();
     const response = await this.request<Record<string, unknown>>("thread/start", {
       model: input.model,
       cwd: input.directory,
       approvalPolicy: this.config.codex.approvalPolicy,
       sandbox: this.config.codex.sandbox,
-      config: this.threadConfig(input.effort, this.factorWritableRoots(input.directory)),
+      config: this.threadConfig(input.effort, this.employeeWritableRoots(input.directory)),
       serviceName: input.serviceName,
       baseInstructions: input.baseInstructions,
       developerInstructions: input.developerInstructions,
@@ -312,12 +312,12 @@ export class AppServerCodexClient implements CodexClient, FactorRuntimeClient {
     });
     const thread = response.thread as Record<string, unknown> | undefined;
     const threadId = typeof thread?.id === "string" ? thread.id : undefined;
-    if (!threadId) throw new Error(`Codex app-server did not return a thread id for Factor ${input.id}`);
-    this.logBuffer.append("event", scrubSecrets(`[FACTOR THREAD START] factor=${input.id} thread_id=${threadId}`));
+    if (!threadId) throw new Error(`Codex app-server did not return a thread id for Employee ${input.id}`);
+    this.logBuffer.append("event", scrubSecrets(`[EMPLOYEE THREAD START] employee=${input.id} thread_id=${threadId}`));
     return { backendThreadId: threadId };
   }
 
-  async resumeFactorThread(input: FactorThreadResumeInput): Promise<void> {
+  async resumeEmployeeThread(input: EmployeeThreadResumeInput): Promise<void> {
     this.assertConnected();
     await this.request("thread/resume", {
       threadId: input.backendThreadId,
@@ -325,14 +325,14 @@ export class AppServerCodexClient implements CodexClient, FactorRuntimeClient {
       cwd: input.directory,
       approvalPolicy: this.config.codex.approvalPolicy,
       sandbox: this.config.codex.sandbox,
-      config: this.threadConfig(input.effort, this.factorWritableRoots(input.directory)),
+      config: this.threadConfig(input.effort, this.employeeWritableRoots(input.directory)),
       developerInstructions: input.developerInstructions,
       persistExtendedHistory: true
     });
-    this.logBuffer.append("event", scrubSecrets(`[FACTOR THREAD RESUME] factor=${input.id} thread_id=${input.backendThreadId}`));
+    this.logBuffer.append("event", scrubSecrets(`[EMPLOYEE THREAD RESUME] employee=${input.id} thread_id=${input.backendThreadId}`));
   }
 
-  async *sendFactorTurn(input: FactorTurnInput): AsyncIterable<CodexEvent> {
+  async *sendEmployeeTurn(input: EmployeeTurnInput): AsyncIterable<CodexEvent> {
     this.assertConnected();
     const queue = new AsyncQueue<CodexEvent>();
     const userInput: unknown[] = [{ type: "text", text: input.text, text_elements: [] }];
@@ -373,9 +373,9 @@ export class AppServerCodexClient implements CodexClient, FactorRuntimeClient {
       });
       const turn = response.turn as Record<string, unknown> | undefined;
       turnId = typeof turn?.id === "string" ? turn.id : "";
-      if (!turnId) throw new Error(`Codex app-server did not return a turn id for Factor ${input.id}`);
+      if (!turnId) throw new Error(`Codex app-server did not return a turn id for Employee ${input.id}`);
       await input.onTurnStarted?.(turnId);
-      this.logBuffer.append("event", scrubSecrets(`[FACTOR TURN START] factor=${input.id} turn_id=${turnId} thread_id=${input.backendThreadId}`));
+      this.logBuffer.append("event", scrubSecrets(`[EMPLOYEE TURN START] employee=${input.id} turn_id=${turnId} thread_id=${input.backendThreadId}`));
       for await (const event of queue.iterate()) yield event;
     } finally {
       this.notificationHandlers.delete(handler);
@@ -404,7 +404,7 @@ export class AppServerCodexClient implements CodexClient, FactorRuntimeClient {
     return cfg;
   }
 
-  private factorWritableRoots(directory: string): string[] {
+  private employeeWritableRoots(directory: string): string[] {
     const roots = [directory, ...(this.config.codex.addDirs ?? [])].filter(Boolean);
     return [...new Set(roots)];
   }

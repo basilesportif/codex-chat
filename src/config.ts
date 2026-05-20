@@ -350,10 +350,6 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 
 function normalizeParsedEmployeeConfig(parsed: unknown): unknown {
   if (!isPlainRecord(parsed)) return parsed;
-  if (!isPlainRecord(parsed.employees) && isPlainRecord((parsed as Record<string, unknown>).factors)) {
-    // Backward compatibility for pre-Employee configs.
-    parsed.employees = (parsed as Record<string, unknown>).factors;
-  }
   if (!isPlainRecord(parsed.employees)) return parsed;
   const employees = parsed.employees;
   const existingDefinitions = isPlainRecord(employees.definitions) ? employees.definitions : {};

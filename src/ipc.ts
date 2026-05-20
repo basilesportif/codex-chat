@@ -10,10 +10,6 @@ export type IpcMessage =
   | { type: "employee_stop"; employeeId: string }
   | { type: "employee_steer"; employeeId: string; text: string }
   | { type: "employee_status"; employeeId: string }
-  | { type: "factor_start"; factorId: string }
-  | { type: "factor_stop"; factorId: string }
-  | { type: "factor_steer"; factorId: string; text: string }
-  | { type: "factor_status"; factorId: string }
   | { type: "ping" };
 
 export type IpcResponse = { ok: true; result?: unknown } | { ok: false; error: string };

@@ -188,7 +188,7 @@ export interface EmployeeRuntimeSnapshot {
 
 export function parseEmployeeCommand(text: string): EmployeeCommand {
   const trimmed = text.trim();
-  const noun = "(?:employees?|employee|factors?|factor)";
+  const noun = "employees?";
   if (new RegExp(`^${noun}$`, "i").test(trimmed) || new RegExp(`^${noun}\\s+list$`, "i").test(trimmed)) return { isEmployee: true, action: "list" };
 
   const status = trimmed.match(new RegExp(`^${noun}\\s+status\\s+(\\S+)$`, "i"));
@@ -646,7 +646,7 @@ export class EmployeeManager {
 
   async deliverChildSubagentResult(job: SubagentJob, result: string): Promise<void> {
     const employeeId = job.ownerId;
-    if (!employeeId || (job.ownerType !== "employee" && (job.ownerType as unknown) !== "factor")) {
+    if (!employeeId || job.ownerType !== "employee") {
       this.logger.warn({ component: "employees", event: "child_result_wrong_owner", jobId: job.id, ownerType: job.ownerType, ownerId: job.ownerId }, "received Employee child result for non-Employee-owned job");
       return;
     }
@@ -838,7 +838,7 @@ export class EmployeeManager {
 
   private childJobSummary(employeeId: string): EmployeeChildJobSummary {
     const jobs = this.serviceActions
-      ? this.serviceActions.listSubagentJobs().filter((job) => (job.ownerType === "employee" || (job.ownerType as unknown) === "factor") && job.ownerId === employeeId)
+      ? this.serviceActions.listSubagentJobs().filter((job) => job.ownerType === "employee" && job.ownerId === employeeId)
       : [];
     const queued = jobs.filter((job) => job.status === "queued").length;
     const running = jobs.filter((job) => job.status === "running").length;
@@ -997,7 +997,7 @@ interface EmployeeServiceBlock {
   complete: boolean;
 }
 
-const employeeServiceStart = /^[ \t]*```(?:codex-chat-employee-service|employee-service-action|codex-chat-factor-service|factor-service-action)[ \t]*$/;
+const employeeServiceStart = /^[ \t]*```(?:codex-chat-employee-service|employee-service-action)[ \t]*$/;
 const employeeServiceEnd = /^[ \t]*```[ \t]*$/;
 
 export function parseEmployeeServiceOutput(text: string): EmployeeServiceParseResult {

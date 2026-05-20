@@ -41,8 +41,7 @@ The app-server backend is intentionally opt-in and minimal: one child app-server
 ## 2026-05-20 Employee Orchestration Implementation Note
 
 Employee terminology is canonical across code, docs, config, commands, and
-user-facing output. Legacy `[factors]` config and `factor ...` command aliases
-remain accepted only for backward compatibility.
+user-facing output.
 
 Implemented architecture:
 

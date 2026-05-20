@@ -66,7 +66,6 @@ describe("Employee runtime/scaffold", () => {
     expect(parseEmployeeCommand("employees")).toEqual({ isEmployee: true, action: "list" });
     expect(parseEmployeeCommand("employee status email-calendar")).toEqual({ isEmployee: true, action: "status", id: "email-calendar" });
     expect(parseEmployeeCommand("employee start email-calendar")).toEqual({ isEmployee: true, action: "start", id: "email-calendar" });
-    expect(parseEmployeeCommand("factor status email-calendar")).toEqual({ isEmployee: true, action: "status", id: "email-calendar" });
     expect(parseEmployeeCommand("employee steer email-calendar summarize but do not mutate")).toEqual({
       isEmployee: true,
       action: "steer",

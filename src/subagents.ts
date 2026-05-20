@@ -809,7 +809,6 @@ export class SubagentManager {
   }
 
   private normalizeOwnerType(value: unknown): SubagentOwnerType {
-    if (value === "factor") return "employee";
     if (value === "loop" || value === "monitor" || value === "employee") return value;
     return "main";
   }
@@ -831,7 +830,6 @@ export class SubagentManager {
   }
 
   private jobResultTarget(job: SubagentJob): SubagentResultTarget {
-    if ((job.resultTarget as unknown) === "factor") return "employee";
     return job.resultTarget ?? this.resultTargetForRoute(job.route);
   }
 

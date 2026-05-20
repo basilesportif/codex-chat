@@ -102,16 +102,11 @@ export class StateStore {
   }
 
   async readEmployeeState(id: string): Promise<EmployeeRuntimeState | undefined> {
-    return (
-      await this.readJson<EmployeeRuntimeState | undefined>(`employees/${id}.json`, undefined)
-    ) ?? await this.readJson<EmployeeRuntimeState | undefined>(`factors/${id}.json`, undefined);
+    return this.readJson<EmployeeRuntimeState | undefined>(`employees/${id}.json`, undefined);
   }
 
   async listEmployeeStates(): Promise<EmployeeRuntimeState[]> {
-    const files = [
-      ...(await readdir(this.path("employees")).catch(() => [])).map((file) => ({ dir: this.path("employees"), file })),
-      ...(await readdir(this.path("factors")).catch(() => [])).map((file) => ({ dir: this.path("factors"), file }))
-    ];
+    const files = (await readdir(this.path("employees")).catch(() => [])).map((file) => ({ dir: this.path("employees"), file }));
     const employees: EmployeeRuntimeState[] = [];
     const seen = new Set<string>();
     for (const { dir, file } of files) {

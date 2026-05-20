@@ -337,25 +337,22 @@ export class ServiceSupervisor {
         if (result.status !== "success") throw new Error(result.message);
         return result;
       }
-      if (message.type === "employee_start" || message.type === "factor_start") {
-        const employeeId = message.type === "factor_start" ? message.factorId : message.employeeId;
-        const result = await this.employees.startEmployee(employeeId, "ipc");
+      if (message.type === "employee_start") {
+        const result = await this.employees.startEmployee(message.employeeId, "ipc");
         if (!["started", "resumed"].includes(result.status)) throw new Error(result.message);
         return result;
       }
-      if (message.type === "employee_stop" || message.type === "factor_stop") {
-        const employeeId = message.type === "factor_stop" ? message.factorId : message.employeeId;
-        const result = await this.employees.stopEmployee(employeeId, "ipc");
+      if (message.type === "employee_stop") {
+        const result = await this.employees.stopEmployee(message.employeeId, "ipc");
         if (result.status !== "stopped") throw new Error(result.message);
         return result;
       }
-      if (message.type === "employee_steer" || message.type === "factor_steer") {
-        const employeeId = message.type === "factor_steer" ? message.factorId : message.employeeId;
-        const result = await this.employees.steerEmployee(employeeId, message.text, "ipc");
+      if (message.type === "employee_steer") {
+        const result = await this.employees.steerEmployee(message.employeeId, message.text, "ipc");
         if (result.status !== "steered") throw new Error(result.message);
         return result;
       }
-      if (message.type === "employee_status" || message.type === "factor_status") return this.employees.formatStatus(message.type === "factor_status" ? message.factorId : message.employeeId);
+      if (message.type === "employee_status") return this.employees.formatStatus(message.employeeId);
       if (message.type === "ping") return { pong: true };
       throw new Error(`Unknown IPC message type: ${(message as { type?: string }).type ?? "unknown"}`);
     });

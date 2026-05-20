@@ -178,24 +178,6 @@ enabled = true
     await expect(loadConfig(path)).rejects.toThrow(/Employee IDs/);
   });
 
-  test("accepts legacy factors config as an Employee compatibility alias", async () => {
-    const path = await tempConfig(`
-version = 1
-
-[factors]
-enabled = true
-
-[factors.legacy]
-enabled = true
-name = "Legacy employee"
-`);
-
-    const config = await loadConfig(path);
-
-    expect(config.employees.enabled).toBe(true);
-    expect(config.employees.definitions.legacy?.name).toBe("Legacy employee");
-  });
-
   test("adds Telegram user ID lists from environment", async () => {
     process.env.TELEGRAM_ALLOWED_USER_IDS = " 222, 333 , external-user ";
     process.env.TELEGRAM_ADMIN_USER_IDS = " 444,555 ";

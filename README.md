@@ -123,10 +123,6 @@ runtime is intentionally minimal:
   autonomous scheduler, Git push, or compaction worker is implemented by this
   minimal runtime.
 
-Backward compatibility: existing `[factors]` config and `factor ...` command
-aliases are still accepted, but new docs, examples, and output use
-Employee/employee terminology.
-
 Regular subagents remain ephemeral by default: app-server subagents use
 `ephemeral: true`, do not request extended history persistence, and are not
 resumed after service restart.

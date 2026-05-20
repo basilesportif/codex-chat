@@ -140,7 +140,7 @@ monitors.command("validate")
     process.stdout.write(`valid monitors: ${parsed.monitors.length}\n`);
   });
 
-const employees = program.command("employees").alias("factors").description("durable Employee runtime/scaffold management");
+const employees = program.command("employees").description("durable Employee runtime/scaffold management");
 employees.command("list")
   .description("list configured Employees")
   .option("--json", "print JSON")

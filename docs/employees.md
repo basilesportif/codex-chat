@@ -45,9 +45,6 @@ mutations remain intentionally out of scope.
 When Employees are disabled, or when a management surface has no runtime client
 attached, start/stop/steer fall back to proposal recording.
 
-Legacy `[factors]` config and `factor ...` command aliases are accepted for
-backward compatibility, but Employee terminology is canonical.
-
 ## Safety boundaries
 
 - `employees.enabled = false` by default.

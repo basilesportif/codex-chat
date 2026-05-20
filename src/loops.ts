@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
-import { readFile, readdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
+import { basename, join } from "node:path";
 import { CronExpressionParser } from "cron-parser";
 import { z } from "zod";
 import type { Logger } from "pino";
@@ -33,7 +33,8 @@ const loopSchema = z.object({
   lock: z.boolean().optional(),
   notifyOnFailure: z.boolean().optional(),
   suppressEmptyOutput: z.boolean().optional(),
-  durable: z.boolean().optional()
+  durable: z.boolean().optional(),
+  maxSpoolAgeSec: z.number().int().positive().optional()
 }).superRefine((loop, ctx) => {
   try {
     CronExpressionParser.parse(loop.schedule);
@@ -115,6 +116,8 @@ export async function validateLoops(config: AppConfig): Promise<LoopsConfig> {
 }
 
 export class LoopManager {
+  private readonly activeLoopIds = new Set<string>();
+
   constructor(
     private readonly config: AppConfig,
     private readonly state: StateStore,
@@ -127,6 +130,11 @@ export class LoopManager {
     const loop = loops.loops.find((item) => item.id === loopId && item.enabled);
     if (!loop) throw new Error(`Loop not found or disabled: ${loopId}`);
     const route = (loop.route ?? loops.defaults.route ?? "return_to_main") as Route;
+    const lock = loop.lock ?? loops.defaults.lock;
+    if (lock) {
+      if (this.activeLoopIds.has(loop.id)) throw new Error(`Loop already running: ${loop.id}`);
+      this.activeLoopIds.add(loop.id);
+    }
     const run: LoopRun = { id: makeId("loop"), loopId, status: "running", scheduledAt, startedAt: nowIso(), route };
     await this.state.saveLoopRun(run);
     try {
@@ -140,6 +148,7 @@ export class LoopManager {
       if (loop.notifyOnFailure) await this.callbacks.sendAdmins(`Loop ${loop.id} failed: ${run.error}`);
       this.logger.error({ component: "loops", event: "run_failed", loopId, error }, "loop failed");
     } finally {
+      if (lock) this.activeLoopIds.delete(loop.id);
       run.completedAt = nowIso();
       await this.state.saveLoopRun(run);
     }
@@ -148,16 +157,57 @@ export class LoopManager {
   async processSpooled(): Promise<void> {
     const spoolDir = resolveConfigPath(this.config, "data/spool/loops");
     if (!(await pathExists(spoolDir))) return;
-    for (const file of await readdir(spoolDir)) {
+    const seen = new Set<string>();
+    for (const file of (await readdir(spoolDir)).sort()) {
       if (!file.endsWith(".json")) continue;
       const path = join(spoolDir, file);
       try {
-        const body = JSON.parse(await readFile(path, "utf8")) as { loopId: string; scheduledAt?: string };
-        await this.handleRun(body.loopId, body.scheduledAt ?? nowIso());
+        const body = JSON.parse(await readFile(path, "utf8")) as { loopId?: string; scheduledAt?: string };
+        if (!body.loopId) throw new Error("Spooled loop run is missing loopId");
+        const scheduledAt = body.scheduledAt ?? nowIso();
+        const dedupeKey = `${body.loopId}:${scheduledAt}`;
+        if (seen.has(dedupeKey)) {
+          await this.quarantineSpooledFile(path, "duplicate");
+          this.logger.warn({ component: "loops", event: "spool_run_duplicate", file, loopId: body.loopId, scheduledAt }, "duplicate spooled loop run quarantined");
+          continue;
+        }
+        seen.add(dedupeKey);
+        const stale = await this.isSpooledRunStale(body.loopId, scheduledAt);
+        if (stale) {
+          await this.quarantineSpooledFile(path, "stale");
+          this.logger.warn({ component: "loops", event: "spool_run_stale", file, loopId: body.loopId, scheduledAt, maxSpoolAgeSec: stale.maxSpoolAgeSec, ageSec: stale.ageSec }, "stale spooled loop run quarantined");
+          continue;
+        }
+        await this.handleRun(body.loopId, scheduledAt);
+        await unlink(path);
       } catch (error) {
+        await this.quarantineSpooledFile(path, "failed").catch((quarantineError) => {
+          this.logger.error({ component: "loops", event: "spool_quarantine_failed", file, error: quarantineError }, "failed to quarantine spooled loop run");
+        });
         this.logger.error({ component: "loops", event: "spool_run_failed", file, error }, "spooled loop run failed");
       }
     }
+  }
+
+  private async isSpooledRunStale(loopId: string, scheduledAt: string): Promise<{ ageSec: number; maxSpoolAgeSec: number } | null> {
+    const loops = await loadLoopsConfig(this.config);
+    const loop = loops.loops.find((item) => item.id === loopId && item.enabled);
+    if (!loop) throw new Error(`Loop not found or disabled: ${loopId}`);
+    if (!loop.maxSpoolAgeSec) return null;
+    const scheduledMs = Date.parse(scheduledAt);
+    if (!Number.isFinite(scheduledMs)) return null;
+    const ageSec = Math.max(0, Math.floor((Date.now() - scheduledMs) / 1000));
+    if (ageSec <= loop.maxSpoolAgeSec) return null;
+    return { ageSec, maxSpoolAgeSec: loop.maxSpoolAgeSec };
+  }
+
+  private async quarantineSpooledFile(path: string, reason: "duplicate" | "failed" | "stale"): Promise<void> {
+    if (!(await pathExists(path))) return;
+    const dir = resolveConfigPath(this.config, join("data/spool/loops-quarantine", reason));
+    await ensureDir(dir);
+    let destination = join(dir, basename(path));
+    if (await pathExists(destination)) destination = join(dir, `${Date.now()}-${basename(path)}`);
+    await rename(path, destination);
   }
 
   private async handlePrompt(loop: LoopDefinition, route: Route, run: LoopRun): Promise<void> {

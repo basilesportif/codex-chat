@@ -284,8 +284,10 @@ export class ServiceSupervisor {
     );
     this.ipc = new LocalIpcServer(resolveConfigPath(config, config.service.ipcSocket), logger, async (message) => {
       if (message.type === "loop_run") {
-        await this.loops.handleRun(message.loopId, message.scheduledAt);
-        return undefined;
+        void this.loops.handleRun(message.loopId, message.scheduledAt).catch((error) => {
+          this.logger.error({ component: "loops", event: "async_run_failed", loopId: message.loopId, error }, "asynchronous loop run failed");
+        });
+        return { enqueued: true };
       }
       if (message.type === "subagent_steer") {
         const result = await this.subagents.steerJob(message.jobId, message.text);

@@ -1,9 +1,10 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import type { AppConfig } from "../config.js";
-import { buildManagedCronText, generateCronLines, loadLoopsConfig, type LoopsConfig } from "../loops.js";
+import { buildManagedCronText, generateCronLines, loadLoopsConfig, LoopManager, type LoopsConfig } from "../loops.js";
+import { StateStore } from "../state.js";
 
 const tempDirs: string[] = [];
 
@@ -11,7 +12,7 @@ function testConfig(rootDir: string): AppConfig {
   return {
     rootDir,
     configPath: join(rootDir, "config", "codex-chat.toml"),
-    service: { workspace: rootDir },
+    service: { workspace: rootDir, stateDir: "data/state" },
     loops: {
       enabled: true,
       path: "config/loops.json",
@@ -124,5 +125,103 @@ describe("loops config", () => {
     ].join("\n"), "testbot", []);
 
     expect(next).toBe("MAILTO=tim@example.com\n");
+  });
+});
+
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const testLogger = {
+  debug: () => undefined,
+  info: () => undefined,
+  warn: () => undefined,
+  error: () => undefined
+} as never;
+
+async function processSpooled(config: AppConfig, callbacks: Partial<ConstructorParameters<typeof LoopManager>[3]> = {}) {
+  const state = new StateStore(config);
+  await state.init();
+  const manager = new LoopManager(config, state, testLogger, {
+    enqueueMain: async () => undefined,
+    sendAdmins: async () => undefined,
+    dispatchSubagent: async () => undefined,
+    ...callbacks
+  });
+  await manager.processSpooled();
+}
+
+describe("loop spool replay", () => {
+  test("deletes spool files after successful replay", async () => {
+    const config = await writeLoops({
+      version: 1,
+      loops: [{
+        id: "daily",
+        enabled: true,
+        schedule: "*/5 * * * *",
+        type: "prompt",
+        prompt: "ok",
+        route: "store_only"
+      }]
+    });
+    const spoolDir = join(config.rootDir, "data", "spool", "loops");
+    await mkdir(spoolDir, { recursive: true });
+    const spoolFile = join(spoolDir, "1000-daily.json");
+    await writeFile(spoolFile, JSON.stringify({ loopId: "daily", scheduledAt: new Date().toISOString() }));
+
+    await processSpooled(config);
+
+    expect(await exists(spoolFile)).toBe(false);
+    const runs = await readdir(join(config.rootDir, "data", "state", "loop_runs"));
+    expect(runs).toHaveLength(1);
+  });
+
+  test("quarantines failed spool replays instead of retrying forever", async () => {
+    const config = await writeLoops({ version: 1, loops: [] });
+    const spoolDir = join(config.rootDir, "data", "spool", "loops");
+    await mkdir(spoolDir, { recursive: true });
+    const spoolFile = join(spoolDir, "1000-missing.json");
+    await writeFile(spoolFile, JSON.stringify({ loopId: "missing", scheduledAt: new Date().toISOString() }));
+
+    await processSpooled(config);
+
+    expect(await exists(spoolFile)).toBe(false);
+    const quarantined = await readdir(join(config.rootDir, "data", "spool", "loops-quarantine", "failed"));
+    expect(quarantined).toContain("1000-missing.json");
+  });
+
+  test("quarantines stale spool files before they can notify admins", async () => {
+    let adminNotifications = 0;
+    const config = await writeLoops({
+      version: 1,
+      loops: [{
+        id: "health",
+        enabled: true,
+        schedule: "*/15 * * * *",
+        type: "prompt",
+        prompt: "old alert",
+        route: "send_to_admins",
+        maxSpoolAgeSec: 60
+      }]
+    });
+    const spoolDir = join(config.rootDir, "data", "spool", "loops");
+    await mkdir(spoolDir, { recursive: true });
+    const spoolFile = join(spoolDir, "1000-health.json");
+    await writeFile(spoolFile, JSON.stringify({ loopId: "health", scheduledAt: "2000-01-01T00:00:00.000Z" }));
+
+    await processSpooled(config, { sendAdmins: async () => { adminNotifications += 1; } });
+
+    expect(adminNotifications).toBe(0);
+    expect(await exists(spoolFile)).toBe(false);
+    const quarantined = await readdir(join(config.rootDir, "data", "spool", "loops-quarantine", "stale"));
+    expect(quarantined).toContain("1000-health.json");
+    const runs = await readdir(join(config.rootDir, "data", "state", "loop_runs"));
+    expect(runs).toHaveLength(0);
   });
 });

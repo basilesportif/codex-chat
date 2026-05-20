@@ -266,8 +266,16 @@ describe("loop status formatting", () => {
 
     const output = await formatLoopsStatus(config, state, new Date("2026-05-20T04:01:00.000Z"));
 
-    expect(output).toContain("Loops: 1 enabled, 1 disabled");
-    expect(output).toContain("- health enabled schedule=\"*/5 * * * *\" tz=Etc/UTC route=send_to_admins type=command lock=true durable=true suppressEmptyOutput=true next=2026-05-20T04:05:00.000Z last=completed@2026-05-20T04:00:02.000Z");
-    expect(output).toContain("- old disabled schedule=\"0 0 * * *\" tz=Etc/UTC route=return_to_main type=prompt lock=false");
+    expect(output).toContain("Loops: 2 configured (1 enabled, 1 disabled)");
+    expect(output).toContain("Enabled:\n1. health — enabled");
+    expect(output).toContain("   schedule/timezone: */5 * * * * (Etc/UTC)");
+    expect(output).toContain("   type/route: command / send_to_admins");
+    expect(output).toContain("   lock/durable: lock=true durable=true");
+    expect(output).toContain("   suppressEmptyOutput: true");
+    expect(output).toContain("   next run: 2026-05-20T04:05:00.000Z");
+    expect(output).toContain("   last run: completed at 2026-05-20T04:00:02.000Z");
+    expect(output).toContain("Disabled:\n2. old — disabled");
+    expect(output).toContain("   type/route: prompt / return_to_main");
+    expect(output).toContain("   lock/durable: lock=false durable=false");
   });
 });

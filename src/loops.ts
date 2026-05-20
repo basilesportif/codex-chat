@@ -128,21 +128,35 @@ export async function formatLoopsStatus(config: AppConfig, state: StateStore, no
 
   const enabled = loops.loops.filter((loop) => loop.enabled).length;
   const disabled = loops.loops.length - enabled;
-  const lines = [`Loops: ${enabled} enabled, ${disabled} disabled`];
+  const lines = [`Loops: ${loops.loops.length} configured (${enabled} enabled, ${disabled} disabled)`];
   if (loops.loops.length === 0) return `${lines[0]}\nNo configured loops.`;
 
-  for (const loop of loops.loops) {
-    const route = loop.route ?? loops.defaults.route ?? "return_to_main";
-    const lock = loop.lock ?? loops.defaults.lock;
-    const timezone = loop.timezone ?? loops.defaults.timezone;
-    const durable = loop.durable ? " durable=true" : "";
-    const suppress = loop.suppressEmptyOutput ? " suppressEmptyOutput=true" : "";
-    const next = loop.enabled ? ` next=${formatNextRun(loop, loops, now)}` : "";
-    const latest = latestByLoopId.get(loop.id);
-    const last = latest ? ` last=${latest.status}@${latest.completedAt ?? latest.startedAt ?? latest.scheduledAt}` : "";
-    lines.push(`- ${loop.id} ${loop.enabled ? "enabled" : "disabled"} schedule="${loop.schedule}" tz=${timezone} route=${route} type=${loop.type} lock=${lock}${durable}${suppress}${next}${last}`);
+  const enabledLoops = loops.loops.filter((loop) => loop.enabled);
+  const disabledLoops = loops.loops.filter((loop) => !loop.enabled);
+  let index = 1;
+  for (const [section, sectionLoops] of [["Enabled", enabledLoops], ["Disabled", disabledLoops]] as const) {
+    if (sectionLoops.length === 0) continue;
+    lines.push("", `${section}:`);
+    const items = sectionLoops.map((loop) => formatLoopStatusItem(index++, loop, loops, latestByLoopId.get(loop.id), now));
+    lines.push(items.join("\n\n"));
   }
   return lines.join("\n");
+}
+
+function formatLoopStatusItem(index: number, loop: LoopDefinition, loops: LoopsConfig, latest: LoopRun | undefined, now: Date): string {
+  const route = loop.route ?? loops.defaults.route ?? "return_to_main";
+  const lock = loop.lock ?? loops.defaults.lock;
+  const timezone = loop.timezone ?? loops.defaults.timezone;
+  const details = [
+    `${index}. ${loop.id} — ${loop.enabled ? "enabled" : "disabled"}`,
+    `   schedule/timezone: ${loop.schedule} (${timezone})`,
+    `   type/route: ${loop.type} / ${route}`,
+    `   lock/durable: lock=${lock} durable=${loop.durable === true}`
+  ];
+  if (loop.suppressEmptyOutput) details.push("   suppressEmptyOutput: true");
+  if (loop.enabled) details.push(`   next run: ${formatNextRun(loop, loops, now)}`);
+  if (latest) details.push(`   last run: ${latest.status} at ${latest.completedAt ?? latest.startedAt ?? latest.scheduledAt}`);
+  return details.join("\n");
 }
 
 function formatNextRun(loop: LoopDefinition, loops: LoopsConfig, now: Date): string {

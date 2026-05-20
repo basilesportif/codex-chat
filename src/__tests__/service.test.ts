@@ -185,8 +185,8 @@ describe("service supervisor", () => {
 
     await service.enqueueUserEvent(userEvent(131, "loops"));
 
-    expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("Loops: 1 enabled, 0 disabled"), 131);
-    expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("- health enabled"), 131);
+    expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("Loops: 1 configured (1 enabled, 0 disabled)"), 131);
+    expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("1. health — enabled"), 131);
     expect(sendTurn).not.toHaveBeenCalled();
   });
 

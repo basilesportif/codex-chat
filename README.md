@@ -56,9 +56,10 @@ codex-chat jobs list
 ## Service Commands
 
 Telegram messages that match service commands bypass Codex and return
-immediately. `loops` (alias: `loop status`) prints configured loop counts plus
-each loop's enabled state, schedule, route, type, lock setting, durable /
-empty-output flags when set, and next/last run when available.
+immediately. `loops` (alias: `loop status`) prints a readable numbered summary
+with configured/enabled/disabled counts plus each loop's enabled state,
+schedule/timezone, type/route, lock/durable settings, empty-output flag when
+set, and next/last run when available.
 
 ## Subagent Backend Flag
 

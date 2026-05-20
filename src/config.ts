@@ -9,7 +9,7 @@ const sandboxSchema = z.enum(["read-only", "workspace-write", "danger-full-acces
 const approvalSchema = z.enum(["untrusted", "on-failure", "on-request", "never"]);
 const telegramUserIdSchema = z.union([z.number().int(), z.string().min(1)]);
 const subagentBackendSchema = z.enum(["codex_exec", "codex_app_server"]);
-const DEFAULT_SUBAGENT_STATUS_PING_INTERVAL_SEC = 180;
+const DEFAULT_SUBAGENT_STATUS_PING_INTERVAL_SEC = 0;
 const employeeStartupSchema = z.enum(["on_demand", "always"]);
 const employeeIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$/, "Employee IDs may contain only letters, numbers, dot, underscore, and dash");
 

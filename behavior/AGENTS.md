@@ -410,7 +410,7 @@ The following commands are intercepted by the service **before** they reach Code
 | `agent backend app-server` | Opt in new and queued subagents to the app-server child backend. |
 | `agent backend config` | Clear the runtime override and use the configured backend. |
 | `agent ping` | Show automatic cooperative status ping setting for steerable app-server subagents. |
-| `agent ping off` / `agent ping on` / `agent ping 3m` / `agent ping config` | Admin-only runtime override for automatic status pings; default is every 3 minutes. |
+| `agent ping off` / `agent ping on` / `agent ping 3m` / `agent ping config` | Admin-only runtime override for automatic status pings; default is disabled; `agent ping on` uses 3 minutes. |
 | `help` | List all service-level commands. |
 | `update` / `deploy` | Pull latest and restart the service. |
 

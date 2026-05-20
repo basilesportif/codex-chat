@@ -68,7 +68,7 @@ userIds = [12345]
     expect(config.codex.model).toBe("gpt-test");
     expect(config.codex.sandbox).toBe("danger-full-access");
     expect(config.subagents.backend).toBe("codex_exec");
-    expect(config.subagents.statusPingIntervalSec).toBe(180);
+    expect(config.subagents.statusPingIntervalSec).toBe(0);
     expect(config.telegram.allowlist.userIds).toEqual([12345]);
     expect(config.rootDir).toBe(resolve(path, "../.."));
   });

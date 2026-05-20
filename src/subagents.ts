@@ -16,7 +16,8 @@ import {
 import { ensureDir, makeId, nowIso, pathExists } from "./util.js";
 
 const SIGKILL_GRACE_MS = 5_000;
-export const DEFAULT_SUBAGENT_STATUS_PING_INTERVAL_SEC = 3 * 60;
+export const DEFAULT_SUBAGENT_STATUS_PING_INTERVAL_SEC = 0;
+export const SUBAGENT_STATUS_PING_ON_INTERVAL_SEC = 3 * 60;
 export const SUBAGENT_STATUS_PING_TEXT = "STATUS: briefly report current progress, then continue";
 export const STATUS_PING_ARTIFACT_RETENTION_MS = 30 * 60 * 1000;
 const MAX_QUEUE_DEPTH = 200;

@@ -825,10 +825,10 @@ describe("service command routing", () => {
       receivedAt: new Date().toISOString()
     });
 
-    expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("Subagent auto status ping: enabled"), 6);
-    expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("effective interval: 3:00"), 6);
+    expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("Subagent auto status ping: disabled"), 6);
+    expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("effective interval: disabled"), 6);
     expect(runTurn).not.toHaveBeenCalled();
-    expect(service.formatJobsDetailed()).toContain("Auto status ping: enabled every 3:00");
+    expect(service.formatJobsDetailed()).toContain("Auto status ping: disabled");
   });
 
   test("'agent ping off' is admin-only and updates runtime status ping setting", async () => {

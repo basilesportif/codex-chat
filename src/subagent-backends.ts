@@ -210,6 +210,8 @@ class ChildAppServerSession {
   private activeTurnId = "";
   private accumulated = "";
   private pendingOutput = "";
+  private forwardedStatusCount = 0;
+  private lastForwardedStatus = "";
   private connected = false;
   private stopping = false;
   private turnCompleted = false;
@@ -461,14 +463,26 @@ class ChildAppServerSession {
       if (status === "failed") {
         this.input.job.error = typeof turnError?.message === "string" ? turnError.message : "Codex app-server child turn failed.";
       }
-      void writeFile(this.input.lastMessagePath, this.accumulated, { mode: 0o600 })
+      let finalMessage = this.accumulated;
+      let finishError = status === "failed" ? this.input.job.error : undefined;
+      if (status !== "failed" && !finalMessage.trim() && this.forwardedStatusCount > 0) {
+        finishError = [
+          "Codex app-server subagent completed without a substantive final answer after emitting only STATUS output.",
+          `Forwarded status lines: ${this.forwardedStatusCount}.`,
+          this.lastForwardedStatus ? `Last status: ${this.lastForwardedStatus}` : "",
+          "This is treated as incomplete so the job is not reported as a successful empty result."
+        ].filter(Boolean).join("\n");
+        this.input.job.error = finishError;
+        finalMessage = finishError;
+      }
+      void writeFile(this.input.lastMessagePath, finalMessage, { mode: 0o600 })
         .catch((error) => {
           this.logger.error({ component: "subagents", event: "last_message_write_failed", jobId: this.input.job.id, error });
           this.input.job.error = error instanceof Error ? error.message : String(error);
         })
         .finally(() => {
           void this.input.onJobUpdated(this.input.job).catch(() => undefined);
-          this.settle({ code: 0, signal: null, error: status === "failed" ? this.input.job.error : undefined });
+          this.settle({ code: 0, signal: null, error: finishError });
           void this.kill("SIGTERM").catch(() => undefined);
         });
     }
@@ -534,6 +548,8 @@ class ChildAppServerSession {
   private handleCompleteOutputLine(line: string): void {
     const status = parseSubagentStatusLine(line);
     if (status) {
+      this.forwardedStatusCount++;
+      this.lastForwardedStatus = status;
       void this.appendEvent({ event: "status_forwarded", jobId: this.input.job.id, status, at: nowIso() });
       if (this.input.onStatus) {
         void this.input.onStatus(this.input.job, status).catch((error) => {

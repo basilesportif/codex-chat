@@ -97,14 +97,15 @@ working. For a non-cooperative/mechanical snapshot that does not depend on
 model output, use `agent status <ref>`.
 
 While a job is running and steerable, the service also sends that exact
-cooperative status request automatically every 3 minutes by default. The
-interval is configured with `subagents.statusPingIntervalSec` (`180`; set `0`
-to disable) and can be overridden at runtime by an admin:
+cooperative status request automatically when enabled. It is disabled by
+default. The interval is configured with `subagents.statusPingIntervalSec` (`0`
+by default; set a positive number of seconds to enable) and can be overridden
+at runtime by an admin:
 
 ```text
 agent ping          # show configured/runtime/effective status ping setting
 agent ping off      # disable automatic pings
-agent ping on       # re-enable at the 3-minute default
+agent ping on       # enable at 3 minutes
 agent ping 5m       # set a runtime interval
 agent ping config   # clear runtime override and use config
 ```

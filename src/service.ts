@@ -23,7 +23,7 @@ import { formatLoopsStatus, LoopManager, syncCron } from "./loops.js";
 import { MonitorManager } from "./monitors.js";
 import { StateStore } from "./state.js";
 import {
-  DEFAULT_SUBAGENT_STATUS_PING_INTERVAL_SEC,
+  SUBAGENT_STATUS_PING_ON_INTERVAL_SEC,
   SubagentManager,
   type ActiveSubagentJobSnapshot,
   type CancelJobResult,
@@ -192,7 +192,7 @@ export function parseSubagentStatusPingCommand(text: string): SubagentStatusPing
   if (!value || value === "status" || value === "show") return { isStatusPing: true, action: "status" };
   if (value === "config" || value === "clear" || value === "default") return { isStatusPing: true, action: "clear" };
   if (["off", "disable", "disabled", "none", "0"].includes(value)) return { isStatusPing: true, action: "set", intervalSec: 0 };
-  if (["on", "enable", "enabled"].includes(value)) return { isStatusPing: true, action: "set", intervalSec: DEFAULT_SUBAGENT_STATUS_PING_INTERVAL_SEC };
+  if (["on", "enable", "enabled"].includes(value)) return { isStatusPing: true, action: "set", intervalSec: SUBAGENT_STATUS_PING_ON_INTERVAL_SEC };
   const intervalSec = parseStatusPingDurationSec(value);
   if (intervalSec === undefined) return { isStatusPing: false };
   return { isStatusPing: true, action: "set", intervalSec };
@@ -1833,8 +1833,8 @@ export class ServiceSupervisor {
   private formatSubagentStatusPingStatus(status: SubagentStatusPingStatus, action: "status" | "set" | "clear"): string {
     const lines = [
       `Subagent auto status ping: ${status.enabled ? "enabled" : "disabled"}`,
-      `effective interval: ${status.enabled ? formatDurationSeconds(status.effectiveIntervalSec) : "off"}`,
-      `configured interval: ${formatDurationSeconds(status.configuredIntervalSec)}`,
+      `effective interval: ${status.enabled ? formatDurationSeconds(status.effectiveIntervalSec) : "disabled"}`,
+      `configured interval: ${status.configuredIntervalSec > 0 ? formatDurationSeconds(status.configuredIntervalSec) : "disabled"}`,
       `runtime override: ${status.overrideIntervalSec === undefined ? "none" : status.overrideIntervalSec === 0 ? "off" : formatDurationSeconds(status.overrideIntervalSec)}`
     ];
     if (action === "set" && !status.enabled) {

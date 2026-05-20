@@ -188,8 +188,10 @@ Example: a concise git push loop.
 
 ### Listing loops
 
+- From Telegram, send `loops` (or `loop status`) for an immediate service-level summary that bypasses Codex.
 - Read `config/loops.json` directly — it is the source of truth.
 - Or run `codex-chat loop validate` to confirm the file parses and see the active count.
+- Or run `codex-chat loop status` from a shell for the same concise configured-loop summary plus recent state.
 - Cron-side view: `crontab -l` shows the generated lines inside the managed block.
 
 ### Disabling a loop

@@ -19,7 +19,7 @@ import { EmployeeManager, parseEmployeeCommand, type EmployeeCommand } from "./e
 import { FileStore } from "./file-store.js";
 import { CodexHeartbeat } from "./heartbeat.js";
 import { LocalIpcServer } from "./ipc.js";
-import { LoopManager, syncCron } from "./loops.js";
+import { formatLoopsStatus, LoopManager, syncCron } from "./loops.js";
 import { MonitorManager } from "./monitors.js";
 import { StateStore } from "./state.js";
 import { SubagentManager, type ActiveSubagentJobSnapshot, type CancelJobResult, type SteerJobResult, type SubagentBackendStatus } from "./subagents.js";
@@ -174,12 +174,17 @@ export function parseHelpCommand(text: string): boolean {
   return /^help$/i.test(text.trim());
 }
 
+export function parseLoopsCommand(text: string): boolean {
+  return /^(?:loops|loops?\s+status)$/i.test(text.trim());
+}
+
 export const HELP_TEXT = `Service commands (handled instantly, bypass Codex):
 
   logs [N]          — last N app-server log lines (default 50)
   logs raw [N]      — include raw/verbose events
   introspect [N]    — same as logs
   agents            — active subagent status and cancel refs
+  loops             — configured loop status (enabled/disabled, schedule, route, type)
   subagents (sub)   — alias for agents
   agents detail     — active jobs plus last 10 terminal jobs
   agents <N>        — active jobs plus last N terminal jobs
@@ -446,6 +451,10 @@ export class ServiceSupervisor {
       if (agentsCmd.isAgents) {
         const output = this.formatJobsDetailed(agentsCmd.lastN);
         await this.telegram.sendText(event.chatId, output, event.messageId);
+        return;
+      }
+      if (parseLoopsCommand(event.text)) {
+        await this.telegram.sendText(event.chatId, await formatLoopsStatus(this.config, this.state), event.messageId);
         return;
       }
       if (parseHelpCommand(event.text)) {

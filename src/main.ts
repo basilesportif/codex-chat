@@ -7,7 +7,7 @@ import { loadConfig, ensureConfiguredDirectories, writeDefaultConfigFilesIfMissi
 import { createLogger } from "./logger.js";
 import { EmployeeManager } from "./employees.js";
 import { sendIpcMessage, type IpcMessage } from "./ipc.js";
-import { runLoopCli, syncCron, validateLoops } from "./loops.js";
+import { formatLoopsStatus, runLoopCli, syncCron, validateLoops } from "./loops.js";
 import { validateMonitors } from "./monitors.js";
 import { injectFilePath, INJECT_TELEGRAM_USER_ID, ServiceSupervisor } from "./service.js";
 import { StateStore } from "./state.js";
@@ -129,6 +129,14 @@ loop.command("validate")
     const config = await loadConfig(program.opts().config);
     const loops = await validateLoops(config);
     process.stdout.write(`valid loops: ${loops.loops.length}\n`);
+  });
+loop.command("status")
+  .description("print configured loop status")
+  .action(async () => {
+    const config = await loadConfig(program.opts().config);
+    const state = new StateStore(config);
+    await state.init();
+    process.stdout.write(`${await formatLoopsStatus(config, state)}\n`);
   });
 
 const monitors = program.command("monitors").description("monitor management");

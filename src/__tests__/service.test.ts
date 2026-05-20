@@ -164,6 +164,32 @@ describe("service supervisor", () => {
     expect(sendTurn).not.toHaveBeenCalled();
   });
 
+  test("handles loops status command before Codex", async () => {
+    const config = await loadTestConfig();
+    await writeFile(join(config.rootDir, "loops.json"), JSON.stringify({
+      version: 1,
+      loops: [{
+        id: "health",
+        enabled: true,
+        schedule: "*/5 * * * *",
+        type: "prompt",
+        prompt: "ping",
+        route: "return_to_main"
+      }]
+    }));
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    const sendTurn = vi.spyOn(service.codex, "sendTurn");
+    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+
+    await service.enqueueUserEvent(userEvent(131, "loops"));
+
+    expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("Loops: 1 enabled, 0 disabled"), 131);
+    expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("- health enabled"), 131);
+    expect(sendTurn).not.toHaveBeenCalled();
+  });
+
   test("Employee child subagent requests dispatch through service-owned SubagentManager metadata", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");

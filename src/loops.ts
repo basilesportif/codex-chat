@@ -115,6 +115,45 @@ export async function validateLoops(config: AppConfig): Promise<LoopsConfig> {
   return loadLoopsConfig(config);
 }
 
+export async function formatLoopsStatus(config: AppConfig, state: StateStore, now = new Date()): Promise<string> {
+  const loops = await loadLoopsConfig(config);
+  const runs = await state.listLoopRuns();
+  const latestByLoopId = new Map<string, LoopRun>();
+  for (const run of runs) {
+    const previous = latestByLoopId.get(run.loopId);
+    const runTime = Date.parse(run.completedAt ?? run.startedAt ?? run.scheduledAt);
+    const previousTime = previous ? Date.parse(previous.completedAt ?? previous.startedAt ?? previous.scheduledAt) : Number.NEGATIVE_INFINITY;
+    if (!previous || runTime > previousTime) latestByLoopId.set(run.loopId, run);
+  }
+
+  const enabled = loops.loops.filter((loop) => loop.enabled).length;
+  const disabled = loops.loops.length - enabled;
+  const lines = [`Loops: ${enabled} enabled, ${disabled} disabled`];
+  if (loops.loops.length === 0) return `${lines[0]}\nNo configured loops.`;
+
+  for (const loop of loops.loops) {
+    const route = loop.route ?? loops.defaults.route ?? "return_to_main";
+    const lock = loop.lock ?? loops.defaults.lock;
+    const timezone = loop.timezone ?? loops.defaults.timezone;
+    const durable = loop.durable ? " durable=true" : "";
+    const suppress = loop.suppressEmptyOutput ? " suppressEmptyOutput=true" : "";
+    const next = loop.enabled ? ` next=${formatNextRun(loop, loops, now)}` : "";
+    const latest = latestByLoopId.get(loop.id);
+    const last = latest ? ` last=${latest.status}@${latest.completedAt ?? latest.startedAt ?? latest.scheduledAt}` : "";
+    lines.push(`- ${loop.id} ${loop.enabled ? "enabled" : "disabled"} schedule="${loop.schedule}" tz=${timezone} route=${route} type=${loop.type} lock=${lock}${durable}${suppress}${next}${last}`);
+  }
+  return lines.join("\n");
+}
+
+function formatNextRun(loop: LoopDefinition, loops: LoopsConfig, now: Date): string {
+  try {
+    const timezone = loop.timezone ?? loops.defaults.timezone;
+    return CronExpressionParser.parse(loop.schedule, { currentDate: now, tz: timezone }).next().toDate().toISOString();
+  } catch {
+    return "invalid";
+  }
+}
+
 export class LoopManager {
   private readonly activeLoopIds = new Set<string>();
 

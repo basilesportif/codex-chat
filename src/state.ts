@@ -135,6 +135,21 @@ export class StateStore {
     await this.writeJson(`loop_runs/${run.id}.json`, run);
   }
 
+  async listLoopRuns(): Promise<LoopRun[]> {
+    const dir = this.path("loop_runs");
+    const files = await readdir(dir).catch(() => []);
+    const runs: LoopRun[] = [];
+    for (const file of files) {
+      if (!file.endsWith(".json")) continue;
+      try {
+        runs.push(JSON.parse(await readFile(join(dir, file), "utf8")) as LoopRun);
+      } catch {
+        // Ignore malformed historical run files; callers can still summarize the rest.
+      }
+    }
+    return runs;
+  }
+
   async saveFileMetadata(id: string, metadata: unknown): Promise<void> {
     await this.writeJson(`files/${id}.json`, metadata);
   }

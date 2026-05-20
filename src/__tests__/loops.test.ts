@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import type { AppConfig } from "../config.js";
-import { buildManagedCronText, generateCronLines, loadLoopsConfig, LoopManager, type LoopsConfig } from "../loops.js";
+import { buildManagedCronText, formatLoopsStatus, generateCronLines, loadLoopsConfig, LoopManager, type LoopsConfig } from "../loops.js";
 import { StateStore } from "../state.js";
 
 const tempDirs: string[] = [];
@@ -223,5 +223,51 @@ describe("loop spool replay", () => {
     expect(quarantined).toContain("1000-health.json");
     const runs = await readdir(join(config.rootDir, "data", "state", "loop_runs"));
     expect(runs).toHaveLength(0);
+  });
+});
+
+describe("loop status formatting", () => {
+  test("prints a concise countable loop summary with last run state", async () => {
+    const config = await writeLoops({
+      version: 1,
+      defaults: { timezone: "Etc/UTC", route: "return_to_main", lock: true },
+      loops: [
+        {
+          id: "health",
+          enabled: true,
+          schedule: "*/5 * * * *",
+          type: "command",
+          command: "true",
+          route: "send_to_admins",
+          durable: true,
+          suppressEmptyOutput: true
+        },
+        {
+          id: "old",
+          enabled: false,
+          schedule: "0 0 * * *",
+          type: "prompt",
+          prompt: "skip",
+          lock: false
+        }
+      ]
+    });
+    const state = new StateStore(config);
+    await state.init();
+    await state.saveLoopRun({
+      id: "loop_last",
+      loopId: "health",
+      status: "completed",
+      scheduledAt: "2026-05-20T04:00:00.000Z",
+      startedAt: "2026-05-20T04:00:01.000Z",
+      completedAt: "2026-05-20T04:00:02.000Z",
+      route: "send_to_admins"
+    });
+
+    const output = await formatLoopsStatus(config, state, new Date("2026-05-20T04:01:00.000Z"));
+
+    expect(output).toContain("Loops: 1 enabled, 1 disabled");
+    expect(output).toContain("- health enabled schedule=\"*/5 * * * *\" tz=Etc/UTC route=send_to_admins type=command lock=true durable=true suppressEmptyOutput=true next=2026-05-20T04:05:00.000Z last=completed@2026-05-20T04:00:02.000Z");
+    expect(output).toContain("- old disabled schedule=\"0 0 * * *\" tz=Etc/UTC route=return_to_main type=prompt lock=false");
   });
 });

@@ -29,6 +29,7 @@ codex-chat setup
 codex-chat health --json
 codex-chat loop sync
 codex-chat loop run <id>
+codex-chat loop status
 codex-chat monitors validate
 codex-chat employees list
 codex-chat employees status <id>
@@ -51,6 +52,13 @@ codex-chat jobs list
 - Employee runtime root: `data/employees/`
 - Employee runtime state/proposals: `data/state/employees/`
 - Disposable generated-image staging: `data/artifacts/generated-images/`
+
+## Service Commands
+
+Telegram messages that match service commands bypass Codex and return
+immediately. `loops` (alias: `loop status`) prints configured loop counts plus
+each loop's enabled state, schedule, route, type, lock setting, durable /
+empty-output flags when set, and next/last run when available.
 
 ## Subagent Backend Flag
 

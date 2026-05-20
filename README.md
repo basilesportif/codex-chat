@@ -96,6 +96,21 @@ line as soon as possible when they receive such a steering request, then keep
 working. For a non-cooperative/mechanical snapshot that does not depend on
 model output, use `agent status <ref>`.
 
+While a job is running and steerable, the service also sends that exact
+cooperative status request automatically every 3 minutes by default. The
+interval is configured with `subagents.statusPingIntervalSec` (`180`; set `0`
+to disable) and can be overridden at runtime by an admin:
+
+```text
+agent ping          # show configured/runtime/effective status ping setting
+agent ping off      # disable automatic pings
+agent ping on       # re-enable at the 3-minute default
+agent ping 5m       # set a runtime interval
+agent ping config   # clear runtime override and use config
+```
+
+`agents` output includes the current automatic status ping setting.
+
 ## Durable Employees
 
 `[employees]` is a disabled-by-default feature flag for durable Employees: named,

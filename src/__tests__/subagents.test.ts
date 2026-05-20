@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { AppConfig } from "../config.js";
 import type { SubagentJob } from "../types.js";
+import type { ChildAgentBackend, ChildAgentFinish, StartChildAgentInput, StartedChildAgent } from "../subagent-backends.js";
 
 const tempDirs: string[] = [];
 
@@ -63,10 +64,41 @@ function makeConfig(rootDir: string, maxConcurrent = 2): AppConfig {
       childSocketDir: "data/run/subagents",
       childStartupTimeoutSec: 60,
       childInterruptGraceMs: 5000,
+      statusPingIntervalSec: 180,
       allowedProfiles: [],
       cleanupArtifacts: false
     }
   } as AppConfig;
+}
+
+function fakeBackend(kind: "codex_exec" | "codex_app_server", options: { activeTurnId?: string; alive?: boolean } = {}) {
+  let resolveFinish!: (finish: ChildAgentFinish) => void;
+  const finished = new Promise<ChildAgentFinish>((resolve) => {
+    resolveFinish = resolve;
+  });
+  const backend = {
+    kind,
+    start: vi.fn(async (input: StartChildAgentInput): Promise<StartedChildAgent> => {
+      input.job.pid = 1234;
+      if (options.activeTurnId) {
+        input.job.backendThreadId = "thread_1";
+        input.job.activeTurnId = options.activeTurnId;
+      }
+      await input.onJobUpdated(input.job);
+      return {
+        kind,
+        finished,
+        kill: vi.fn(async () => undefined),
+        isAlive: () => options.alive !== false
+      };
+    }),
+    steer: vi.fn(async () => undefined),
+    interrupt: vi.fn(async () => undefined),
+    kill: vi.fn(async () => undefined),
+    shutdown: vi.fn(async () => undefined),
+    finish: (finish: ChildAgentFinish = { code: 0, signal: null }) => resolveFinish(finish)
+  } satisfies ChildAgentBackend & { finish(finish?: ChildAgentFinish): void };
+  return backend;
 }
 
 async function waitFor(predicate: () => boolean, attempts = 30): Promise<void> {
@@ -74,6 +106,15 @@ async function waitFor(predicate: () => boolean, attempts = 30): Promise<void> {
     if (predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 1));
   }
+}
+
+async function flushUntil(predicate: () => boolean, attempts = 50): Promise<void> {
+  for (let i = 0; i < attempts; i++) {
+    if (predicate()) return;
+    await vi.advanceTimersByTimeAsync(0);
+    await Promise.resolve();
+  }
+  expect(predicate()).toBe(true);
 }
 
 afterEach(async () => {
@@ -642,6 +683,193 @@ describe("subagents", () => {
     expect(state.setSubagentBackendOverride).toHaveBeenCalledWith("codex_exec", "test");
     expect(manager.backendStatus()).toMatchObject({ configured: "codex_app_server", override: "codex_exec", effective: "codex_exec" });
     expect(manager.listJobs()[0]).toMatchObject({ id: queuedId, backend: "codex_exec", status: "queued" });
+  });
+
+  test("automatically requests cooperative status at configured intervals for eligible app-server jobs", async () => {
+    vi.useFakeTimers();
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
+    tempDirs.push(root);
+    const { SubagentManager, SUBAGENT_STATUS_PING_TEXT } = await import("../subagents.js");
+    const config = makeConfig(root, 1);
+    config.subagents.backend = "codex_app_server";
+    config.subagents.statusPingIntervalSec = 1;
+    const backend = fakeBackend("codex_app_server", { activeTurnId: "turn_1" });
+    const manager = new SubagentManager(
+      config,
+      { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") } as never,
+      { saveJob: vi.fn().mockResolvedValue(undefined) } as never,
+      fakeLogger() as never,
+      { onReturnToMain: vi.fn(), onSendToUser: vi.fn() },
+      { codex_app_server: backend }
+    );
+
+    const id = await manager.dispatch({ profile: "x", prompt: "running", route: "return_to_main" });
+    await flushUntil(() => backend.start.mock.calls.length === 1);
+
+    expect(backend.steer).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(999);
+    expect(backend.steer).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(backend.steer).toHaveBeenCalledWith(id, SUBAGENT_STATUS_PING_TEXT);
+  });
+
+  test("cleans automatic status ping intervals when jobs finish or are cancelled", async () => {
+    vi.useFakeTimers();
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
+    tempDirs.push(root);
+    const { SubagentManager } = await import("../subagents.js");
+    const config = makeConfig(root, 1);
+    config.subagents.backend = "codex_app_server";
+    config.subagents.statusPingIntervalSec = 1;
+    const backend = fakeBackend("codex_app_server", { activeTurnId: "turn_1" });
+    const onReturnToMain = vi.fn().mockResolvedValue(undefined);
+    const manager = new SubagentManager(
+      config,
+      { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") } as never,
+      { saveJob: vi.fn().mockResolvedValue(undefined) } as never,
+      fakeLogger() as never,
+      { onReturnToMain, onSendToUser: vi.fn() },
+      { codex_app_server: backend }
+    );
+
+    await manager.dispatch({ profile: "x", prompt: "running", route: "return_to_main" });
+    await flushUntil(() => backend.start.mock.calls.length === 1);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(backend.steer).toHaveBeenCalledTimes(1);
+
+    backend.finish({ code: 0, signal: null });
+    await vi.waitFor(() => expect(manager.listJobs()[0]?.status).toBe("completed"));
+    backend.steer.mockClear();
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(backend.steer).not.toHaveBeenCalled();
+
+    const backend2 = fakeBackend("codex_app_server", { activeTurnId: "turn_2" });
+    const manager2 = new SubagentManager(
+      config,
+      { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") } as never,
+      { saveJob: vi.fn().mockResolvedValue(undefined) } as never,
+      fakeLogger() as never,
+      { onReturnToMain: vi.fn(), onSendToUser: vi.fn() },
+      { codex_app_server: backend2 }
+    );
+    const id2 = await manager2.dispatch({ profile: "x", prompt: "cancel", route: "return_to_main" });
+    await flushUntil(() => backend2.start.mock.calls.length === 1);
+    await manager2.requestCancel(id2);
+    backend2.steer.mockClear();
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(backend2.steer).not.toHaveBeenCalled();
+  });
+
+  test("does not create duplicate automatic status ping intervals", async () => {
+    vi.useFakeTimers();
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
+    tempDirs.push(root);
+    const { SubagentManager } = await import("../subagents.js");
+    const config = makeConfig(root, 1);
+    config.subagents.backend = "codex_app_server";
+    config.subagents.statusPingIntervalSec = 1;
+    const backend = fakeBackend("codex_app_server", { activeTurnId: "turn_1" });
+    const manager = new SubagentManager(
+      config,
+      { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") } as never,
+      { saveJob: vi.fn().mockResolvedValue(undefined) } as never,
+      fakeLogger() as never,
+      { onReturnToMain: vi.fn(), onSendToUser: vi.fn() },
+      { codex_app_server: backend }
+    );
+
+    const id = await manager.dispatch({ profile: "x", prompt: "running", route: "return_to_main" });
+    await flushUntil(() => backend.start.mock.calls.length === 1);
+    (manager as unknown as { scheduleStatusPingInterval(jobId: string): void }).scheduleStatusPingInterval(id);
+    (manager as unknown as { scheduleStatusPingInterval(jobId: string): void }).scheduleStatusPingInterval(id);
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(backend.steer).toHaveBeenCalledTimes(1);
+  });
+
+  test("does not ping ineligible subagent jobs and applies runtime ping configuration", async () => {
+    vi.useFakeTimers();
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
+    tempDirs.push(root);
+    const { SubagentManager } = await import("../subagents.js");
+
+    const execConfig = makeConfig(root, 1);
+    execConfig.subagents.backend = "codex_exec";
+    execConfig.subagents.statusPingIntervalSec = 1;
+    const execBackend = fakeBackend("codex_exec", { activeTurnId: "turn_exec" });
+    const execManager = new SubagentManager(
+      execConfig,
+      { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") } as never,
+      { saveJob: vi.fn().mockResolvedValue(undefined) } as never,
+      fakeLogger() as never,
+      { onReturnToMain: vi.fn(), onSendToUser: vi.fn() },
+      { codex_exec: execBackend }
+    );
+    await execManager.dispatch({ profile: "x", prompt: "exec", route: "return_to_main" });
+    await flushUntil(() => execBackend.start.mock.calls.length === 1);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(execBackend.steer).not.toHaveBeenCalled();
+
+    const queuedConfig = makeConfig(root, 0);
+    queuedConfig.subagents.backend = "codex_app_server";
+    queuedConfig.subagents.statusPingIntervalSec = 1;
+    const queuedBackend = fakeBackend("codex_app_server", { activeTurnId: "turn_queued" });
+    const queuedManager = new SubagentManager(
+      queuedConfig,
+      { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") } as never,
+      { saveJob: vi.fn().mockResolvedValue(undefined) } as never,
+      fakeLogger() as never,
+      { onReturnToMain: vi.fn(), onSendToUser: vi.fn() },
+      { codex_app_server: queuedBackend }
+    );
+    await queuedManager.dispatch({ profile: "x", prompt: "queued", route: "return_to_main" });
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(queuedBackend.start).not.toHaveBeenCalled();
+    expect(queuedBackend.steer).not.toHaveBeenCalled();
+
+    const noTurnConfig = makeConfig(root, 1);
+    noTurnConfig.subagents.backend = "codex_app_server";
+    noTurnConfig.subagents.statusPingIntervalSec = 1;
+    const noTurnBackend = fakeBackend("codex_app_server");
+    const noTurnManager = new SubagentManager(
+      noTurnConfig,
+      { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") } as never,
+      { saveJob: vi.fn().mockResolvedValue(undefined) } as never,
+      fakeLogger() as never,
+      { onReturnToMain: vi.fn(), onSendToUser: vi.fn() },
+      { codex_app_server: noTurnBackend }
+    );
+    await noTurnManager.dispatch({ profile: "x", prompt: "no active turn", route: "return_to_main" });
+    await flushUntil(() => noTurnBackend.start.mock.calls.length === 1);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(noTurnBackend.steer).not.toHaveBeenCalled();
+
+    const appConfig = makeConfig(root, 1);
+    appConfig.subagents.backend = "codex_app_server";
+    appConfig.subagents.statusPingIntervalSec = 10;
+    const appBackend = fakeBackend("codex_app_server", { activeTurnId: "turn_1" });
+    const appState = {
+      saveJob: vi.fn().mockResolvedValue(undefined),
+      setSubagentStatusPingIntervalSecOverride: vi.fn().mockResolvedValue(undefined)
+    };
+    const appManager = new SubagentManager(
+      appConfig,
+      { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") } as never,
+      appState as never,
+      fakeLogger() as never,
+      { onReturnToMain: vi.fn(), onSendToUser: vi.fn() },
+      { codex_app_server: appBackend }
+    );
+    await appManager.dispatch({ profile: "x", prompt: "app", route: "return_to_main" });
+    await flushUntil(() => appBackend.start.mock.calls.length === 1);
+    await appManager.setStatusPingIntervalOverride(0, "test");
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(appBackend.steer).not.toHaveBeenCalled();
+
+    await appManager.setStatusPingIntervalOverride(1, "test");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(appBackend.steer).toHaveBeenCalledTimes(1);
+    expect(appManager.statusPingStatus()).toMatchObject({ enabled: true, effectiveIntervalSec: 1, overrideIntervalSec: 1 });
   });
 
   test("resolves full job ids, displayed prefixes, and hex prefixes", async () => {

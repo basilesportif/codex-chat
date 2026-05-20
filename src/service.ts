@@ -22,7 +22,15 @@ import { LocalIpcServer } from "./ipc.js";
 import { formatLoopsStatus, LoopManager, syncCron } from "./loops.js";
 import { MonitorManager } from "./monitors.js";
 import { StateStore } from "./state.js";
-import { SubagentManager, type ActiveSubagentJobSnapshot, type CancelJobResult, type SteerJobResult, type SubagentBackendStatus } from "./subagents.js";
+import {
+  DEFAULT_SUBAGENT_STATUS_PING_INTERVAL_SEC,
+  SubagentManager,
+  type ActiveSubagentJobSnapshot,
+  type CancelJobResult,
+  type SteerJobResult,
+  type SubagentBackendStatus,
+  type SubagentStatusPingStatus
+} from "./subagents.js";
 import { DisabledTranscriber, OpenAITranscriber, Transcriber } from "./transcription.js";
 import { isTelegramAdmin, TelegramGateway } from "./telegram.js";
 import { CodexClient, StoredAction, SubagentBackendKind, SubagentJob, SubagentOwnerType, SubagentResultTarget, UserEvent } from "./types.js";
@@ -61,6 +69,8 @@ const DEPLOY_DENIED_MESSAGE =
   "Deploy is admin-only. Ask Tim to add you to telegram.allowlist.adminUserIds.";
 const SUBAGENT_BACKEND_DENIED_MESSAGE =
   "Subagent backend changes are admin-only. Ask Tim to add you to telegram.allowlist.adminUserIds.";
+const SUBAGENT_STATUS_PING_DENIED_MESSAGE =
+  "Subagent status ping changes are admin-only. Ask Tim to add you to telegram.allowlist.adminUserIds.";
 const DEPLOY_DRAIN_MS = 30_000;
 const DISPATCH_ACK_MAX_CHARS = 360;
 const DISPATCH_ACK_MAX_LINES = 4;
@@ -150,6 +160,10 @@ export type SubagentBackendCommand =
   | { isBackend: false }
   | { isBackend: true; action: "status" | "set" | "clear"; backend?: SubagentBackendKind };
 
+export type SubagentStatusPingCommand =
+  | { isStatusPing: false }
+  | { isStatusPing: true; action: "status" | "set" | "clear"; intervalSec?: number };
+
 /**
  * Parses "agent backend [status|exec|app-server|config]" commands.
  * "agent backend exec" is the Telegram recovery path for the safe exec backend.
@@ -165,6 +179,33 @@ export function parseSubagentBackendCommand(text: string): SubagentBackendComman
     return { isBackend: true, action: "set", backend: "codex_app_server" };
   }
   return { isBackend: false };
+}
+
+/**
+ * Parses "agent ping [status|on|off|config|<duration>]" commands.
+ * Bare numeric durations are minutes; explicit suffixes support seconds/minutes.
+ */
+export function parseSubagentStatusPingCommand(text: string): SubagentStatusPingCommand {
+  const match = text.trim().match(/^(?:agents?|subagents?)\s+(?:ping|status-ping|statusping)(?:\s+([\s\S]+))?$/i);
+  if (!match) return { isStatusPing: false };
+  const value = (match[1] ?? "status").trim().toLowerCase();
+  if (!value || value === "status" || value === "show") return { isStatusPing: true, action: "status" };
+  if (value === "config" || value === "clear" || value === "default") return { isStatusPing: true, action: "clear" };
+  if (["off", "disable", "disabled", "none", "0"].includes(value)) return { isStatusPing: true, action: "set", intervalSec: 0 };
+  if (["on", "enable", "enabled"].includes(value)) return { isStatusPing: true, action: "set", intervalSec: DEFAULT_SUBAGENT_STATUS_PING_INTERVAL_SEC };
+  const intervalSec = parseStatusPingDurationSec(value);
+  if (intervalSec === undefined) return { isStatusPing: false };
+  return { isStatusPing: true, action: "set", intervalSec };
+}
+
+function parseStatusPingDurationSec(value: string): number | undefined {
+  const match = value.match(/^(\d+)(?:\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes))?$/i);
+  if (!match) return undefined;
+  const amount = parseInt(match[1] as string, 10);
+  if (!Number.isFinite(amount) || amount < 0) return undefined;
+  const unit = (match[2] ?? "m").toLowerCase();
+  if (unit.startsWith("s")) return amount;
+  return amount * 60;
 }
 
 /**
@@ -192,6 +233,9 @@ export const HELP_TEXT = `Service commands (handled instantly, bypass Codex):
   agent kill <ref>  — cancel a subagent by full ID, displayed ref, or hex prefix
   agent steer <ref> <text> — steer a running app-server subagent
   agent steer <ref> STATUS: briefly report current progress, then continue — request an interim Telegram status
+  agent ping      — show automatic cooperative status ping setting
+  agent ping off  — disable automatic status pings for running app-server subagents
+  agent ping 3m   — set automatic status ping interval (admin-only)
   agent backend     — show effective subagent backend
   agent backend exec — recovery: force new/queued subagents back to safe codex_exec
   employees           — list configured durable Employees
@@ -425,6 +469,11 @@ export class ServiceSupervisor {
         await this.handleSubagentBackendCommandEvent(event, backendCommand);
         return;
       }
+      const statusPingCommand = parseSubagentStatusPingCommand(event.text);
+      if (statusPingCommand.isStatusPing) {
+        await this.handleSubagentStatusPingCommandEvent(event, statusPingCommand);
+        return;
+      }
       const employeeCommand = parseEmployeeCommand(event.text);
       if (employeeCommand.isEmployee) {
         await this.handleEmployeeCommandEvent(event, employeeCommand);
@@ -568,6 +617,7 @@ export class ServiceSupervisor {
         lines.push("No active subagent jobs. Use `agents detail` for recent terminal jobs.");
       }
     }
+    lines.push(this.formatSubagentStatusPingSummary());
 
     if (running.length > 0) {
       lines.push("\nRunning:");
@@ -628,6 +678,13 @@ export class ServiceSupervisor {
       queued > 0 ? `${queued} queued` : ""
     ].filter(Boolean);
     return `Subagents: ${parts.join(", ")}`;
+  }
+
+  private formatSubagentStatusPingSummary(): string {
+    const status = this.subagents.statusPingStatus();
+    const effective = status.enabled ? `enabled every ${formatDurationSeconds(status.effectiveIntervalSec)}` : "disabled";
+    const override = status.overrideIntervalSec === undefined ? "config" : status.overrideIntervalSec === 0 ? "off" : formatDurationSeconds(status.overrideIntervalSec);
+    return `Auto status ping: ${effective} (configured ${formatDurationSeconds(status.configuredIntervalSec)}, override ${override})`;
   }
 
   private appendNumberedJobLines(lines: string[], index: number, ref: string, header: string, details: string[]): void {
@@ -760,6 +817,7 @@ export class ServiceSupervisor {
     if (steerable) {
       lines.push(`steer: agent steer ${refText} <text>`);
       lines.push(`cooperative status: agent steer ${refText} STATUS: briefly report current progress, then continue`);
+      lines.push(this.formatSubagentStatusPingSummary());
     }
     return lines.join("\n");
   }
@@ -1738,6 +1796,51 @@ export class ServiceSupervisor {
       status = this.subagents.backendStatus();
     }
     await this.telegram.sendText(chatId, this.formatSubagentBackendStatus(status, command.action), event.messageId);
+  }
+
+  private async handleSubagentStatusPingCommandEvent(event: UserEvent, command: Exclude<SubagentStatusPingCommand, { isStatusPing: false }>): Promise<void> {
+    const chatId = event.chatId;
+    if (!chatId) return;
+    if (command.action !== "status") {
+      const isAdmin = isTelegramAdmin({
+        userId: event.userId,
+        configAdminUserIds: this.config.telegram.allowlist.adminUserIds,
+        stateUsers: await this.state.listTelegramUsers()
+      });
+      if (!isAdmin) {
+        await this.telegram.sendText(chatId, SUBAGENT_STATUS_PING_DENIED_MESSAGE, event.messageId).catch(() => undefined);
+        return;
+      }
+    }
+
+    let status: SubagentStatusPingStatus;
+    if (command.action === "set") {
+      status = await this.subagents.setStatusPingIntervalOverride(command.intervalSec, event.userId ? `telegram:${event.userId}` : "telegram");
+    } else if (command.action === "clear") {
+      status = await this.subagents.setStatusPingIntervalOverride(undefined, event.userId ? `telegram:${event.userId}` : "telegram");
+    } else {
+      status = this.subagents.statusPingStatus();
+    }
+    await this.telegram.sendText(chatId, this.formatSubagentStatusPingStatus(status, command.action), event.messageId);
+  }
+
+  private formatSubagentStatusPingStatus(status: SubagentStatusPingStatus, action: "status" | "set" | "clear"): string {
+    const lines = [
+      `Subagent auto status ping: ${status.enabled ? "enabled" : "disabled"}`,
+      `effective interval: ${status.enabled ? formatDurationSeconds(status.effectiveIntervalSec) : "off"}`,
+      `configured interval: ${formatDurationSeconds(status.configuredIntervalSec)}`,
+      `runtime override: ${status.overrideIntervalSec === undefined ? "none" : status.overrideIntervalSec === 0 ? "off" : formatDurationSeconds(status.overrideIntervalSec)}`
+    ];
+    if (action === "set" && !status.enabled) {
+      lines.push("Automatic cooperative STATUS pings are disabled for running app-server subagents.");
+    } else if (action === "set") {
+      lines.push("Automatic cooperative STATUS pings are enabled for eligible running app-server subagents.");
+    } else if (action === "clear") {
+      lines.push("Runtime override cleared; automatic status pings use the configured interval.");
+    } else {
+      lines.push("Commands: agent ping off | agent ping on | agent ping 3m | agent ping config");
+    }
+    return lines.join("\n");
   }
 
   private formatSubagentBackendStatus(status: SubagentBackendStatus, action: "status" | "set" | "clear"): string {

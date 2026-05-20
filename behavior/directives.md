@@ -146,3 +146,5 @@ These Telegram commands are handled before Codex sees the message:
 | `agent backend exec` | Recovery command: force new and queued subagents back to the safe `codex_exec` backend. |
 | `agent backend app-server` | Opt in new and queued subagents to the app-server child backend. |
 | `agent backend config` | Clear the runtime override and use the configured backend. |
+| `agent ping` | Show automatic cooperative status ping setting for steerable app-server subagents. |
+| `agent ping off` / `agent ping on` / `agent ping 3m` / `agent ping config` | Admin-only runtime override for automatic status pings; default is every 3 minutes. |

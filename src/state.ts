@@ -9,6 +9,7 @@ const subagentRuntimePath = "subagent_runtime.json";
 
 interface SubagentRuntimeState {
   backendOverride?: SubagentBackendKind;
+  statusPingIntervalSecOverride?: number;
   updatedAt?: string;
   updatedBy?: string;
 }
@@ -177,8 +178,27 @@ export class StateStore {
   }
 
   async setSubagentBackendOverride(backend: SubagentBackendKind | undefined, updatedBy?: string): Promise<void> {
+    const current = await this.readJson<SubagentRuntimeState>(subagentRuntimePath, {});
     await this.writeJson(subagentRuntimePath, {
+      ...current,
       backendOverride: backend,
+      updatedAt: nowIso(),
+      updatedBy
+    } satisfies SubagentRuntimeState);
+  }
+
+  async getSubagentStatusPingIntervalSecOverride(): Promise<number | undefined> {
+    const state = await this.readJson<SubagentRuntimeState>(subagentRuntimePath, {});
+    return typeof state.statusPingIntervalSecOverride === "number" && Number.isFinite(state.statusPingIntervalSecOverride)
+      ? state.statusPingIntervalSecOverride
+      : undefined;
+  }
+
+  async setSubagentStatusPingIntervalSecOverride(intervalSec: number | undefined, updatedBy?: string): Promise<void> {
+    const current = await this.readJson<SubagentRuntimeState>(subagentRuntimePath, {});
+    await this.writeJson(subagentRuntimePath, {
+      ...current,
+      statusPingIntervalSecOverride: intervalSec,
       updatedAt: nowIso(),
       updatedBy
     } satisfies SubagentRuntimeState);

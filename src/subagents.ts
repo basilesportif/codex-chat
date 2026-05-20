@@ -16,6 +16,8 @@ import {
 import { ensureDir, makeId, nowIso, pathExists } from "./util.js";
 
 const SIGKILL_GRACE_MS = 5_000;
+export const DEFAULT_SUBAGENT_STATUS_PING_INTERVAL_SEC = 3 * 60;
+export const SUBAGENT_STATUS_PING_TEXT = "STATUS: briefly report current progress, then continue";
 const MAX_QUEUE_DEPTH = 200;
 const REMOTE_REPO_AUTHORITY_RULES = [
   "Remote repo authority:",
@@ -58,6 +60,7 @@ interface RunningJob {
   backend: ChildAgentBackend;
   timeout: NodeJS.Timeout;
   killTimer?: NodeJS.Timeout;
+  statusPingInterval?: NodeJS.Timeout;
 }
 
 export interface JobRefCandidate {
@@ -114,6 +117,13 @@ export interface SubagentBackendStatus {
   effective: SubagentBackendKind;
 }
 
+export interface SubagentStatusPingStatus {
+  configuredIntervalSec: number;
+  overrideIntervalSec?: number;
+  effectiveIntervalSec: number;
+  enabled: boolean;
+}
+
 export interface ActiveSubagentJobSnapshot {
   ref: string;
   id: string;
@@ -155,6 +165,7 @@ export class SubagentManager {
   private jobs = new Map<string, SubagentJob>();
   private readonly backends: Record<SubagentBackendKind, ChildAgentBackend>;
   private backendOverride?: SubagentBackendKind;
+  private statusPingIntervalSecOverride?: number;
   /**
    * Serializes drain() so two concurrent dispatch() calls cannot both
    * observe `running.size < maxConcurrent` and start jobs in parallel,
@@ -168,11 +179,12 @@ export class SubagentManager {
     private readonly behavior: BehaviorPack,
     private readonly state: StateStore,
     private readonly logger: Logger,
-    private readonly callbacks: SubagentCallbacks
+    private readonly callbacks: SubagentCallbacks,
+    backends?: Partial<Record<SubagentBackendKind, ChildAgentBackend>>
   ) {
     this.backends = {
-      codex_exec: new CodexExecChildAgentBackend(config, logger),
-      codex_app_server: new CodexAppServerChildAgentBackend(config, logger)
+      codex_exec: backends?.codex_exec ?? new CodexExecChildAgentBackend(config, logger),
+      codex_app_server: backends?.codex_app_server ?? new CodexAppServerChildAgentBackend(config, logger)
     };
   }
 
@@ -309,6 +321,8 @@ export class SubagentManager {
   async loadRuntimeBackendOverride(): Promise<SubagentBackendStatus> {
     const getter = (this.state as StateStore & { getSubagentBackendOverride?: () => Promise<SubagentBackendKind | undefined> }).getSubagentBackendOverride;
     this.backendOverride = getter ? await getter.call(this.state) : undefined;
+    const pingGetter = (this.state as StateStore & { getSubagentStatusPingIntervalSecOverride?: () => Promise<number | undefined> }).getSubagentStatusPingIntervalSecOverride;
+    this.statusPingIntervalSecOverride = pingGetter ? await pingGetter.call(this.state) : undefined;
     return this.backendStatus();
   }
 
@@ -338,6 +352,33 @@ export class SubagentManager {
       "subagent backend override updated"
     );
     return this.backendStatus();
+  }
+
+  statusPingStatus(): SubagentStatusPingStatus {
+    const configuredIntervalSec = this.configuredStatusPingIntervalSec();
+    const effectiveIntervalSec = this.statusPingIntervalSecOverride ?? configuredIntervalSec;
+    return {
+      configuredIntervalSec,
+      overrideIntervalSec: this.statusPingIntervalSecOverride,
+      effectiveIntervalSec,
+      enabled: effectiveIntervalSec > 0
+    };
+  }
+
+  async setStatusPingIntervalOverride(intervalSec: number | undefined, updatedBy?: string): Promise<SubagentStatusPingStatus> {
+    if (intervalSec !== undefined && (!Number.isInteger(intervalSec) || intervalSec < 0)) {
+      throw new Error("Subagent status ping interval must be a non-negative whole number of seconds.");
+    }
+    this.statusPingIntervalSecOverride = intervalSec;
+    const setter = (this.state as StateStore & { setSubagentStatusPingIntervalSecOverride?: (value: number | undefined, updatedBy?: string) => Promise<void> }).setSubagentStatusPingIntervalSecOverride;
+    if (setter) await setter.call(this.state, intervalSec, updatedBy);
+    this.rescheduleStatusPingIntervals();
+    const status = this.statusPingStatus();
+    this.logger.warn(
+      { component: "subagents", event: "status_ping_override_set", configuredIntervalSec: status.configuredIntervalSec, overrideIntervalSec: status.overrideIntervalSec, effectiveIntervalSec: status.effectiveIntervalSec, updatedBy },
+      "subagent automatic status ping setting updated"
+    );
+    return status;
   }
 
   resolveJobRef(ref: string): JobRefResolution {
@@ -439,6 +480,7 @@ export class SubagentManager {
     }
 
     clearTimeout(running.timeout);
+    this.clearStatusPingInterval(job.id);
     job.status = "cancelling";
     job.cancelRequestedAt = nowIso();
     job.cancelReason = reason;
@@ -638,6 +680,7 @@ export class SubagentManager {
       void this.requestCancel(id, { reason: "timeout" });
     }, timeoutSec * 1000);
     this.running.set(id, { job, child, backend, timeout });
+    this.scheduleStatusPingInterval(id);
     void child.finished.then((finish) => this.finishJob(id, finish));
     if (job.pid || job.activeTurnId || job.backendThreadId) void this.state.saveJob(job);
   }
@@ -648,6 +691,7 @@ export class SubagentManager {
     this.running.delete(jobId);
     clearTimeout(running.timeout);
     if (running.killTimer) clearTimeout(running.killTimer);
+    this.clearStatusPingInterval(jobId, running);
     const job = running.job;
     if (job.status === "cancelling") job.status = job.cancelReason === "timeout" ? "timed_out" : "cancelled";
     else job.status = finish.code === 0 && !finish.error ? "completed" : "failed";
@@ -751,6 +795,56 @@ export class SubagentManager {
     return this.running.get(job.id)?.child.isAlive() === true;
   }
 
+  private scheduleStatusPingInterval(jobId: string): void {
+    const running = this.running.get(jobId);
+    if (!running || running.statusPingInterval) return;
+    if (!this.isJobCurrentlySteerable(running.job)) return;
+    const intervalSec = this.statusPingStatus().effectiveIntervalSec;
+    if (intervalSec <= 0) return;
+    const intervalMs = intervalSec * 1000;
+
+    const interval = setInterval(() => {
+      void this.requestCooperativeStatus(jobId);
+    }, intervalMs);
+    interval.unref?.();
+    running.statusPingInterval = interval;
+    this.logger.debug(
+      { component: "subagents", event: "status_ping_scheduled", jobId, intervalMs },
+      "scheduled automatic subagent status ping"
+    );
+  }
+
+  private rescheduleStatusPingIntervals(): void {
+    for (const [jobId, running] of this.running) {
+      this.clearStatusPingInterval(jobId, running);
+      this.scheduleStatusPingInterval(jobId);
+    }
+  }
+
+  private clearStatusPingInterval(jobId: string, running = this.running.get(jobId)): void {
+    if (!running?.statusPingInterval) return;
+    clearInterval(running.statusPingInterval);
+    running.statusPingInterval = undefined;
+    this.logger.debug({ component: "subagents", event: "status_ping_cleared", jobId }, "cleared automatic subagent status ping");
+  }
+
+  private async requestCooperativeStatus(jobId: string): Promise<void> {
+    const running = this.running.get(jobId);
+    if (!running) return;
+    const job = running.job;
+    if (!this.isJobCurrentlySteerable(job)) {
+      this.clearStatusPingInterval(jobId, running);
+      return;
+    }
+    try {
+      await running.backend.steer(jobId, SUBAGENT_STATUS_PING_TEXT);
+      this.logger.debug({ component: "subagents", event: "status_ping_sent", jobId }, "requested automatic subagent status");
+    } catch (error) {
+      this.logger.warn({ component: "subagents", event: "status_ping_failed", jobId, error }, "automatic subagent status ping failed");
+      if (!this.isJobCurrentlySteerable(job)) this.clearStatusPingInterval(jobId, running);
+    }
+  }
+
   private normalizeJobRef(ref: string): string {
     return ref.trim().replace(/^[[(<]+/, "").replace(/[\])>.,;:]+$/, "");
   }
@@ -789,6 +883,12 @@ export class SubagentManager {
 
   private configuredBackend(): SubagentBackendKind {
     return this.normalizeBackend(this.config.subagents.backend);
+  }
+
+  private configuredStatusPingIntervalSec(): number {
+    const value = (this.config.subagents as AppConfig["subagents"] & { statusPingIntervalSec?: number }).statusPingIntervalSec;
+    if (Number.isInteger(value) && value >= 0) return value;
+    return DEFAULT_SUBAGENT_STATUS_PING_INTERVAL_SEC;
   }
 
   private effectiveBackend(): SubagentBackendKind {

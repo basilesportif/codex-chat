@@ -1568,7 +1568,7 @@ export class ServiceSupervisor {
       `received_at: ${event.receivedAt}`
     ].filter(Boolean).join("\n");
     const attachments = event.attachments.length > 0
-      ? `\nAttachments:\n${event.attachments.map((item) => `- ${item.kind}: ${item.localPath}${item.mimeType ? ` (${item.mimeType})` : ""}`).join("\n")}`
+      ? `\nAttachments:\n${event.attachments.map((item) => this.formatAttachmentForCodex(item)).join("\n")}`
       : "";
     const replyContext = event.reply
       ? [
@@ -1580,6 +1580,16 @@ export class ServiceSupervisor {
     const activeSubagents = this.formatActiveSubagentSnapshot();
     const employeeRuntimes = this.formatEmployeeRuntimeSnapshot();
     return `${header}${replyContext ? `\n\n${replyContext}` : ""}${employeeRuntimes ? `\n\n${employeeRuntimes}` : ""}${activeSubagents ? `\n\n${activeSubagents}` : ""}\n\nUser content:\n${event.text}${attachments}`;
+  }
+
+  private formatAttachmentForCodex(item: UserEvent["attachments"][number]): string {
+    const details = [
+      item.originalName ? `original_name=${JSON.stringify(item.originalName)}` : "",
+      item.mimeType ? `mime_type=${JSON.stringify(item.mimeType)}` : "",
+      item.sizeBytes !== undefined ? `size_bytes=${item.sizeBytes}` : "",
+      item.sha256 ? `sha256=${item.sha256}` : ""
+    ].filter(Boolean).join("; ");
+    return `- ${item.kind}: ${item.localPath}${details ? ` [${details}]` : ""}`;
   }
 
   private formatEmployeeRuntimeSnapshot(): string {

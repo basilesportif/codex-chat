@@ -3,6 +3,7 @@ import { readFile, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { Logger } from "pino";
 import { AppConfig, resolveConfigPath } from "./config.js";
+import { sanitizeChildProcessEnv } from "./env.js";
 import { pathExists } from "./util.js";
 
 /**
@@ -101,7 +102,7 @@ export function spawnDeployScript(
   );
   const child = spawn("bash", args, {
     cwd: ctx.config.rootDir,
-    env: { ...process.env },
+    env: sanitizeChildProcessEnv(ctx.config),
     detached: true,
     stdio: "ignore"
   });

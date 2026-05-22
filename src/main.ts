@@ -3,7 +3,8 @@ import { spawn } from "node:child_process";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Command } from "commander";
-import { loadConfig, ensureConfiguredDirectories, writeDefaultConfigFilesIfMissing, resolveConfigPath } from "./config.js";
+import { loadConfig, ensureConfiguredDirectories, writeDefaultConfigFilesIfMissing, resolveConfigPath, type AppConfig } from "./config.js";
+import { sanitizeChildProcessEnv } from "./env.js";
 import { createLogger } from "./logger.js";
 import { EmployeeManager } from "./employees.js";
 import { sendIpcMessage, type IpcMessage } from "./ipc.js";
@@ -64,7 +65,7 @@ program.command("health")
   .action(async (options: { json?: boolean; strict?: boolean }) => {
     const config = await loadConfig(program.opts().config);
     await ensureConfiguredDirectories(config);
-    const codexVersion = await runCapture(config.codex.binary, ["--version"]).catch((error) => `unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    const codexVersion = await runCapture(config, config.codex.binary, ["--version"]).catch((error) => `unavailable: ${error instanceof Error ? error.message : String(error)}`);
     const behaviorOk = await pathExists(resolveConfigPath(config, join(config.behavior.dir, config.behavior.entrypoint)));
     const result = {
       ok: true,
@@ -226,7 +227,8 @@ service.command("uninstall")
   .description("uninstall the systemd user service")
   .option("--user", "uninstall user service", true)
   .action(async () => {
-    await uninstallUserService();
+    const config = await loadConfig(program.opts().config);
+    await uninstallUserService(config);
     process.stdout.write("uninstalled codex-chat user service\n");
   });
 
@@ -262,10 +264,9 @@ program.parseAsync(process.argv).catch((error) => {
   process.exit(1);
 });
 
-function runCapture(command: string, args: string[]): Promise<string> {
+function runCapture(config: AppConfig, command: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
-    const { OPENAI_API_KEY: _omit, ...safeEnv } = process.env;
-    const child = spawn(command, args, { env: safeEnv, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(command, args, { env: sanitizeChildProcessEnv(config), stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => {

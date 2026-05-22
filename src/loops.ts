@@ -5,6 +5,7 @@ import { CronExpressionParser } from "cron-parser";
 import { z } from "zod";
 import type { Logger } from "pino";
 import { AppConfig, resolveConfigPath } from "./config.js";
+import { sanitizeChildProcessEnv } from "./env.js";
 import { sendIpcMessage } from "./ipc.js";
 import { StateStore } from "./state.js";
 import { LoopRun, Route } from "./types.js";
@@ -72,7 +73,7 @@ export async function loadLoopsConfig(config: AppConfig): Promise<LoopsConfig> {
 
 export async function syncCron(config: AppConfig, logger: Logger): Promise<{ changed: boolean; lines: string[] }> {
   const loops = await loadLoopsConfig(config);
-  const existing = await runCommandCapture("crontab", ["-l"]).catch((error) => {
+  const existing = await runCommandCapture(config, "crontab", ["-l"]).catch((error) => {
     const text = String(error);
     if (text.includes("no crontab")) return "";
     return "";
@@ -88,7 +89,7 @@ export async function syncCron(config: AppConfig, logger: Logger): Promise<{ cha
   if (next.trim() === existing.trim()) return { changed: false, lines: generated };
   const temp = resolveConfigPath(config, "data/run/codex-chat.crontab");
   await atomicWriteText(temp, next, 0o600);
-  await runCommandCapture("crontab", [temp]);
+  await runCommandCapture(config, "crontab", [temp]);
   logger.info({ component: "loops", event: "cron_synced", count: generated.length }, "crontab synced");
   return { changed: true, lines: generated };
 }
@@ -274,7 +275,7 @@ export class LoopManager {
 
   private async handleCommand(loop: LoopDefinition, route: Route, run: LoopRun): Promise<void> {
     if (!loop.command) throw new Error(`Loop ${loop.id} is missing command`);
-    const output = await runCommandCapture(loop.command, loop.args ?? [], loop.cwd ? resolveConfigPath(this.config, loop.cwd) : this.config.service.workspace, loop.env);
+    const output = await runCommandCapture(this.config, loop.command, loop.args ?? [], loop.cwd ? resolveConfigPath(this.config, loop.cwd) : this.config.service.workspace, loop.env);
     run.outputPath = await this.writeRunOutput(run.id, output);
     const eventText = [`Loop command completed: ${loop.id}`, `Command: ${loop.command} ${(loop.args ?? []).join(" ")}`, "", output].join("\n");
     if (route === "return_to_main") await this.callbacks.enqueueMain(eventText, { source: "loop", loopId: loop.id, runId: run.id });
@@ -332,9 +333,9 @@ export function generateCronLines(config: AppConfig, loops: LoopsConfig): string
     });
 }
 
-function runCommandCapture(command: string, args: string[] = [], cwd?: string, env?: Record<string, string>): Promise<string> {
+function runCommandCapture(config: AppConfig, command: string, args: string[] = [], cwd?: string, env?: Record<string, string>): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd, env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(command, args, { cwd, env: sanitizeChildProcessEnv(config, process.env, env), stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => {

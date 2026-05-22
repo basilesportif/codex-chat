@@ -5,6 +5,7 @@ import type { Logger } from "pino";
 import { AppConfig } from "./config.js";
 import { BehaviorPack } from "./behavior.js";
 import type { EmployeeRuntimeClient, EmployeeThreadResumeInput, EmployeeThreadSpec, EmployeeThreadStartResult, EmployeeTurnInput } from "./employee-runtime.js";
+import { sanitizeChildProcessEnv } from "./env.js";
 import { LogBuffer, scrubSecrets } from "./log-buffer.js";
 import { StateStore } from "./state.js";
 import { CodexClient, CodexEvent, CodexHealth, CodexTurnInput } from "./types.js";
@@ -182,7 +183,7 @@ export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient 
     const args = ["app-server", "--listen", listenUrl];
     for (const item of this.config.codex.extraConfig) args.push("-c", item);
     this.logger.info({ component: "codex", event: "spawn_app_server", args }, "starting codex app-server");
-    const { OPENAI_API_KEY: _omit, ...safeEnv } = process.env;
+    const safeEnv = sanitizeChildProcessEnv(this.config);
     const child = spawn(this.config.codex.binary, args, {
       cwd: this.config.service.workspace,
       env: safeEnv,

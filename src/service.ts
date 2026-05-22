@@ -30,6 +30,7 @@ import {
   type SubagentBackendStatus
 } from "./subagents.js";
 import { DisabledTranscriber, OpenAITranscriber, Transcriber } from "./transcription.js";
+import { sanitizeChildProcessEnv } from "./env.js";
 import { isTelegramAdmin, TelegramGateway } from "./telegram.js";
 import { CodexClient, StoredAction, SubagentBackendKind, SubagentJob, SubagentOwnerType, SubagentResultTarget, UserEvent } from "./types.js";
 import { makeId, nowIso } from "./util.js";
@@ -1843,6 +1844,7 @@ export class ServiceSupervisor {
       try {
         const child = spawn("git", ["rev-parse", "--short", "HEAD"], {
           cwd: this.config.rootDir,
+          env: sanitizeChildProcessEnv(this.config),
           stdio: ["ignore", "pipe", "pipe"]
         });
         let out = "";

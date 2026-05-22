@@ -61,6 +61,9 @@ function testConfig(rootDir: string): AppConfig {
       keepAliveSec: 60,
       extraConfig: [],
       addDirs: []
+    },
+    transcription: {
+      apiKeyEnv: "CUSTOM_TRANSCRIPTION_API_KEY"
     }
   } as AppConfig;
 }
@@ -71,6 +74,7 @@ afterEach(() => {
   vi.doUnmock("node:child_process");
   vi.doUnmock("ws");
   delete process.env.OPENAI_API_KEY;
+  delete process.env.CUSTOM_TRANSCRIPTION_API_KEY;
 });
 
 describe("codex clients", () => {
@@ -81,7 +85,7 @@ describe("codex clients", () => {
     expect(codex).not.toHaveProperty("HybridCodexClient");
   });
 
-  test("OPENAI_API_KEY is stripped from app-server spawn env", async () => {
+  test("OpenAI and transcription keys are stripped from app-server spawn env", async () => {
     vi.resetModules();
     const spawn = vi.fn(() => fakeChild());
     vi.doMock("node:child_process", async () => {
@@ -111,6 +115,7 @@ describe("codex clients", () => {
       return { default: FakeWebSocket };
     });
     process.env.OPENAI_API_KEY = "sk-test-should-never-reach-codex";
+    process.env.CUSTOM_TRANSCRIPTION_API_KEY = "sk-test-transcription-should-never-reach-codex";
     process.env.OTHER_VAR = "keep-me";
     const { AppServerCodexClient } = await import("../codex.js");
     const state = {
@@ -128,6 +133,7 @@ describe("codex clients", () => {
     expect(spawn).toHaveBeenCalledOnce();
     const options = spawn.mock.calls[0]?.[2] as { env?: NodeJS.ProcessEnv };
     expect(options.env).not.toHaveProperty("OPENAI_API_KEY");
+    expect(options.env).not.toHaveProperty("CUSTOM_TRANSCRIPTION_API_KEY");
     expect(options.env?.OTHER_VAR).toBe("keep-me");
     await client.stop();
   });

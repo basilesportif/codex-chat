@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { rm, writeFile } from "node:fs/promises";
 import { AppConfig } from "./config.js";
+import { sanitizeChildProcessEnv } from "./env.js";
 import { ensureDir, pathExists } from "./util.js";
 
 export async function installUserService(config: AppConfig, enableNow = false): Promise<string> {
@@ -13,8 +14,8 @@ export async function installUserService(config: AppConfig, enableNow = false): 
   const envPath = join(envDir, "env");
   if (!(await pathExists(envPath))) {
     await writeFile(envPath, [
-      `TELEGRAM_BOT_TOKEN=${process.env[config.telegram.botTokenEnv] ?? ""}`,
-      `OPENAI_API_KEY=${process.env[config.transcription.apiKeyEnv] ?? ""}`,
+      `${config.telegram.botTokenEnv}=${process.env[config.telegram.botTokenEnv] ?? ""}`,
+      `${config.transcription.apiKeyEnv}=${process.env[config.transcription.apiKeyEnv] ?? ""}`,
       ""
     ].join("\n"), { mode: 0o600 });
   }
@@ -47,22 +48,22 @@ StandardError=journal
 WantedBy=default.target
 `;
   await writeFile(unitPath, unit, { mode: 0o644 });
-  await runSystemctl(["--user", "daemon-reload"]).catch(() => undefined);
-  if (enableNow) await runSystemctl(["--user", "enable", "--now", "codex-chat.service"]).catch(() => undefined);
+  await runSystemctl(["--user", "daemon-reload"], config).catch(() => undefined);
+  if (enableNow) await runSystemctl(["--user", "enable", "--now", "codex-chat.service"], config).catch(() => undefined);
   return unitPath;
 }
 
-export async function uninstallUserService(): Promise<void> {
-  await runSystemctl(["--user", "disable", "--now", "codex-chat.service"]).catch(() => undefined);
+export async function uninstallUserService(config?: Pick<AppConfig, "transcription">): Promise<void> {
+  await runSystemctl(["--user", "disable", "--now", "codex-chat.service"], config).catch(() => undefined);
   const unitPath = join(homedir(), ".config/systemd/user/codex-chat.service");
   await rm(unitPath, { force: true });
-  await runSystemctl(["--user", "daemon-reload"]).catch(() => undefined);
+  await runSystemctl(["--user", "daemon-reload"], config).catch(() => undefined);
 }
 
 
-function runSystemctl(args: string[]): Promise<void> {
+function runSystemctl(args: string[], config?: Pick<AppConfig, "transcription">): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn("systemctl", args, { stdio: "ignore" });
+    const child = spawn("systemctl", args, { env: sanitizeChildProcessEnv(config), stdio: "ignore" });
     child.on("exit", (code) => code === 0 ? resolve() : reject(new Error(`systemctl exited with ${code}`)));
   });
 }

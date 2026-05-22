@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { z } from "zod";
 import type { Logger } from "pino";
 import { AppConfig, resolveConfigPath } from "./config.js";
+import { sanitizeChildProcessEnv } from "./env.js";
 import { StateStore } from "./state.js";
 import { MonitorEvent, Route } from "./types.js";
 import { atomicWriteText, ensureDir, killProcessTree, makeId, nowIso, pathExists } from "./util.js";
@@ -148,7 +149,7 @@ export class MonitorManager {
     }
     const child = spawn(def.command, def.args ?? [], {
       cwd: def.cwd ? resolveConfigPath(this.config, def.cwd) : this.config.service.workspace,
-      env: { ...process.env, ...def.env },
+      env: sanitizeChildProcessEnv(this.config, process.env, def.env),
       stdio: ["ignore", "pipe", "pipe"],
       detached: true
     });
@@ -165,7 +166,7 @@ export class MonitorManager {
   private async startLogTail(running: RunningMonitor): Promise<void> {
     const path = running.definition.path;
     if (!path) throw new Error(`Log monitor ${running.definition.id} is missing path`);
-    const child = spawn("tail", ["-F", resolveConfigPath(this.config, path)], { stdio: ["ignore", "pipe", "pipe"], detached: true });
+    const child = spawn("tail", ["-F", resolveConfigPath(this.config, path)], { env: sanitizeChildProcessEnv(this.config), stdio: ["ignore", "pipe", "pipe"], detached: true });
     running.child = child;
     child.stdout?.on("data", (chunk) => this.handleChunk(running, "stdout", chunk.toString()));
     child.stderr?.on("data", (chunk) => this.handleChunk(running, "stderr", chunk.toString()));
@@ -174,7 +175,7 @@ export class MonitorManager {
   private async startJournalTail(running: RunningMonitor): Promise<void> {
     const unit = running.definition.unit;
     if (!unit) throw new Error(`Journal monitor ${running.definition.id} is missing unit`);
-    const child = spawn("journalctl", ["-fu", unit], { stdio: ["ignore", "pipe", "pipe"], detached: true });
+    const child = spawn("journalctl", ["-fu", unit], { env: sanitizeChildProcessEnv(this.config), stdio: ["ignore", "pipe", "pipe"], detached: true });
     running.child = child;
     child.stdout?.on("data", (chunk) => this.handleChunk(running, "stdout", chunk.toString()));
     child.stderr?.on("data", (chunk) => this.handleChunk(running, "stderr", chunk.toString()));
@@ -245,7 +246,7 @@ export class MonitorManager {
       this.logger.warn({ component: "monitors", event: "pre_action_running_from_trusted_config", command: preAction.command }, "running monitor preAction from trusted config");
     }
     return new Promise((resolve, reject) => {
-      const child = spawn(preAction.command, preAction.args, { cwd: this.config.service.workspace, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+      const child = spawn(preAction.command, preAction.args, { cwd: this.config.service.workspace, env: sanitizeChildProcessEnv(this.config), stdio: ["ignore", "pipe", "pipe"] });
       let output = "";
       const timer = setTimeout(() => {
         child.kill("SIGTERM");

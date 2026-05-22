@@ -5,6 +5,7 @@ import { createServer } from "node:net";
 import WebSocket from "ws";
 import type { Logger } from "pino";
 import { resolveConfigPath, type AppConfig } from "./config.js";
+import { sanitizeChildProcessEnv } from "./env.js";
 import type { SubagentBackendKind, SubagentJob } from "./types.js";
 import { ensureDir, killProcessTree, nowIso } from "./util.js";
 
@@ -66,7 +67,7 @@ export class CodexExecChildAgentBackend implements ChildAgentBackend {
       { component: "subagents", event: "start", backend: this.kind, jobId: input.job.id, profile: input.job.profile, args },
       "starting subagent"
     );
-    const { OPENAI_API_KEY: _omit, ...safeEnv } = process.env;
+    const safeEnv = sanitizeChildProcessEnv(this.config);
     const child = spawn(this.config.codex.binary, args, {
       cwd: this.config.service.workspace,
       env: safeEnv,
@@ -236,7 +237,7 @@ class ChildAppServerSession {
       "starting app-server subagent"
     );
 
-    const { OPENAI_API_KEY: _omit, ...safeEnv } = process.env;
+    const safeEnv = sanitizeChildProcessEnv(this.config);
     const child = spawn(this.config.codex.binary, args, {
       cwd: this.config.service.workspace,
       env: safeEnv,

@@ -13,6 +13,7 @@ function testConfig(rootDir: string): AppConfig {
     rootDir,
     configPath: join(rootDir, "config", "codex-chat.toml"),
     service: { workspace: rootDir, stateDir: "data/state" },
+    transcription: { apiKeyEnv: "CUSTOM_TRANSCRIPTION_API_KEY" },
     loops: {
       enabled: true,
       path: "config/loops.json",
@@ -31,6 +32,8 @@ async function writeLoops(body: unknown): Promise<AppConfig> {
 }
 
 afterEach(async () => {
+  delete process.env.OPENAI_API_KEY;
+  delete process.env.CUSTOM_TRANSCRIPTION_API_KEY;
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
@@ -156,6 +159,43 @@ async function processSpooled(config: AppConfig, callbacks: Partial<ConstructorP
   });
   await manager.processSpooled();
 }
+
+test("strips OpenAI and transcription env from loop command subprocesses", async () => {
+  process.env.OPENAI_API_KEY = "sk-test-parent-openai";
+  process.env.CUSTOM_TRANSCRIPTION_API_KEY = "sk-test-parent-transcription";
+  const script = "console.log(JSON.stringify({ openai: Boolean(process.env.OPENAI_API_KEY), transcription: Boolean(process.env.CUSTOM_TRANSCRIPTION_API_KEY), other: process.env.OTHER_VAR || null }))";
+  const config = await writeLoops({
+    version: 1,
+    loops: [{
+      id: "env-check",
+      enabled: true,
+      schedule: "*/5 * * * *",
+      type: "command",
+      command: process.execPath,
+      args: ["-e", script],
+      env: {
+        OPENAI_API_KEY: "sk-test-loop-override-openai",
+        CUSTOM_TRANSCRIPTION_API_KEY: "sk-test-loop-override-transcription",
+        OTHER_VAR: "keep-me"
+      },
+      route: "return_to_main"
+    }]
+  });
+  const state = new StateStore(config);
+  await state.init();
+  const delivered: string[] = [];
+  const manager = new LoopManager(config, state, testLogger, {
+    enqueueMain: async (text) => { delivered.push(text); },
+    sendAdmins: async () => undefined,
+    dispatchSubagent: async () => undefined
+  });
+
+  await manager.handleRun("env-check");
+
+  const match = delivered[0]?.match(/\{"openai"[^\n]+\}/);
+  expect(match?.[0]).toBeTruthy();
+  expect(JSON.parse(match?.[0] ?? "{}")).toEqual({ openai: false, transcription: false, other: "keep-me" });
+});
 
 describe("loop spool replay", () => {
   test("deletes spool files after successful replay", async () => {

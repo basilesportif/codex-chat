@@ -51,4 +51,4 @@ Full documentation for each capability is in the assistant-agent-logic repo:
 - `config/skills/finance.md`
 - `config/skills/whoop.md`
 - `config/skills/web-page-design.md` - real site/page visual design, visual redesign, and design systems
-- `config/skills/generated-web-page.md` - static scratch pages, simple visualizations, maps, reports, charts, tables, calculators, and publishing
+- `config/skills/generated-web-page.md` - static scratch/temporary/private preview/quick/one-off pages, simple visualizations, maps, reports, charts, tables, calculators, and publishing; default these page requests through `codex-chat-web` using the configured public base URL unless Tim asks otherwise

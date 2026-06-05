@@ -67,7 +67,7 @@ describe("state store", () => {
     const stateFiles = await readdir(join(root, "state"));
     const lastWritePath = writeFile.mock.calls.at(-1)?.[0] as string;
     const lastRenameCall = rename.mock.calls.at(-1);
-    expect(lastWritePath).toMatch(/settings\.json\.\d+\.\d+\.tmp$/);
+    expect(lastWritePath).toMatch(/settings\.json\.\d+\.\d+\.[0-9a-f]+\.tmp$/);
     expect(lastRenameCall).toEqual([lastWritePath, join(root, "state", "settings.json")]);
     expect(stateFiles.some((file) => file.endsWith(".tmp"))).toBe(false);
   });

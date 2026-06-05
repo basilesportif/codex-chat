@@ -6,11 +6,26 @@ import { atomicWriteJson, atomicWriteText, ensureDir, nowIso, pathExists, remove
 
 const pairingCodePath = "data/pairing_code.txt";
 const subagentRuntimePath = "subagent_runtime.json";
+const idempotencyLedgerPath = "actions/idempotency-ledger.json";
 
 interface SubagentRuntimeState {
   backendOverride?: SubagentBackendKind;
   updatedAt?: string;
   updatedBy?: string;
+}
+
+interface IdempotencyLedgerEntry {
+  key: string;
+  firstSeenAt: number;
+  lastSeenAt: number;
+  actionType?: string;
+  actionId?: string;
+}
+
+interface IdempotencyLedger {
+  version: 1;
+  updatedAt: string;
+  entries: IdempotencyLedgerEntry[];
 }
 
 export class StateStore {
@@ -58,6 +73,21 @@ export class StateStore {
     await next;
   }
 
+  async updateJson<T>(rel: string, fallback: T, update: (current: T) => T | Promise<T>): Promise<T> {
+    const path = this.path(rel);
+    const previous = this.queues.get(path) ?? Promise.resolve();
+    let updated!: T;
+    const next = previous.then(async () => {
+      let current = fallback;
+      if (await pathExists(path)) current = JSON.parse(await readFile(path, "utf8")) as T;
+      updated = await update(current);
+      await atomicWriteJson(path, updated);
+    });
+    this.queues.set(path, next.catch(() => undefined));
+    await next;
+    return updated;
+  }
+
   async appendJsonl(rel: string, value: unknown): Promise<void> {
     const path = this.path(rel);
     await mkdir(dirname(path), { recursive: true });
@@ -76,6 +106,44 @@ export class StateStore {
 
   async saveAction(action: StoredAction): Promise<void> {
     await this.writeJson(`actions/${action.id}.json`, action);
+  }
+
+  async claimIdempotencyKey(
+    key: string,
+    options: { ttlMs: number; maxEntries: number; actionType?: string; actionId?: string; nowMs?: number }
+  ): Promise<boolean> {
+    const nowMs = options.nowMs ?? Date.now();
+    let claimed = false;
+    await this.updateJson<IdempotencyLedger>(idempotencyLedgerPath, {
+      version: 1,
+      updatedAt: nowIso(),
+      entries: []
+    }, (ledger) => {
+      const cutoff = nowMs - options.ttlMs;
+      const entries = Array.isArray(ledger.entries)
+        ? ledger.entries.filter((entry) => entry && typeof entry.key === "string" && entry.lastSeenAt >= cutoff)
+        : [];
+      const existing = entries.find((entry) => entry.key === key);
+      if (existing) {
+        existing.lastSeenAt = nowMs;
+        existing.actionType = existing.actionType ?? options.actionType;
+        existing.actionId = existing.actionId ?? options.actionId;
+        claimed = false;
+      } else {
+        entries.push({
+          key,
+          firstSeenAt: nowMs,
+          lastSeenAt: nowMs,
+          actionType: options.actionType,
+          actionId: options.actionId
+        });
+        claimed = true;
+      }
+      entries.sort((left, right) => left.lastSeenAt - right.lastSeenAt);
+      while (entries.length > options.maxEntries) entries.shift();
+      return { version: 1, updatedAt: nowIso(), entries };
+    });
+    return claimed;
   }
 
   async saveJob(job: SubagentJob): Promise<void> {
@@ -160,15 +228,17 @@ export class StateStore {
   }
 
   async setCodexSession(name: string, value: Record<string, unknown>): Promise<void> {
-    const sessions = await this.readJson<Record<string, Record<string, unknown>>>("codex_sessions.json", {});
-    sessions[name] = { ...sessions[name], ...value, updatedAt: nowIso() };
-    await this.writeJson("codex_sessions.json", sessions);
+    await this.updateJson<Record<string, Record<string, unknown>>>("codex_sessions.json", {}, (sessions) => {
+      sessions[name] = { ...sessions[name], ...value, updatedAt: nowIso() };
+      return sessions;
+    });
   }
 
   async clearCodexSession(name: string): Promise<void> {
-    const sessions = await this.readJson<Record<string, Record<string, unknown>>>("codex_sessions.json", {});
-    delete sessions[name];
-    await this.writeJson("codex_sessions.json", sessions);
+    await this.updateJson<Record<string, Record<string, unknown>>>("codex_sessions.json", {}, (sessions) => {
+      delete sessions[name];
+      return sessions;
+    });
   }
 
   async getSubagentBackendOverride(): Promise<SubagentBackendKind | undefined> {
@@ -177,13 +247,12 @@ export class StateStore {
   }
 
   async setSubagentBackendOverride(backend: SubagentBackendKind | undefined, updatedBy?: string): Promise<void> {
-    const current = await this.readJson<SubagentRuntimeState>(subagentRuntimePath, {});
-    await this.writeJson(subagentRuntimePath, {
+    await this.updateJson<SubagentRuntimeState>(subagentRuntimePath, {}, (current) => ({
       ...current,
       backendOverride: backend,
       updatedAt: nowIso(),
       updatedBy
-    } satisfies SubagentRuntimeState);
+    } satisfies SubagentRuntimeState));
   }
 
 
@@ -196,12 +265,14 @@ export class StateStore {
   }
 
   async addTelegramIdentity(userId: number, chatId: number, isAdmin: boolean): Promise<void> {
-    const users = await this.listTelegramUsers();
-    if (!users.some((user) => user.userId === userId)) users.push({ userId, isAdmin, pairedAt: nowIso() });
-    const chats = await this.listTelegramChats();
-    if (!chats.some((chat) => chat.chatId === chatId)) chats.push({ chatId, pairedAt: nowIso() });
-    await this.writeJson("telegram_users.json", users);
-    await this.writeJson("telegram_chats.json", chats);
+    await this.updateJson<Array<{ userId: number; isAdmin?: boolean; pairedAt?: string }>>("telegram_users.json", [], (users) => {
+      if (!users.some((user) => user.userId === userId)) users.push({ userId, isAdmin, pairedAt: nowIso() });
+      return users;
+    });
+    await this.updateJson<Array<{ chatId: number; pairedAt?: string }>>("telegram_chats.json", [], (chats) => {
+      if (!chats.some((chat) => chat.chatId === chatId)) chats.push({ chatId, pairedAt: nowIso() });
+      return chats;
+    });
   }
 
   async readPairingCode(): Promise<string | undefined> {

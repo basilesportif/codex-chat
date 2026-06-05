@@ -660,6 +660,34 @@ describe("service supervisor", () => {
     expect(sendText).toHaveBeenCalledWith(253768951, "Explicit reply.", 321, undefined);
   });
 
+  test("directive idempotency ledger suppresses duplicate actions across service restarts", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    const action = { type: "send_text", idempotencyKey: "durable-ledger-1", text: "Only once." };
+    const firstSend = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+
+    await (service as unknown as { executeDirective(action: unknown, origin: unknown): Promise<unknown> }).executeDirective(
+      action,
+      userEvent(507, "ledger first")
+    );
+
+    expect(firstSend).toHaveBeenCalledWith(253768951, "Only once.", 507, undefined);
+    const ledger = JSON.parse(await readFile(join(config.rootDir, "state", "actions", "idempotency-ledger.json"), "utf8")) as { entries: Array<{ key: string }> };
+    expect(ledger.entries.some((entry) => entry.key === "durable-ledger-1")).toBe(true);
+
+    const restarted = new ServiceSupervisor(config, logger);
+    await restarted.state.init();
+    const secondSend = vi.spyOn(restarted.telegram, "sendText").mockResolvedValue();
+    await (restarted as unknown as { executeDirective(action: unknown, origin: unknown): Promise<unknown> }).executeDirective(
+      action,
+      userEvent(508, "ledger second")
+    );
+
+    expect(secondSend).not.toHaveBeenCalled();
+  });
+
   test("defaults same-chat send_image and send_document directives to reply to the origin message", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
@@ -681,6 +709,22 @@ describe("service supervisor", () => {
 
     expect(sendImage).toHaveBeenCalledWith(253768951, expect.objectContaining({ replyToMessageId: 505 }));
     expect(sendDocument).toHaveBeenCalledWith(253768951, expect.objectContaining({ replyToMessageId: 505 }));
+  });
+
+  test("duplicate deploy command is ignored while deploy is already in flight", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    await service.state.addTelegramIdentity(253768951, 253768951, true);
+    (service as unknown as { deployInFlight: boolean }).deployInFlight = true;
+    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+    const sendTurn = vi.spyOn(service.codex, "sendTurn");
+
+    await service.enqueueUserEvent(userEvent(509, "deploy"));
+
+    expect(sendText).toHaveBeenCalledWith(253768951, "Deploy already in progress; ignoring duplicate deploy request.", 509);
+    expect(sendTurn).not.toHaveBeenCalled();
   });
 
   test("subagent return_to_main final response replies to the original Telegram message", async () => {

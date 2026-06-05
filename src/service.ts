@@ -64,10 +64,14 @@ const IDEMPOTENCY_TTL_MS = 24 * 60 * 60_000;
 const MAX_SEEN_IDEMPOTENCY = 5_000;
 const DEPLOY_ACK_MESSAGE =
   "Deploying — pulling latest and rebuilding. Will message you when ready.";
+const DEPLOY_IN_FLIGHT_MESSAGE =
+  "Deploy already in progress; ignoring duplicate deploy request.";
 const DEPLOY_DENIED_MESSAGE =
   "Deploy is admin-only. Ask Tim to add you to telegram.allowlist.adminUserIds.";
 const SUBAGENT_BACKEND_DENIED_MESSAGE =
   "Subagent backend changes are admin-only. Ask Tim to add you to telegram.allowlist.adminUserIds.";
+const CONTROL_COMMAND_IN_FLIGHT_MESSAGE =
+  "That control command is already in progress; ignoring duplicate request.";
 const DEPLOY_DRAIN_MS = 30_000;
 const DISPATCH_ACK_MAX_CHARS = 360;
 const DISPATCH_ACK_MAX_LINES = 4;
@@ -236,6 +240,8 @@ export class ServiceSupervisor {
   private injectPolling = false;
   private stopping = false;
   private restartingCodex = false;
+  private deployInFlight = false;
+  private serviceCommandsInFlight = new Set<string>();
   private seenIdempotency = new Map<string, number>();
 
   constructor(
@@ -427,12 +433,27 @@ export class ServiceSupervisor {
       }
       const backendCommand = parseSubagentBackendCommand(event.text);
       if (backendCommand.isBackend) {
-        await this.handleSubagentBackendCommandEvent(event, backendCommand);
+        if (backendCommand.action === "status") await this.handleSubagentBackendCommandEvent(event, backendCommand);
+        else {
+          await this.runExclusiveServiceCommand(
+            event,
+            `subagent-backend:${backendCommand.action}:${backendCommand.backend ?? "default"}`,
+            () => this.handleSubagentBackendCommandEvent(event, backendCommand)
+          );
+        }
         return;
       }
       const employeeCommand = parseEmployeeCommand(event.text);
       if (employeeCommand.isEmployee) {
-        await this.handleEmployeeCommandEvent(event, employeeCommand);
+        if (employeeCommand.action === "list" || employeeCommand.action === "status") {
+          await this.handleEmployeeCommandEvent(event, employeeCommand);
+        } else {
+          await this.runExclusiveServiceCommand(
+            event,
+            `employee:${employeeCommand.action}:${employeeCommand.id}`,
+            () => this.handleEmployeeCommandEvent(event, employeeCommand)
+          );
+        }
         return;
       }
       const agentStatus = parseAgentStatusCommand(event.text);
@@ -442,14 +463,18 @@ export class ServiceSupervisor {
       }
       const agentSteer = parseAgentSteerCommand(event.text);
       if (agentSteer.isSteer) {
-        const result = await this.steerJob(agentSteer.jobId, agentSteer.text);
-        await this.telegram.sendText(event.chatId, result, event.messageId);
+        await this.runExclusiveServiceCommand(event, `agent-steer:${agentSteer.jobId}`, async () => {
+          const result = await this.steerJob(agentSteer.jobId, agentSteer.text);
+          await this.telegram.sendText(event.chatId!, result, event.messageId);
+        });
         return;
       }
       const agentKill = parseAgentKillCommand(event.text);
       if (agentKill.isKill) {
-        const result = await this.cancelJob(agentKill.jobId);
-        await this.telegram.sendText(event.chatId, result, event.messageId);
+        await this.runExclusiveServiceCommand(event, `agent-kill:${agentKill.jobId}`, async () => {
+          const result = await this.cancelJob(agentKill.jobId);
+          await this.telegram.sendText(event.chatId!, result, event.messageId);
+        });
         return;
       }
       const agentsCmd = parseAgentsCommand(event.text);
@@ -1029,11 +1054,10 @@ export class ServiceSupervisor {
       completedAt: nowIso(),
       payload: action
     };
-    if (action.idempotencyKey && this.hasSeenIdempotency(action.idempotencyKey)) {
+    if (action.idempotencyKey && !(await this.claimDirectiveIdempotency(action, stored.id))) {
       await this.state.saveAction(stored);
       return stored.status;
     }
-    if (action.idempotencyKey) this.rememberIdempotency(action.idempotencyKey);
     this.logger.debug({ component: "directives", event: "action_skipped", actionType: action.type, reason }, "directive action skipped");
     await this.state.saveAction(stored);
     return stored.status;
@@ -1048,12 +1072,11 @@ export class ServiceSupervisor {
       createdAt: nowIso(),
       payload: action
     };
-    if (action.idempotencyKey && this.hasSeenIdempotency(action.idempotencyKey)) {
+    if (action.idempotencyKey && !(await this.claimDirectiveIdempotency(action, stored.id))) {
       stored.status = "skipped";
       await this.state.saveAction(stored);
       return stored.status;
     }
-    if (action.idempotencyKey) this.rememberIdempotency(action.idempotencyKey);
     await this.state.saveAction(stored);
     stored.status = "running";
     await this.state.saveAction(stored);
@@ -1387,8 +1410,23 @@ export class ServiceSupervisor {
     return this.seenIdempotency.has(key);
   }
 
+  private async claimDirectiveIdempotency(action: DirectiveAction, actionId: string): Promise<boolean> {
+    const key = action.idempotencyKey;
+    if (!key) return true;
+    if (this.hasSeenIdempotency(key)) return false;
+    const claimed = await this.state.claimIdempotencyKey(key, {
+      ttlMs: IDEMPOTENCY_TTL_MS,
+      maxEntries: MAX_SEEN_IDEMPOTENCY,
+      actionType: action.type,
+      actionId
+    });
+    this.rememberIdempotency(key);
+    return claimed;
+  }
+
   private rememberIdempotency(key: string): void {
     this.pruneSeenIdempotency();
+    this.seenIdempotency.delete(key);
     this.seenIdempotency.set(key, Date.now());
     while (this.seenIdempotency.size > MAX_SEEN_IDEMPOTENCY) {
       const oldest = this.seenIdempotency.keys().next().value;
@@ -1719,6 +1757,20 @@ export class ServiceSupervisor {
     await this.telegram.sendText(chatId, text, event.messageId);
   }
 
+  private async runExclusiveServiceCommand(event: UserEvent, key: string, operation: () => Promise<void>): Promise<void> {
+    if (this.serviceCommandsInFlight.has(key)) {
+      if (event.chatId) await this.telegram.sendText(event.chatId, CONTROL_COMMAND_IN_FLIGHT_MESSAGE, event.messageId).catch(() => undefined);
+      this.logger.warn({ component: "service", event: "control_duplicate", key, chatId: event.chatId }, "Skipped duplicate in-flight service control command");
+      return;
+    }
+    this.serviceCommandsInFlight.add(key);
+    try {
+      await operation();
+    } finally {
+      this.serviceCommandsInFlight.delete(key);
+    }
+  }
+
   private async handleSubagentBackendCommandEvent(event: UserEvent, command: Exclude<SubagentBackendCommand, { isBackend: false }>): Promise<void> {
     const chatId = event.chatId;
     if (!chatId) return;
@@ -1786,6 +1838,12 @@ export class ServiceSupervisor {
       await this.telegram.sendText(chatId, DEPLOY_DENIED_MESSAGE, event.messageId).catch(() => undefined);
       return;
     }
+    if (this.deployInFlight) {
+      await this.telegram.sendText(chatId, DEPLOY_IN_FLIGHT_MESSAGE, event.messageId).catch(() => undefined);
+      this.logger.warn({ component: "deploy", event: "duplicate_ignored", chatId, messageId: event.messageId }, "Ignored duplicate deploy command while deploy is in flight");
+      return;
+    }
+    this.deployInFlight = true;
     // Send the ack BEFORE doing anything else so the user sees feedback
     // even if drain or spawn takes a moment.
     try {

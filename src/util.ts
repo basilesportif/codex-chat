@@ -36,14 +36,14 @@ export async function ensureDir(path: string): Promise<void> {
 
 export async function atomicWriteJson(path: string, value: unknown): Promise<void> {
   await ensureDir(dirname(path));
-  const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
+  const tmp = `${path}.${process.pid}.${Date.now()}.${randomBytes(8).toString("hex")}.tmp`;
   await writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
   await rename(tmp, path);
 }
 
 export async function atomicWriteText(path: string, value: string, mode = 0o644): Promise<void> {
   await ensureDir(dirname(path));
-  const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
+  const tmp = `${path}.${process.pid}.${Date.now()}.${randomBytes(8).toString("hex")}.tmp`;
   await writeFile(tmp, value, { mode });
   await rename(tmp, path);
 }

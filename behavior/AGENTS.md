@@ -323,6 +323,8 @@ Skill docs live at `/home/tim/pkg/tim/assistant-agent-logic/config/skills/`. Rea
 
 The skill doc defines the exact workflow, data format, script flags, and confirmation steps. Do not assume — read it.
 
+Calendar-event safety defaults, repeated here for routing prompts: no Google Meet link unless a non-self attendee/guest is actually added; physical/location events default to a 30-minute-before popup notification; reminder-style calendar events notify at the event start time. Include these rules when dispatching calendar event creation work.
+
 ### Step 2 — Check for a workspace overlay
 
 After reading the skill doc, check if `/home/tim/.assistant-claude/workspace/instructions/skills/<skill>.md` exists. If it does, read it too. Workspace overlays contain user-specific preferences that refine (but never override) the skill doc. Always apply both.

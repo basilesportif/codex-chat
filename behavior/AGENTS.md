@@ -77,7 +77,7 @@ The shared workflow doc at `/home/tim/pkg/tim/assistant-agent-logic/config/TELEG
 - Do not request Telegram download URLs; the service already stores files locally.
 - If the user asks you to send an existing local image back, emit a `send_image` directive with a local path.
 - If the user asks you to generate, create, edit, transform, or render an image, dispatch an `implementer` subagent first. The main loop must never call built-in imagegen for user image requests or generate the image itself.
-- If the user asks you to create, publish, or share a simple data visualization, map, report, chart, table, calculator, one-off scratch page, small tool, Google Maps-style static page, or other functional static HTML/CSS/JS artifact, dispatch an `implementer` subagent with `/home/tim/pkg/tim/assistant-agent-logic/config/skills/generated-web-page.md`. Phrases like "scratch page", "temporary page", "private preview page", "quick page", or "one-off page" should route here even when Tim does not name the configured scratch host. Default to publishing through `codex-chat-web` using the publisher's configured public base URL as the source of truth unless Tim asks otherwise. Use `generated-web-page.md`, not `web-page-design.md`, unless Tim explicitly asks for a serious visual redesign, design system, or real site design. The subagent should build the page in its artifact directory, treat the configured scratch-page host as an on-demand scratch page host rather than a dashboard, publish through `codex-chat-web`'s publisher to an unlisted `/pages/<id>/` URL, and return the public URL plus TTL/pruning or promotion status.
+- If the user asks you to create, publish, or share a simple data visualization, map, report, chart, table, calculator, one-off scratch page, small tool, Google Maps-style static page, or other functional static HTML/CSS/JS artifact, dispatch an `implementer` subagent with `/home/tim/pkg/tim/assistant-agent-logic/config/skills/generated-web-page.md`. Phrases like "scratch page", "temporary page", "private preview page", "quick page", or "one-off page" should route here even when Tim does not name the configured scratch host. Default to publishing through `codex-chat-web` using the publisher's configured public base URL as the source of truth unless Tim asks otherwise; `CODEX_CHAT_WEB_PUBLIC_BASE_URL` may override `DEFAULT_PUBLIC_BASE_URL`. Use `generated-web-page.md`, not `web-page-design.md`, unless Tim explicitly asks for a serious visual redesign, design system, or real site design. The subagent should build the page in its artifact directory, treat the configured scratch-page host as an on-demand scratch page host rather than a dashboard, publish through `codex-chat-web`'s publisher to an unlisted `/pages/<id>/` URL, and return the public URL plus TTL/pruning or promotion status.
 - If the user asks to save, keep, file, archive, or attach a file/PDF/document from the conversation (for example "save this PDF", "save this to Decisive Outcomes", "save this as conference prospectus", or "attach this to Bill Pate"), do it directly in the main session. Read `behavior/skills/file-save/SKILL.md`, use the provided local attachment path, copy it with `node scripts/file-save.mjs`, and record available event metadata (`received_at`, Telegram chat/message IDs, original name, MIME type, size, SHA-256). Default to private storage; never copy private PDFs into Brain or public source repos. Ask only if the source attachment is ambiguous or missing.
 - For image edits, pass the received local image paths to the dispatch in `images` and mention them in the prompt. The implementer subagent owns the imagegen call.
 - The implementer subagent must generate/edit the image, choose the final output, copy it into an allowed temporary codex-chat data path such as `data/artifacts/generated-images/<slug>/<file>.png`, and return the staged path, caption, and ready-to-use `send_image` directive.
@@ -90,7 +90,7 @@ The shared workflow doc at `/home/tim/pkg/tim/assistant-agent-logic/config/TELEG
 
 When Tim asks for real site or page visual design work, such as a new visual/product design from scratch for a webpage, homepage, landing page, app page, design system, design mockup, or visual redesign, dispatch an `implementer` subagent. The prompt must instruct it to read `/home/tim/pkg/tim/assistant-agent-logic/config/skills/web-page-design.md` before doing the work.
 
-If Tim asks for a simple data visualization, map, report, chart, table, calculator, one-off scratch page, or other functional static page, use `/home/tim/pkg/tim/assistant-agent-logic/config/skills/generated-web-page.md`, not `web-page-design.md`, unless he explicitly asks for a serious visual redesign, design system, or real site design. Treat "scratch page", "temporary page", "private preview page", "quick page", and "one-off page" as generated-web-page requests even when the configured scratch host is not mentioned; default to publishing through `codex-chat-web` using the publisher's configured public base URL as the source of truth unless Tim asks otherwise.
+If Tim asks for a simple data visualization, map, report, chart, table, calculator, one-off scratch page, or other functional static page, use `/home/tim/pkg/tim/assistant-agent-logic/config/skills/generated-web-page.md`, not `web-page-design.md`, unless he explicitly asks for a serious visual redesign, design system, or real site design. Treat "scratch page", "temporary page", "private preview page", "quick page", and "one-off page" as generated-web-page requests even when the configured scratch host is not mentioned; default to publishing through `codex-chat-web` using the publisher's configured public base URL as the source of truth unless Tim asks otherwise. For conference maps/lists, update durable `workspace/data/conference-lists/**` first via `conference-lists.md`, then republish generated pages from that source.
 
 If a request needs both design and a browser-viewable artifact, use `web-page-design.md` first only for real site, landing page, or app page work. The implementer should complete the design brief, visual direction, reference analysis, screenshots, critique, and improvement pass before reading `generated-web-page.md` for static page packaging and publishing.
 
@@ -263,10 +263,10 @@ Use the main loop only for extremely direct deterministic operations:
 
 - Simple acknowledgements.
 - Service-level commands already handled by this service, such as `help`, `logs`, `agents`, `agent kill`, and deploy/update commands.
-- Direct todo/project state mutations or listing through the existing assistant-agent-logic scripts, when the requested operation is explicit and requires no interpretation beyond running the documented script.
+- Direct todo/project/reminder/straightforward CRM/conference-list state mutations or listing through the existing assistant-agent-logic scripts, when the requested operation is explicit and requires no interpretation beyond running the documented script.
 - Other trivial deterministic local lookups with no repo inspection, external account/data lookup, research, or multi-step workflow.
 
-Do not use the main loop for README changes, documentation edits, code edits, repo/file inspection, calendar lookup, email/Gmail lookup, research, external-data lookup, debugging, architecture, multi-step work, or ambiguous work. Even a read-only calendar or email lookup must dispatch a subagent.
+Do not use the main loop for README changes, documentation edits, code edits, repo/file inspection, calendar lookup, email/Gmail lookup, research, external-data lookup, debugging, architecture, multi-step work, or ambiguous work. Even a read-only calendar or email lookup must dispatch a subagent. Straightforward calendar event creation/guest adding with all details supplied still dispatches, but medium effort is enough; calendar/email lookup, research-backed event creation, and ambiguous scheduling use high or xhigh per the rubric below.
 
 For main-loop work, the user-facing reply must include a short line identifying it as main-loop work and stating the model/effort actually being used, for example:
 
@@ -277,6 +277,7 @@ For any reasoning, investigation, repo inspection, code or docs editing, code re
 Default routing rubric:
 
 - Mechanical, well-scoped code/docs edits with clear instructions and low blast radius: `model: "gpt-5.5"`, `effort: "medium"`.
+- Straightforward calendar event creation/guest adding with all required details supplied and no lookup/research: `model: "gpt-5.5"`, `effort: "medium"`.
 - Normal research, repo inspection, calendar/email lookup, external-data lookup, and non-trivial analysis: `model: "gpt-5.5"`, `effort: "high"`.
 - Risky, ambiguous, debugging, architecture, multi-step, cross-module, deploy-sensitive, or high-stakes tasks: `model: "gpt-5.5"`, `effort: "xhigh"`.
 - Simple deterministic main-loop work: use the current top-level model/effort and disclose it as `main_loop`.
@@ -298,9 +299,9 @@ Subagent directive shape:
 
 ## Assistant Workspace
 
-Before handling ANY request that touches todos, bets/betting, CRM/contacts, reminders, calendar, email, finance, or health (Whoop), the actor doing the work MUST read the relevant skill file. This is mandatory — not optional. Skipping this step will cause the wrong workflow, wrong file paths, wrong script flags, or missed confirmation steps.
+Before handling ANY request that touches todos, projects, bets/betting, CRM/contacts, reminders, calendar, email, finance, health (Whoop), or conference lists/favorites, the actor doing the work MUST read the relevant skill file. This is mandatory — not optional. Skipping this step will cause the wrong workflow, wrong file paths, wrong script flags, or missed confirmation steps.
 
-Only direct todo/project state mutations or listing may stay in the main loop, and only when they are explicit deterministic script calls. Calendar/email lookups, finance/health/betting lookups, CRM investigation, messaging reads, and other external account/data access must dispatch a subagent; include the required skill-doc read in the subagent prompt.
+Only direct todo/project/reminder/straightforward CRM/conference-list state mutations or listing may stay in the main loop, and only when they are explicit deterministic script calls. Calendar/email lookups, finance/health/betting lookups, CRM investigations that require enrichment or external context, messaging reads, and other external account/data access must dispatch a subagent; include the required skill-doc read in the subagent prompt.
 
 Reminder: the service already emitted the user-message 👀 reaction before Codex saw the request. If the task is allowed to stay in the main loop, read the skill file first, do the work, then emit the final reply. If it must dispatch, the subagent reads the skill file before doing the work.
 
@@ -311,9 +312,11 @@ Skill docs live at `/home/tim/pkg/tim/assistant-agent-logic/config/skills/`. Rea
 | Request type | Skill file |
 |---|---|
 | Todos / tasks | `todo.md` |
+| Projects / project notes / project resources / project-scoped tasks | `projects.md` |
 | Bets / betting / odds / units / ROI | `betting.md` |
 | CRM / contacts / businesses / correspondence | `crm.md` |
 | Reminders / scheduled notifications | `reminders.md` |
+| Conference lists / conference favorites / shortlist/status/map records | `conference-lists.md` |
 | Calendar / email / Gmail | `composio.md` |
 | Finance / banking / accounts / transactions | `finance.md` |
 | Health / recovery / sleep / strain / Whoop | `whoop.md` |
@@ -325,13 +328,15 @@ The skill doc defines the exact workflow, data format, script flags, and confirm
 
 Calendar-event safety defaults, repeated here for routing prompts: no Google Meet link unless a non-self attendee/guest is actually added; physical/location events default to a 30-minute-before popup notification; reminder-style calendar events notify at the event start time. Include these rules when dispatching calendar event creation work.
 
+Project-note navigation default: when orienting to a project with many notes, read `projects.md`, run `project-notes-list.js` first to inspect metadata summaries, canonical keys, current flags, refs, and relationships, then open `project-view.js` or specific note text only as needed. Do not start by loading every full note body.
+
 ### Step 2 — Check for a workspace overlay
 
 After reading the skill doc, check if `/home/tim/.assistant-claude/workspace/instructions/skills/<skill>.md` exists. If it does, read it too. Workspace overlays contain user-specific preferences that refine (but never override) the skill doc. Always apply both.
 
 ### Step 3 — Data lives in the workspace
 
-All state files are under `/home/tim/.assistant-claude/workspace/data/` (`todos.json`, `bets.json`, `crm.json`, `reminders.json`, `projects.json`, etc.). Never hardcode a file path — the skill doc will tell you the exact file name.
+All state files are under `/home/tim/.assistant-claude/workspace/data/` (`todos.json`, `bets.json`, `crm.json`, `reminders.json`, `projects.json`, `conference-lists/**`, etc.). Never hardcode a file path — the skill doc will tell you the exact file name.
 
 ### Step 4 — Run scripts from the assistant-agent-logic repo
 

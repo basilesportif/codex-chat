@@ -36,7 +36,7 @@ When assigned a simple data visualization, map, report, chart, table, calculator
 ```
 
 
-The configured `codex-chat-web` public base URL is the source of truth for scratch page URLs. Treat that host as an on-demand scratch page host, not a dashboard. Default generated pages are unlisted static URLs under `/pages/<id>/` with TTL/pruning unless Tim explicitly asks to promote the page.
+The configured `codex-chat-web` public base URL is the source of truth for scratch page URLs (`CODEX_CHAT_WEB_PUBLIC_BASE_URL` may override `DEFAULT_PUBLIC_BASE_URL`). Treat that host as an on-demand scratch page host, not a dashboard. Default generated pages are unlisted static URLs under `/pages/<id>/` with TTL/pruning unless Tim explicitly asks to promote the page.
 
 Use `generated-web-page.md`, not `web-page-design.md`, for these scratch artifacts unless Tim explicitly asks for a serious visual redesign, design system, or real site design. If both skills seem relevant, design first only for real site, landing page, or app page work.
 
@@ -49,3 +49,5 @@ Workflow:
 4. Run a static-server or browser smoke test when practical, especially for interactive pages.
 5. Publish only through the `codex-chat-web` publisher (`npm run publish:page -- ...`) to an unlisted `/pages/<id>/` URL. Do not hand-copy files into `/srv/codex-chat-web/pages/`.
 6. Verify the `assistant-agent-data:data/web-pages/manifest.json` entry and return the public URL, TTL/pruning or promotion status, changed files if any source repos were edited, verification performed, and remaining risk.
+
+For conference map/list pages, read `/home/tim/pkg/tim/assistant-agent-logic/config/skills/conference-lists.md` and update durable `workspace/data/conference-lists/<list-id>/conferences.json` records first for favorite/shortlist/status/list changes. Rebuild and republish from that durable source; do not preserve actionable decisions only in a scratch page artifact.

@@ -61,6 +61,40 @@ with configured/enabled/disabled counts plus each loop's enabled state,
 schedule/timezone, type/route, lock/durable settings, empty-output flag when
 set, and next/last run when available.
 
+## Local web/API channel
+
+`codex-chat` can optionally expose a single-user local HTTP API for a trusted
+server-side web/app backend. It is disabled by default and binds to
+`127.0.0.1`; do not expose it directly to browsers or the public internet.
+
+Config:
+
+```toml
+[api]
+enabled = true
+host = "127.0.0.1"
+port = 8787
+tokenEnv = "CODEX_CHAT_API_TOKEN"
+logicalUserId = "tim"
+defaultConversationKey = "web:default"
+allowNonLocalhost = false
+```
+
+Set `CODEX_CHAT_API_TOKEN` in the service environment. All endpoints require
+`Authorization: Bearer <token>`.
+
+- `POST /v1/messages`
+  - Headers: `Authorization: Bearer ...`; `Idempotency-Key: <client-id>` is
+    recommended and prevents duplicate enqueue across retries.
+  - Body: `{"text":"hello","conversationKey":"web:default","clientMessageId":"uuid","metadata":{}}`
+  - Response: `{"accepted":true,"messageId":"msg_...","conversationKey":"web:default","status":"queued"}`
+- `GET /v1/conversations/:conversationKey/messages?after=<messageId>&limit=100`
+  polls persisted inbound/outbound messages for that one conversation key only.
+
+Telegram behavior and legacy directive `chatId` routing remain compatible. Web
+and API messages use the same single logical user (`tim`) and shared Codex
+context; replies route back to the originating conversation key.
+
 ## Subagent Backend Flag
 
 `subagents.backend` controls new subagent jobs:

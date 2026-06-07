@@ -1,12 +1,13 @@
 import { appendFile, mkdir, readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { AppConfig, resolveConfigPath } from "./config.js";
-import { EmployeeRuntimeState, LoopRun, MonitorEvent, StoredAction, SubagentBackendKind, SubagentJob } from "./types.js";
+import { EmployeeRuntimeState, LoopRun, MonitorEvent, StoredAction, StoredConversationMessage, SubagentBackendKind, SubagentJob } from "./types.js";
 import { atomicWriteJson, atomicWriteText, ensureDir, nowIso, pathExists, removeIfExists } from "./util.js";
 
 const pairingCodePath = "data/pairing_code.txt";
 const subagentRuntimePath = "subagent_runtime.json";
 const idempotencyLedgerPath = "actions/idempotency-ledger.json";
+const apiIdempotencyLedgerPath = "api/idempotency-ledger.json";
 
 interface SubagentRuntimeState {
   backendOverride?: SubagentBackendKind;
@@ -28,6 +29,26 @@ interface IdempotencyLedger {
   entries: IdempotencyLedgerEntry[];
 }
 
+export interface ApiMessageAcceptedResponse {
+  accepted: true;
+  messageId: string;
+  conversationKey: string;
+  status: "queued";
+}
+
+interface ApiIdempotencyLedgerEntry {
+  key: string;
+  firstSeenAt: number;
+  lastSeenAt: number;
+  response: ApiMessageAcceptedResponse;
+}
+
+interface ApiIdempotencyLedger {
+  version: 1;
+  updatedAt: string;
+  entries: ApiIdempotencyLedgerEntry[];
+}
+
 export class StateStore {
   readonly root: string;
   private queues = new Map<string, Promise<void>>();
@@ -38,7 +59,7 @@ export class StateStore {
 
   async init(): Promise<void> {
     await ensureDir(this.root);
-    for (const dir of ["messages", "files", "turns", "queued_turns", "jobs", "employees", "employee_child_results", "loop_runs", "monitor_events", "actions"]) {
+    for (const dir of ["messages", "conversation_messages", "files", "turns", "queued_turns", "jobs", "employees", "employee_child_results", "loop_runs", "monitor_events", "actions", "api"]) {
       await ensureDir(join(this.root, dir));
     }
     if (!(await pathExists(join(this.root, "schema.json")))) {
@@ -99,6 +120,39 @@ export class StateStore {
     await this.appendJsonl(`messages/${day}.jsonl`, value);
   }
 
+  async recordConversationMessage(message: StoredConversationMessage): Promise<void> {
+    await this.appendJsonl(`conversation_messages/${conversationFileKey(message.conversationKey)}.jsonl`, message);
+  }
+
+  async recordChannelMessage(message: StoredConversationMessage): Promise<void> {
+    await this.recordMessage(message);
+    await this.recordConversationMessage(message);
+  }
+
+  async listConversationMessages(
+    conversationKey: string,
+    options: { after?: string; limit?: number } = {}
+  ): Promise<StoredConversationMessage[]> {
+    const path = this.path(`conversation_messages/${conversationFileKey(conversationKey)}.jsonl`);
+    if (!(await pathExists(path))) return [];
+    const raw = await readFile(path, "utf8");
+    const messages: StoredConversationMessage[] = [];
+    for (const line of raw.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      try {
+        const parsed = JSON.parse(line) as StoredConversationMessage;
+        if (parsed.conversationKey === conversationKey) messages.push(parsed);
+      } catch {
+        // Ignore malformed historical rows.
+      }
+    }
+    const after = options.after?.trim();
+    const startIndex = after ? messages.findIndex((message) => message.id === after || message.channelMessageId === after) + 1 : 0;
+    const boundedStart = startIndex > 0 ? startIndex : 0;
+    const limit = Math.max(1, Math.min(options.limit ?? 100, 500));
+    return messages.slice(boundedStart, boundedStart + limit);
+  }
+
   async recordMonitorEvent(event: MonitorEvent): Promise<void> {
     const day = new Date().toISOString().slice(0, 10);
     await this.appendJsonl(`monitor_events/${day}.jsonl`, event);
@@ -144,6 +198,45 @@ export class StateStore {
       return { version: 1, updatedAt: nowIso(), entries };
     });
     return claimed;
+  }
+
+  async claimApiIdempotencyKey(
+    key: string,
+    response: ApiMessageAcceptedResponse,
+    options: { ttlMs: number; maxEntries: number; nowMs?: number }
+  ): Promise<{ claimed: boolean; response: ApiMessageAcceptedResponse }> {
+    const nowMs = options.nowMs ?? Date.now();
+    let claimed = false;
+    let storedResponse = response;
+    await this.updateJson<ApiIdempotencyLedger>(apiIdempotencyLedgerPath, {
+      version: 1,
+      updatedAt: nowIso(),
+      entries: []
+    }, (ledger) => {
+      const cutoff = nowMs - options.ttlMs;
+      const entries = Array.isArray(ledger.entries)
+        ? ledger.entries.filter((entry) => entry && typeof entry.key === "string" && entry.lastSeenAt >= cutoff)
+        : [];
+      const existing = entries.find((entry) => entry.key === key);
+      if (existing) {
+        existing.lastSeenAt = nowMs;
+        storedResponse = existing.response;
+        claimed = false;
+      } else {
+        entries.push({
+          key,
+          firstSeenAt: nowMs,
+          lastSeenAt: nowMs,
+          response
+        });
+        claimed = true;
+        storedResponse = response;
+      }
+      entries.sort((left, right) => left.lastSeenAt - right.lastSeenAt);
+      while (entries.length > options.maxEntries) entries.shift();
+      return { version: 1, updatedAt: nowIso(), entries };
+    });
+    return { claimed, response: storedResponse };
   }
 
   async saveJob(job: SubagentJob): Promise<void> {
@@ -289,4 +382,8 @@ export class StateStore {
   async deletePairingCode(): Promise<void> {
     await removeIfExists(this.path(pairingCodePath));
   }
+}
+
+function conversationFileKey(conversationKey: string): string {
+  return Buffer.from(conversationKey, "utf8").toString("base64url");
 }

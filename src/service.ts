@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { AppConfig, ensureConfiguredDirectories, resolveConfigPath } from "./config.js";
+import { ApiGateway } from "./api.js";
 import { BehaviorPack } from "./behavior.js";
 import { AppServerCodexClient, CodexCrashInfo } from "./codex.js";
 import {
@@ -21,6 +22,8 @@ import { CodexHeartbeat } from "./heartbeat.js";
 import { LocalIpcServer } from "./ipc.js";
 import { formatLoopsStatus, LoopManager, syncCron } from "./loops.js";
 import { MonitorManager } from "./monitors.js";
+import { eventOrigin, originForTelegram, telegramConversationKey } from "./origin.js";
+import { ExplicitOutboundTarget, OutboundRouter } from "./outbound.js";
 import { StateStore } from "./state.js";
 import {
   SubagentManager,
@@ -32,7 +35,7 @@ import {
 import { DisabledTranscriber, OpenAITranscriber, Transcriber } from "./transcription.js";
 import { sanitizeChildProcessEnv } from "./env.js";
 import { isTelegramAdmin, TelegramGateway } from "./telegram.js";
-import { CodexClient, StoredAction, SubagentBackendKind, SubagentJob, SubagentOwnerType, SubagentResultTarget, UserEvent } from "./types.js";
+import { CodexClient, MessageOrigin, StoredAction, SubagentBackendKind, SubagentJob, SubagentOwnerType, SubagentResultTarget, UserEvent } from "./types.js";
 import { makeId, nowIso } from "./util.js";
 
 export const INJECT_TELEGRAM_USER_ID = 253768951;
@@ -87,6 +90,14 @@ type SendTextAction = Extract<DirectiveAction, { type: "send_text" }>;
 
 export function injectFilePath(config: AppConfig): string {
   return join(config.service.workspace, "inject.json");
+}
+
+function isMessageOrigin(value: unknown): value is MessageOrigin {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return (record.channel === "telegram" || record.channel === "web" || record.channel === "api")
+    && typeof record.logicalUserId === "string"
+    && typeof record.conversationKey === "string";
 }
 
 function formatDurationSeconds(seconds: number): string {
@@ -220,6 +231,8 @@ export class ServiceSupervisor {
   readonly behavior: BehaviorPack;
   readonly files: FileStore;
   readonly telegram: TelegramGateway;
+  readonly outbound: OutboundRouter;
+  readonly api: ApiGateway;
   readonly codex: CodexClient;
   readonly loops: LoopManager;
   readonly monitors: MonitorManager;
@@ -262,11 +275,22 @@ export class ServiceSupervisor {
       // iterator throwing.
       const activeChatId = this.activeTurnEvent?.chatId;
       const activeMessageId = this.activeTurnEvent?.messageId;
-      void this.restartCodex(reason, info, { activeChatId, activeMessageId }).catch((error) => {
+      const activeOrigin = this.activeTurnEvent ? eventOrigin(this.activeTurnEvent, this.config.api.logicalUserId) : undefined;
+      void this.restartCodex(reason, info, { activeChatId, activeMessageId, activeOrigin }).catch((error) => {
         this.logger.error({ component: "service", event: "restart_failed", error }, "Codex restart failed");
       });
     });
     this.employees = new EmployeeManager(config, this.state, logger, this.codex as AppServerCodexClient);
+    this.telegram = new TelegramGateway(config, this.state, this.files, transcriber, logger, {
+      onUserEvent: (event) => this.enqueueUserEvent(event),
+      onJobsCommand: async () => this.formatJobs(),
+      onCancelCommand: async (_chatId, jobId) => this.cancelJob(jobId),
+      onHealthCommand: async () => this.healthText()
+    });
+    this.outbound = new OutboundRouter(this.state, this.telegram, logger, config.api.logicalUserId);
+    this.api = new ApiGateway(config, this.state, logger, {
+      onUserEvent: (event) => this.enqueueUserEvent(event)
+    });
     this.subagents = new SubagentManager(
       config,
       this.behavior,
@@ -280,12 +304,14 @@ export class ServiceSupervisor {
             profile: job.profile,
             subagentStatus: job.status,
             subagentResult: result,
+            origin: job.origin,
             originChatId: job.originChatId,
             originMessageId: job.originMessageId
           });
         },
         onSendToUser: async (job: SubagentJob, result: string) => {
-          if (job.originChatId) await this.telegram.sendText(job.originChatId, result, job.originMessageId);
+          const origin = job.origin ?? (job.originChatId ? originForTelegram({ chatId: job.originChatId, messageId: job.originMessageId, logicalUserId: this.config.api.logicalUserId }) : undefined);
+          if (origin) await this.outbound.sendText(origin, result, { replyToMessageId: job.originMessageId ?? origin.messageId });
         },
         onReturnToEmployee: async (job: SubagentJob, result: string) => {
           await this.employees.deliverChildSubagentResult(job, result);
@@ -315,12 +341,6 @@ export class ServiceSupervisor {
       steerSubagent: async (ref, text, options) => this.subagents.steerJob(ref, text, options),
       cancelOwnedActiveSubagents: async (employeeId, reason) => this.subagents.cancelActiveJobsForOwner("employee", employeeId, reason),
       listSubagentJobs: () => this.subagents.listJobs()
-    });
-    this.telegram = new TelegramGateway(config, this.state, this.files, transcriber, logger, {
-      onUserEvent: (event) => this.enqueueUserEvent(event),
-      onJobsCommand: async () => this.formatJobs(),
-      onCancelCommand: async (_chatId, jobId) => this.cancelJob(jobId),
-      onHealthCommand: async () => this.healthText()
     });
     this.loops = new LoopManager(config, this.state, logger, {
       enqueueMain: (text, metadata) => this.enqueueSynthetic(text, metadata),
@@ -384,6 +404,7 @@ export class ServiceSupervisor {
     await this.behavior.loadBootstrapPrompt();
     await this.codex.start();
     await this.employees.recoverRuntimesOnStartup();
+    await this.api.start();
     await this.telegram.start();
     await this.recoverAbandonedWork();
     await this.ipc.start();
@@ -407,6 +428,7 @@ export class ServiceSupervisor {
     if (this.stopping) return;
     this.stopping = true;
     await this.telegram.notifyOps("codex-chat shutting down").catch(() => undefined);
+    await this.api.stop().catch(() => undefined);
     await this.ipc.stop().catch(() => undefined);
     await this.telegram.stop().catch(() => undefined);
     await this.monitors.stop().catch(() => undefined);
@@ -492,7 +514,7 @@ export class ServiceSupervisor {
         return;
       }
     }
-    const key = event.chatId ? String(event.chatId) : "system";
+    const key = this.queueKeyForEvent(event);
     if (this.shouldQueueTurn()) {
       await this.queueEvent(key, event);
       return;
@@ -507,8 +529,12 @@ export class ServiceSupervisor {
     const messageId = typeof metadata?.messageId === "number"
       ? metadata.messageId
       : typeof metadata?.originMessageId === "number" ? metadata.originMessageId : undefined;
+    const origin = isMessageOrigin(metadata?.origin)
+      ? metadata.origin
+      : chatId !== undefined ? originForTelegram({ chatId, messageId, logicalUserId: this.config.api.logicalUserId }) : undefined;
     const event: UserEvent = {
       source: (metadata?.source as UserEvent["source"]) ?? "system",
+      origin,
       chatId,
       messageId,
       text,
@@ -517,7 +543,7 @@ export class ServiceSupervisor {
       receivedAt: nowIso()
     };
     if (this.shouldQueueTurn()) {
-      await this.queueEvent("system", event);
+      await this.queueEvent(this.queueKeyForEvent(event), event);
       return;
     }
     this.runTurn(event);
@@ -530,6 +556,12 @@ export class ServiceSupervisor {
       service: this.config.service.name,
       workspace: this.config.service.workspace,
       codex,
+      api: {
+        enabled: this.config.api.enabled,
+        host: this.config.api.host,
+        port: this.api.address()?.port ?? this.config.api.port,
+        configured: Boolean(this.config.apiToken)
+      },
       telegramConfigured: Boolean(this.config.telegramBotToken),
       openaiConfigured: Boolean(this.config.openaiApiKey),
       stateDir: this.state.root,
@@ -915,27 +947,24 @@ export class ServiceSupervisor {
         this.logger.error({ component: "codex", event: "turn_unavailable", turnId, error }, "Codex turn failed");
         const closed = await closeTurn({ id: turnId, status: "error", input: event, errorMessage: error instanceof Error ? error.message : String(error), completedAt: nowIso() });
         if (!closed) return;
-        if (event.chatId) {
-          try {
-            await this.telegram.sendText(event.chatId, this.codexUnavailableMessage(error), event.messageId);
-          } catch (sendError) {
-            this.logger.error({ component: "service", event: "codex_unavailable_reply_failed", sendError }, "Failed to send Codex unavailable reply to Telegram");
-          }
+        try {
+          await this.replyToEvent(event, this.codexUnavailableMessage(error));
+        } catch (sendError) {
+          this.logger.error({ component: "service", event: "codex_unavailable_reply_failed", sendError }, "Failed to send Codex unavailable reply");
         }
         return;
       }
-      if (hadError && !output.trim() && event.chatId) {
+      if (hadError && !output.trim()) {
         const brief = errorMessage.split("\n")[0].slice(0, 100);
         const closed = await closeTurn({ id: turnId, status: "error", input: event, errorMessage, completedAt: nowIso() });
         if (!closed) return;
-        await this.telegram.sendText(event.chatId, `Codex encountered an error: ${brief}. Please try again.`, event.messageId);
+        await this.replyToEvent(event, `Codex encountered an error: ${brief}. Please try again.`);
         return;
       }
       if (this.isStaleTurnToken(turnToken)) return;
       const parsed = parseDirectives(output);
-      if (parsed.cleanText && event.chatId) {
-        await this.telegram.sendText(event.chatId, parsed.cleanText, event.messageId);
-        userFacingDelivered = true;
+      if (parsed.cleanText) {
+        userFacingDelivered = await this.replyToEvent(event, parsed.cleanText);
       }
       // Final pass: execute any directive actions that were NOT already
       // pre-executed during streaming. The idempotency key system is an
@@ -984,9 +1013,16 @@ export class ServiceSupervisor {
   }
 
   private dispatchFollowupAckText(action: DirectiveAction, origin: UserEvent): string | undefined {
-    if (action.type !== "send_text" || origin.chatId === undefined) return undefined;
+    if (action.type !== "send_text") return undefined;
     const sendTextAction: SendTextAction = action;
     if (sendTextAction.format && sendTextAction.format !== "text") return undefined;
+
+    if (origin.chatId === undefined) {
+      if (sendTextAction.chatId !== undefined) return undefined;
+      if (sendTextAction.target !== undefined && sendTextAction.target !== "origin") return undefined;
+      if (sendTextAction.replyToMessageId !== undefined) return undefined;
+      return this.compactDispatchAckText(sendTextAction.text);
+    }
 
     const chatId = sendTextAction.chatId ?? origin.chatId;
     if (chatId !== origin.chatId) return undefined;
@@ -1019,14 +1055,14 @@ export class ServiceSupervisor {
   }
 
   private async deliverSubagentFallbackIfNeeded(event: UserEvent): Promise<void> {
-    if (event.source !== "subagent" || event.chatId === undefined) return;
+    if (event.source !== "subagent" || !eventOrigin(event, this.config.api.logicalUserId)) return;
     const text = this.subagentFallbackText(event);
     if (!text) return;
     this.logger.warn(
-      { component: "service", event: "subagent_callback_fallback", chatId: event.chatId, messageId: event.messageId, jobId: event.metadata?.jobId },
+      { component: "service", event: "subagent_callback_fallback", chatId: event.chatId, conversationKey: event.origin?.conversationKey, messageId: event.messageId, jobId: event.metadata?.jobId },
       "Subagent callback turn produced no user-facing output; sending result directly"
     );
-    await this.telegram.sendText(event.chatId, text, event.messageId);
+    await this.replyToEvent(event, text);
   }
 
   private subagentFallbackText(event: UserEvent): string {
@@ -1083,8 +1119,7 @@ export class ServiceSupervisor {
     try {
       const defaultChatId = origin.chatId;
       if (action.type === "send_text") {
-        const chatId = action.chatId ?? this.requireChat(defaultChatId);
-        await this.telegram.sendText(chatId, action.text, this.directiveReplyToMessageId(chatId, action.replyToMessageId, origin), action.format);
+        await this.executeSendTextDirective(action, origin);
       }
       if (action.type === "send_image") {
         const chatId = action.chatId ?? this.requireChat(defaultChatId);
@@ -1095,10 +1130,13 @@ export class ServiceSupervisor {
         await this.telegram.sendDocument(chatId, { ...action, replyToMessageId: this.directiveReplyToMessageId(chatId, action.replyToMessageId, origin) });
       }
       if (action.type === "dispatch_subagent") {
-        if (origin.chatId) {
-          await this.telegram.sendText(origin.chatId, options.dispatchStatusText ?? this.formatDispatchSummary(action), origin.messageId);
-        }
-        await this.subagents.dispatchFromDirective(action, { chatId: origin.chatId, messageId: origin.messageId, parentTurnId: options.parentTurnId });
+        await this.replyToEvent(origin, options.dispatchStatusText ?? this.formatDispatchSummary(action));
+        await this.subagents.dispatchFromDirective(action, {
+          chatId: origin.chatId,
+          messageId: origin.messageId,
+          origin: eventOrigin(origin, this.config.api.logicalUserId),
+          parentTurnId: options.parentTurnId
+        });
       }
       if (action.type === "cancel_job") {
         const result = await this.subagents.requestCancel(action.jobId);
@@ -1135,7 +1173,7 @@ export class ServiceSupervisor {
   private async restartCodex(
     reason: string,
     info?: CodexCrashInfo,
-    activeTurn?: { activeChatId?: number; activeMessageId?: number }
+    activeTurn?: { activeChatId?: number; activeMessageId?: number; activeOrigin?: MessageOrigin }
   ): Promise<void> {
     if (this.restartingCodex || this.stopping) return;
     this.restartingCodex = true;
@@ -1198,7 +1236,18 @@ export class ServiceSupervisor {
       await this.telegram.notifyOps(
         `Codex restarted cleanly.\ntransport: ${health.transport}\nsession: ${health.sessionId ?? "unknown"}\n${CONTEXT_RESET_OPS_NOTE}`
       ).catch(() => undefined);
-      if (activeTurn?.activeChatId) {
+      if (activeTurn?.activeOrigin) {
+        try {
+          await this.outbound.sendText(activeTurn.activeOrigin, CONTEXT_RESET_USER_MESSAGE, {
+            replyToMessageId: activeTurn.activeMessageId ?? activeTurn.activeOrigin.messageId
+          });
+        } catch (sendError) {
+          this.logger.error(
+            { component: "service", event: "context_reset_notice_failed", conversationKey: activeTurn.activeOrigin.conversationKey, sendError },
+            "Failed to notify user about Codex context reset"
+          );
+        }
+      } else if (activeTurn?.activeChatId) {
         try {
           await this.telegram.sendText(
             activeTurn.activeChatId,
@@ -1226,7 +1275,7 @@ export class ServiceSupervisor {
 
   private runTurn(event: UserEvent): void {
     if (this.turnRunning) {
-      void this.queueEvent(event.chatId ? String(event.chatId) : "system", event);
+      void this.queueEvent(this.queueKeyForEvent(event), event);
       return;
     }
     this.turnRunning = true;
@@ -1265,12 +1314,10 @@ export class ServiceSupervisor {
       await this.removePersistedQueuedEvent(event);
       const brief = error instanceof Error ? error.message.split("\n")[0].slice(0, 100) : String(error).slice(0, 100);
       this.logger.error({ component: "service", event: "turn_error", error }, "Turn processing failed");
-      if (event.chatId) {
-        try {
-          await this.telegram.sendText(event.chatId, `Codex encountered an error: ${brief}. Please try again.`, event.messageId);
-        } catch (sendError) {
-          this.logger.error({ component: "service", event: "error_reply_failed", sendError }, "Failed to send error reply to Telegram");
-        }
+      try {
+        await this.replyToEvent(event, `Codex encountered an error: ${brief}. Please try again.`);
+      } catch (sendError) {
+        this.logger.error({ component: "service", event: "error_reply_failed", sendError }, "Failed to send error reply");
       }
     }
   }
@@ -1340,17 +1387,16 @@ export class ServiceSupervisor {
   }
 
   private async notifyRestartedUser(turn: { input?: UserEvent }): Promise<void> {
-    const chatId = turn.input?.chatId;
-    if (!chatId) return;
+    const input = turn.input;
+    if (!input) return;
     try {
-      await this.telegram.sendText(chatId, RESTARTED_RESEND_MESSAGE, turn.input?.messageId);
+      await this.replyToEvent(input, RESTARTED_RESEND_MESSAGE);
     } catch (error) {
-      this.logger.error({ component: "service", event: "restart_notice_failed", chatId, error }, "Failed to send restart notice to Telegram");
+      this.logger.error({ component: "service", event: "restart_notice_failed", chatId: input.chatId, conversationKey: input.origin?.conversationKey, error }, "Failed to send restart notice");
     }
   }
 
   private async persistQueuedEvent(event: UserEvent): Promise<string | undefined> {
-    if (!event.chatId) return undefined;
     const id = makeId("queued");
     const persistedEvent: UserEvent = {
       ...event,
@@ -1371,6 +1417,12 @@ export class ServiceSupervisor {
     return this.turnRunning || this.restartingCodex;
   }
 
+  private queueKeyForEvent(event: UserEvent): string {
+    if (event.chatId !== undefined) return String(event.chatId);
+    if (event.origin?.conversationKey) return event.origin.conversationKey;
+    return "system";
+  }
+
   private async queueEvent(key: string, event: UserEvent): Promise<void> {
     const persistedId = await this.persistQueuedEvent(event);
     const queue = this.messageQueue.get(key) ?? [];
@@ -1389,12 +1441,11 @@ export class ServiceSupervisor {
   private async dropQueuedEvent(queued: QueuedEvent): Promise<void> {
     if (queued.persistedId) await rm(this.state.path(`queued_turns/${queued.persistedId}.json`), { force: true }).catch(() => undefined);
     else await this.removePersistedQueuedEvent(queued.event);
-    this.logger.warn({ component: "service", event: "queue_overflow_drop", chatId: queued.event.chatId, messageId: queued.event.messageId }, "Dropped queued message due to queue overflow");
-    if (!queued.event.chatId) return;
+    this.logger.warn({ component: "service", event: "queue_overflow_drop", chatId: queued.event.chatId, conversationKey: queued.event.origin?.conversationKey, messageId: queued.event.messageId }, "Dropped queued message due to queue overflow");
     try {
-      await this.telegram.sendText(queued.event.chatId, QUEUE_OVERFLOW_MESSAGE, queued.event.messageId);
+      await this.replyToEvent(queued.event, QUEUE_OVERFLOW_MESSAGE);
     } catch (error) {
-      this.logger.error({ component: "service", event: "queue_overflow_notice_failed", chatId: queued.event.chatId, error }, "Failed to notify user about queue overflow");
+      this.logger.error({ component: "service", event: "queue_overflow_notice_failed", chatId: queued.event.chatId, conversationKey: queued.event.origin?.conversationKey, error }, "Failed to notify user about queue overflow");
     }
   }
 
@@ -1461,8 +1512,10 @@ export class ServiceSupervisor {
       const userId = typeof payload.userId === "number" ? payload.userId : INJECT_TELEGRAM_USER_ID;
       const messageId = typeof payload.messageId === "number" ? payload.messageId : undefined;
       const username = typeof payload.username === "string" ? payload.username : "tim";
+      const origin = originForTelegram({ chatId, userId, username, messageId, logicalUserId: this.config.api.logicalUserId, metadata: { injected: true } });
       const event: UserEvent = {
         source: "telegram",
+        origin,
         chatId,
         userId,
         username,
@@ -1474,6 +1527,10 @@ export class ServiceSupervisor {
       };
       await this.state.recordMessage({
         direction: "inbound",
+        channel: "telegram",
+        logicalUserId: this.config.api.logicalUserId,
+        conversationKey: telegramConversationKey(chatId),
+        channelMessageId: messageId !== undefined ? String(messageId) : undefined,
         chatId,
         userId,
         username,
@@ -1515,15 +1572,14 @@ export class ServiceSupervisor {
         const path = join(turnsDir, file);
         try {
           const raw = await readFile(path, "utf8");
-          const turn = JSON.parse(raw) as { status?: string; startedAt?: string; input?: { chatId?: number } };
+          const turn = JSON.parse(raw) as { status?: string; startedAt?: string; input?: UserEvent };
           if (turn.status === "running" && turn.startedAt && turn.startedAt < warnBefore) {
             turn.status = "timeout";
             (turn as Record<string, unknown>).timedOutAt = nowIso();
             await writeFile(path, JSON.stringify(turn, null, 2));
-            const chatId = turn.input?.chatId;
-            if (chatId) {
+            if (turn.input) {
               try {
-                await this.telegram.sendText(chatId, "Codex is still working. Please resend your message if this does not complete shortly.");
+                await this.replyToEvent(turn.input, "Codex is still working. Please resend your message if this does not complete shortly.");
               } catch {
                 // ignore send failures in watchdog
               }
@@ -1555,12 +1611,12 @@ export class ServiceSupervisor {
     this.turnStartedAt = undefined;
     this.activeTurnEvent = undefined;
     await this.markActiveTurnAborted(event);
-    if (event?.chatId) {
+    if (event) {
       try {
-        await this.telegram.sendText(event.chatId, TURN_ABORTED_MESSAGE, event.messageId);
+        await this.replyToEvent(event, TURN_ABORTED_MESSAGE);
       } catch (sendError) {
         this.logger.error(
-          { component: "service", event: "turn_abort_notice_failed", chatId: event.chatId, sendError },
+          { component: "service", event: "turn_abort_notice_failed", chatId: event.chatId, conversationKey: event.origin?.conversationKey, sendError },
           "Failed to notify user about forced turn abort"
         );
       }
@@ -1587,7 +1643,7 @@ export class ServiceSupervisor {
         const turn = JSON.parse(await readFile(path, "utf8")) as { status?: string; input?: UserEvent } & Record<string, unknown>;
         if (turn.status !== "running" && turn.status !== "timeout") continue;
         const input = turn.input;
-        if (!input || input.source !== event.source || input.chatId !== event.chatId || input.messageId !== event.messageId || input.receivedAt !== event.receivedAt) continue;
+        if (!input || input.source !== event.source || input.chatId !== event.chatId || input.messageId !== event.messageId || input.origin?.conversationKey !== event.origin?.conversationKey || input.receivedAt !== event.receivedAt) continue;
         turn.status = "aborted";
         turn.abortedAt = nowIso();
         await writeFile(path, JSON.stringify(turn, null, 2));
@@ -1599,8 +1655,12 @@ export class ServiceSupervisor {
   }
 
   private formatEventForCodex(event: UserEvent): string {
+    const origin = eventOrigin(event, this.config.api.logicalUserId);
     const header = [
       `codex-chat event source: ${event.source}`,
+      origin ? `channel: ${origin.channel}` : "",
+      origin ? `logical_user_id: ${origin.logicalUserId}` : "",
+      origin ? `conversation_key: ${origin.conversationKey}` : "",
       event.chatId ? `telegram chat_id: ${event.chatId}` : "",
       event.userId ? `telegram user_id: ${event.userId}` : "",
       event.messageId ? `telegram message_id: ${event.messageId}` : "",
@@ -1697,6 +1757,7 @@ export class ServiceSupervisor {
     if (job.effort) parts.push(`effort=${job.effort}`);
     if (job.originChatId !== undefined) parts.push(`origin_chat_id=${job.originChatId}`);
     if (job.originMessageId !== undefined) parts.push(`origin_message_id=${job.originMessageId}`);
+    if (job.origin?.conversationKey) parts.push(`origin_conversation_key=${JSON.stringify(job.origin.conversationKey)}`);
     if (job.ownerRequestId) parts.push(`owner_request_id=${job.ownerRequestId}`);
     if (job.parentTurnId) parts.push(`parent_turn_id=${job.parentTurnId}`);
     if (job.summary) parts.push(`summary=${JSON.stringify(this.compactSnapshotText(job.summary))}`);
@@ -1708,13 +1769,44 @@ export class ServiceSupervisor {
     return compact.length > maxLength ? `${compact.slice(0, maxLength - 3)}...` : compact;
   }
 
+  private async replyToEvent(event: UserEvent, text: string, options: { format?: "text" | "markdown" | "markdownv2" } = {}): Promise<boolean> {
+    return this.outbound.sendTextForEvent(event, text, options);
+  }
+
+  private async executeSendTextDirective(action: SendTextAction, origin: UserEvent): Promise<void> {
+    if (action.chatId !== undefined) {
+      await this.outbound.sendTelegramText(action.chatId, action.text, {
+        replyToMessageId: this.directiveReplyToMessageId(action.chatId, action.replyToMessageId, origin),
+        format: action.format,
+        forceFormatArg: true
+      });
+      return;
+    }
+    if (action.target && action.target !== "origin") {
+      await this.outbound.sendText(action.target as ExplicitOutboundTarget, action.text, {
+        replyToMessageId: action.replyToMessageId,
+        format: action.format,
+        forceFormatArg: true
+      });
+      return;
+    }
+    const eventTarget = eventOrigin(origin, this.config.api.logicalUserId);
+    if (!eventTarget) throw new Error("Directive did not include target/chatId and the origin event has no outbound target");
+    await this.outbound.sendText(eventTarget, action.text, {
+      replyToMessageId: action.replyToMessageId ?? (eventTarget.channel === "telegram" ? origin.messageId : eventTarget.messageId),
+      format: action.format,
+      forceFormatArg: true
+    });
+  }
+
   private requireChat(chatId?: number): number {
     if (!chatId) throw new Error("Directive did not include chatId and the origin event has no Telegram chat");
     return chatId;
   }
 
-  private directiveReplyToMessageId(chatId: number, explicitReplyToMessageId: number | undefined, origin: UserEvent): number | undefined {
-    if (explicitReplyToMessageId !== undefined) return explicitReplyToMessageId;
+  private directiveReplyToMessageId(chatId: number, explicitReplyToMessageId: number | string | undefined, origin: UserEvent): number | undefined {
+    if (typeof explicitReplyToMessageId === "number") return explicitReplyToMessageId;
+    if (typeof explicitReplyToMessageId === "string" && /^\d+$/.test(explicitReplyToMessageId)) return Number(explicitReplyToMessageId);
     if (origin.chatId === undefined || origin.messageId === undefined) return undefined;
     return chatId === origin.chatId ? origin.messageId : undefined;
   }

@@ -1,10 +1,29 @@
 # codex-chat Directive Schema
 
-Directive blocks use fenced JSON with language `codex-chat`. The service parses the block, validates each action, stores it in JSON state, strips the block from Telegram text, and executes the action.
+Directive blocks use fenced JSON with language `codex-chat`. The service parses the block, validates each action, stores it in JSON state, strips the block from user-visible text, and executes the action.
 
 Every action should include an `idempotencyKey` when it can produce a side effect.
 
 Common examples:
+
+Reply to the originating Telegram/web/API conversation without naming a chat:
+
+```codex-chat
+{
+  "version": 1,
+  "actions": [
+    {
+      "type": "send_text",
+      "idempotencyKey": "reply-origin-2026-06-07",
+      "target": "origin",
+      "text": "Done."
+    }
+  ]
+}
+```
+
+Legacy Telegram `chatId` remains supported and should be used only when you
+intentionally target a specific Telegram chat:
 
 ```codex-chat
 {

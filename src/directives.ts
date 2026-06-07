@@ -7,11 +7,20 @@ const baseAction = z.object({
   idempotencyKey: z.string().min(1).optional()
 });
 
+const outboundTargetSchema = z.object({
+  channel: z.enum(["telegram", "web", "api"]),
+  chatId: z.number().int().optional(),
+  conversationKey: z.string().min(1).optional(),
+  logicalUserId: z.string().min(1).optional()
+}).strict().refine((value) => value.channel !== "telegram" || value.chatId !== undefined, "telegram target requires chatId")
+  .refine((value) => value.channel === "telegram" || value.conversationKey !== undefined, "web/api target requires conversationKey");
+
 const sendTextAction = baseAction.extend({
   type: z.literal("send_text"),
   chatId: z.number().int().optional(),
+  target: z.union([z.literal("origin"), outboundTargetSchema]).optional(),
   text: z.string().min(1),
-  replyToMessageId: z.number().int().optional(),
+  replyToMessageId: z.union([z.number().int(), z.string().min(1)]).optional(),
   format: z.enum(["text", "markdown", "markdownv2"]).optional()
 });
 

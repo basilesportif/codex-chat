@@ -12,6 +12,13 @@ const overrideEnvNames = [
   "CODEX_CHAT_WORKSPACE",
   "CODEX_CHAT_STATE_DIR",
   "CODEX_CHAT_LOG_LEVEL",
+  "CODEX_CHAT_API_ENABLED",
+  "CODEX_CHAT_API_HOST",
+  "CODEX_CHAT_API_PORT",
+  "CODEX_CHAT_API_TOKEN_ENV",
+  "CODEX_CHAT_API_LOGICAL_USER_ID",
+  "CODEX_CHAT_API_DEFAULT_CONVERSATION_KEY",
+  "CODEX_CHAT_API_TOKEN",
   "CODEX_CHAT_CODEX_BINARY",
   "CODEX_CHAT_CODEX_MODEL",
   "CODEX_CHAT_CODEX_EFFORT",
@@ -96,6 +103,22 @@ botTokenEnv = "CUSTOM_TELEGRAM_TOKEN"
     expect(config.codex.model).toBe("from-env");
     expect(config.subagents.backend).toBe("codex_exec");
     expect(config.telegramBotToken).toBe("token-from-custom-env");
+  });
+
+  test("API is disabled by default and can be enabled with localhost bearer-token config", async () => {
+    process.env.CODEX_CHAT_API_ENABLED = "true";
+    process.env.CODEX_CHAT_API_PORT = "0";
+    process.env.CODEX_CHAT_API_TOKEN = "api-token";
+    const path = await tempConfig("version = 1\n");
+
+    const config = await loadConfig(path);
+
+    expect(config.api.enabled).toBe(true);
+    expect(config.api.host).toBe("127.0.0.1");
+    expect(config.api.port).toBe(0);
+    expect(config.api.logicalUserId).toBe("tim");
+    expect(config.api.defaultConversationKey).toBe("web:default");
+    expect(config.apiToken).toBe("api-token");
   });
 
   test("allows app-server subagent backend opt-in from config and env", async () => {

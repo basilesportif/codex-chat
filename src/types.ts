@@ -1,5 +1,33 @@
 export type JsonRecord = Record<string, unknown>;
 
+export type MessageChannel = "telegram" | "web" | "api";
+
+export interface MessageOrigin {
+  channel: MessageChannel;
+  logicalUserId: string;
+  conversationKey: string;
+  /** Channel-local inbound message id, stored as a string for cross-channel use. */
+  messageId?: string;
+  /** Channel-local reply target id, stored as a string for cross-channel use. */
+  replyToMessageId?: string;
+  metadata?: JsonRecord;
+}
+
+export interface StoredConversationMessage {
+  id: string;
+  direction: "inbound" | "outbound";
+  channel: MessageChannel;
+  logicalUserId: string;
+  conversationKey: string;
+  channelMessageId?: string;
+  replyToMessageId?: string;
+  text: string;
+  attachments?: Attachment[];
+  receivedAt?: string;
+  sentAt?: string;
+  metadata?: JsonRecord;
+}
+
 export type Route =
   | "return_to_main"
   | "send_to_user"
@@ -92,7 +120,8 @@ export interface TelegramReplyContext {
 }
 
 export interface UserEvent {
-  source: "telegram" | "loop" | "monitor" | "subagent" | "system";
+  source: "telegram" | "web" | "api" | "loop" | "monitor" | "subagent" | "system";
+  origin?: MessageOrigin;
   chatId?: number;
   userId?: number;
   username?: string;
@@ -174,6 +203,7 @@ export interface SubagentJob {
   signal?: string | null;
   error?: string;
   lastMessagePath?: string;
+  origin?: MessageOrigin;
   originChatId?: number;
   originMessageId?: number;
   backend?: SubagentBackendKind;

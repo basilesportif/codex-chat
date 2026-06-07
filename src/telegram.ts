@@ -9,6 +9,7 @@ import { Transcriber } from "./transcription.js";
 import { Attachment, TelegramReplyChatSummary, TelegramReplyContext, TelegramReplySenderSummary, UserEvent } from "./types.js";
 import { chunkText, makePairingCode, nowIso } from "./util.js";
 import { renderTelegramMarkdown } from "./telegram-format.js";
+import { originForTelegram, telegramConversationKey } from "./origin.js";
 
 const REPLY_SNIPPET_MAX_CHARS = 280;
 const REPLY_LABEL_MAX_CHARS = 120;
@@ -471,19 +472,35 @@ export class TelegramGateway {
       return;
     }
 
+    const receivedAt = nowIso();
+    const logicalUserId = this.config.api?.logicalUserId ?? "tim";
+    const origin = originForTelegram({
+      chatId: ctx.chat.id,
+      userId: ctx.from.id,
+      username: ctx.from.username,
+      messageId: message.message_id,
+      logicalUserId,
+      metadata: { telegramMessageId: message.message_id }
+    });
+
     await this.state.recordMessage({
       direction: "inbound",
+      channel: "telegram",
+      logicalUserId,
+      conversationKey: telegramConversationKey(ctx.chat.id),
+      channelMessageId: String(message.message_id),
       chatId: ctx.chat.id,
       userId: ctx.from.id,
       messageId: message.message_id,
       reply,
       text,
       attachments,
-      receivedAt: nowIso()
+      receivedAt
     });
 
     await this.callbacks.onUserEvent({
       source: "telegram",
+      origin,
       chatId: ctx.chat.id,
       userId: ctx.from.id,
       username: ctx.from.username,
@@ -491,7 +508,7 @@ export class TelegramGateway {
       reply,
       text,
       attachments,
-      receivedAt: nowIso(),
+      receivedAt,
       metadata: { telegramMessageId: message.message_id }
     });
   }

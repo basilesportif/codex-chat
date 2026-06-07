@@ -74,6 +74,17 @@ const configSchema = z.object({
     timezone: z.string().default("Etc/UTC"),
     ipcSocket: z.string().default("data/run/codex-chat.sock")
   }),
+  api: z.object({
+    enabled: z.boolean().default(false),
+    host: z.string().default("127.0.0.1"),
+    port: z.number().int().min(0).max(65535).default(8787),
+    tokenEnv: z.string().default("CODEX_CHAT_API_TOKEN"),
+    logicalUserId: z.string().min(1).default("tim"),
+    defaultConversationKey: z.string().min(1).default("web:default"),
+    maxBodyBytes: z.number().int().positive().default(65_536),
+    maxTextBytes: z.number().int().positive().default(32_768),
+    allowNonLocalhost: z.boolean().default(false)
+  }),
   codex: z.object({
     binary: z.string().default("codex"),
     transport: z.string().default("app-server"),
@@ -173,6 +184,7 @@ export type AppConfig = z.infer<typeof configSchema> & {
   configPath: string;
   rootDir: string;
   telegramBotToken?: string;
+  apiToken?: string;
   openaiApiKey?: string;
 };
 export type EmployeeDefinitionConfig = z.infer<typeof employeeDefinitionSchema>;
@@ -186,6 +198,17 @@ const defaultConfig = configSchema.parse({
     logLevel: "info",
     timezone: "Etc/UTC",
     ipcSocket: "data/run/codex-chat.sock"
+  },
+  api: {
+    enabled: false,
+    host: "127.0.0.1",
+    port: 8787,
+    tokenEnv: "CODEX_CHAT_API_TOKEN",
+    logicalUserId: "tim",
+    defaultConversationKey: "web:default",
+    maxBodyBytes: 65_536,
+    maxTextBytes: 32_768,
+    allowNonLocalhost: false
   },
   codex: {
     binary: "codex",
@@ -380,6 +403,12 @@ function collectEnvOverrides(env: NodeJS.ProcessEnv = process.env): Record<strin
     { name: "CODEX_CHAT_WORKSPACE", path: ["service", "workspace"] },
     { name: "CODEX_CHAT_STATE_DIR", path: ["service", "stateDir"] },
     { name: "CODEX_CHAT_LOG_LEVEL", path: ["service", "logLevel"] },
+    { name: "CODEX_CHAT_API_ENABLED", path: ["api", "enabled"], parse: parseBooleanEnv },
+    { name: "CODEX_CHAT_API_HOST", path: ["api", "host"] },
+    { name: "CODEX_CHAT_API_PORT", path: ["api", "port"], parse: (value) => Number.parseInt(value, 10) },
+    { name: "CODEX_CHAT_API_TOKEN_ENV", path: ["api", "tokenEnv"] },
+    { name: "CODEX_CHAT_API_LOGICAL_USER_ID", path: ["api", "logicalUserId"] },
+    { name: "CODEX_CHAT_API_DEFAULT_CONVERSATION_KEY", path: ["api", "defaultConversationKey"] },
     { name: "CODEX_CHAT_CODEX_BINARY", path: ["codex", "binary"] },
     { name: "CODEX_CHAT_CODEX_MODEL", path: ["codex", "model"] },
     { name: "CODEX_CHAT_CODEX_EFFORT", path: ["codex", "effort"] },
@@ -419,8 +448,9 @@ export async function loadConfig(configPath = "config/codex-chat.toml"): Promise
   };
   const rootDir = resolve(dirname(absoluteConfigPath), "..");
   const telegramBotToken = process.env[telegram.botTokenEnv];
+  const apiToken = process.env[config.api.tokenEnv];
   const openaiApiKey = process.env[config.transcription.apiKeyEnv];
-  return { ...config, telegram, configPath: absoluteConfigPath, rootDir, telegramBotToken, openaiApiKey };
+  return { ...config, telegram, configPath: absoluteConfigPath, rootDir, telegramBotToken, apiToken, openaiApiKey };
 }
 
 export function resolveConfigPath(config: AppConfig, candidate: string): string {

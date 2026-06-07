@@ -83,6 +83,21 @@ function userEvent(messageId: number, text = `message ${messageId}`): UserEvent 
   };
 }
 
+function webEvent(messageId: string, text = `web message ${messageId}`, conversationKey = "web:default"): UserEvent {
+  return {
+    source: "web",
+    origin: {
+      channel: "web",
+      logicalUserId: "tim",
+      conversationKey,
+      messageId
+    },
+    text,
+    attachments: [],
+    receivedAt: new Date().toISOString()
+  };
+}
+
 afterEach(async () => {
   vi.restoreAllMocks();
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
@@ -614,6 +629,66 @@ describe("service supervisor", () => {
     await waitForIdle(service);
 
     expect(sendText).toHaveBeenCalledWith(253768951, "Main-loop plain answer.", 500);
+  });
+
+  test("web clean-text replies persist only to the originating web conversation", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
+      yield { type: "final", text: "Web-only answer." };
+    });
+    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+
+    await service.enqueueUserEvent(webEvent("web-1", "hello web", "web:alpha"));
+    await waitForIdle(service);
+
+    expect(sendText).not.toHaveBeenCalled();
+    const alpha = await service.state.listConversationMessages("web:alpha");
+    const beta = await service.state.listConversationMessages("web:beta");
+    expect(alpha).toHaveLength(1);
+    expect(alpha[0]).toMatchObject({ direction: "outbound", channel: "web", conversationKey: "web:alpha", text: "Web-only answer." });
+    expect(beta).toEqual([]);
+  });
+
+  test("send_text target origin routes back to web/API origin without Telegram chatId", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
+      yield {
+        type: "final",
+        text: `\`\`\`codex-chat
+{"version":1,"actions":[{"type":"send_text","idempotencyKey":"web-origin-send-1","target":"origin","text":"Origin web reply."}]}
+\`\`\``
+      };
+    });
+    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+
+    await service.enqueueUserEvent(webEvent("web-2", "directive please", "web:origin"));
+    await waitForIdle(service);
+
+    expect(sendText).not.toHaveBeenCalled();
+    const messages = await service.state.listConversationMessages("web:origin");
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({ direction: "outbound", text: "Origin web reply.", replyToMessageId: "web-2" });
+  });
+
+  test("Telegram and web events share the same single logical user context", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    const format = (service as unknown as { formatEventForCodex(event: UserEvent): string }).formatEventForCodex.bind(service);
+
+    const telegramPrompt = format(userEvent(601, "from telegram"));
+    const webPrompt = format(webEvent("web-601", "from web"));
+
+    expect(telegramPrompt).toContain("logical_user_id: tim");
+    expect(webPrompt).toContain("logical_user_id: tim");
+    expect(telegramPrompt).toContain("conversation_key: telegram:253768951");
+    expect(webPrompt).toContain("conversation_key: web:default");
   });
 
   test("executes send_text directives even when the prompt contains routing keywords", async () => {

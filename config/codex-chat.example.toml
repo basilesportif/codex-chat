@@ -11,6 +11,20 @@ logLevel = "info"
 timezone = "Etc/UTC"
 ipcSocket = "data/run/codex-chat.sock"
 
+[api]
+# Disabled by default. When enabled, this is a local server-to-server API for
+# a trusted backend process; do not expose it directly to browsers or the public
+# internet.
+enabled = false
+host = "127.0.0.1"
+port = 8787
+tokenEnv = "CODEX_CHAT_API_TOKEN"
+logicalUserId = "tim"
+defaultConversationKey = "web:default"
+maxBodyBytes = 65536
+maxTextBytes = 32768
+allowNonLocalhost = false
+
 [codex]
 binary = "codex"
 transport = "app-server"

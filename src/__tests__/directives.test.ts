@@ -191,6 +191,28 @@ ${JSON.stringify(payload)}
     if (action?.type === "send_text") expect(action.format).toBeUndefined();
   });
 
+  test("accepts target: origin for channel-neutral replies", () => {
+    const parsed = parseDirectives(`\`\`\`codex-chat
+{"version":1,"actions":[{"type":"send_text","idempotencyKey":"origin-1","target":"origin","text":"hello origin"}]}
+\`\`\``);
+    expect(parsed.errors).toEqual([]);
+    const action = parsed.blocks[0]?.actions[0];
+    expect(action?.type).toBe("send_text");
+    if (action?.type === "send_text") expect(action.target).toBe("origin");
+  });
+
+  test("accepts explicit web send_text targets", () => {
+    const parsed = parseDirectives(`\`\`\`codex-chat
+{"version":1,"actions":[{"type":"send_text","idempotencyKey":"web-target-1","target":{"channel":"web","conversationKey":"web:default"},"text":"hello web"}]}
+\`\`\``);
+    expect(parsed.errors).toEqual([]);
+    const action = parsed.blocks[0]?.actions[0];
+    expect(action?.type).toBe("send_text");
+    if (action?.type === "send_text" && action.target !== "origin") {
+      expect(action.target?.conversationKey).toBe("web:default");
+    }
+  });
+
   test("rejects unknown format value", () => {
     const parsed = parseDirectives(`\`\`\`codex-chat
 {"version":1,"actions":[{"type":"send_text","idempotencyKey":"bad-1","text":"x","format":"html"}]}

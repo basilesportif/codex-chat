@@ -5,7 +5,7 @@ import { AppConfig, resolveConfigPath } from "./config.js";
 import { BehaviorPack } from "./behavior.js";
 import { DirectiveAction } from "./directives.js";
 import { StateStore } from "./state.js";
-import { Route, SubagentBackendKind, SubagentJob, SubagentOwnerType, SubagentResultTarget } from "./types.js";
+import { MessageOrigin, Route, SubagentBackendKind, SubagentJob, SubagentOwnerType, SubagentResultTarget } from "./types.js";
 import {
   ChildAgentBackend,
   ChildAgentFinish,
@@ -40,6 +40,7 @@ interface DispatchInput {
   effort?: string;
   summary?: string;
   images?: string[];
+  origin?: MessageOrigin;
   originChatId?: number;
   originMessageId?: number;
 }
@@ -126,6 +127,7 @@ export interface ActiveSubagentJobSnapshot {
   elapsedSec: number;
   originChatId?: number;
   originMessageId?: number;
+  origin?: MessageOrigin;
   model?: string;
   effort?: string;
   ownerType: SubagentOwnerType;
@@ -179,7 +181,7 @@ export class SubagentManager {
 
   async dispatchFromDirective(
     action: Extract<DirectiveAction, { type: "dispatch_subagent" }>,
-    origin?: { chatId?: number; messageId?: number; parentTurnId?: string }
+    origin?: { chatId?: number; messageId?: number; origin?: MessageOrigin; parentTurnId?: string }
   ): Promise<string> {
     return this.dispatch({
       profile: action.profile,
@@ -195,6 +197,7 @@ export class SubagentManager {
       effort: action.effort,
       summary: action.summary,
       images: action.images,
+      origin: origin?.origin,
       originChatId: origin?.chatId,
       originMessageId: origin?.messageId
     });
@@ -238,6 +241,7 @@ export class SubagentManager {
       backend: this.effectiveBackend(),
       summary: input.summary,
       enqueuedAt: nowIso(),
+      origin: input.origin,
       originChatId: input.originChatId,
       originMessageId: input.originMessageId
     };
@@ -596,6 +600,7 @@ export class SubagentManager {
       backend: backendKind,
       summary: input.summary,
       enqueuedAt: nowIso(),
+      origin: input.origin,
       originChatId: input.originChatId,
       originMessageId: input.originMessageId
     };
@@ -616,6 +621,7 @@ export class SubagentManager {
       effort,
       backend: backendKind,
       summary: input.summary,
+      origin: input.origin ?? job.origin,
       originChatId: input.originChatId,
       originMessageId: input.originMessageId
     });
@@ -749,6 +755,7 @@ export class SubagentManager {
       elapsedSec: Number.isFinite(elapsedMs) ? Math.max(0, Math.round(elapsedMs / 1000)) : 0,
       originChatId: job.originChatId,
       originMessageId: job.originMessageId,
+      origin: job.origin,
       model: job.model,
       effort: job.effort,
       ownerType: this.jobOwnerType(job),

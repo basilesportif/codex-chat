@@ -137,6 +137,7 @@ export class CodexExecChildAgentBackend implements ChildAgentBackend {
       "--json",
       "--output-last-message",
       lastMessagePath,
+      "--skip-git-repo-check",
       "--cd",
       this.config.service.workspace,
       "--sandbox",

@@ -131,10 +131,11 @@ describe("codex clients", () => {
     await client.start();
 
     expect(spawn).toHaveBeenCalledOnce();
-    const options = spawn.mock.calls[0]?.[2] as { env?: NodeJS.ProcessEnv };
+    const options = spawn.mock.calls[0]?.[2] as { env?: NodeJS.ProcessEnv; detached?: boolean };
     expect(options.env).not.toHaveProperty("OPENAI_API_KEY");
     expect(options.env).not.toHaveProperty("CUSTOM_TRANSCRIPTION_API_KEY");
     expect(options.env?.OTHER_VAR).toBe("keep-me");
+    expect(options.detached).toBe(true);
     await client.stop();
   });
 

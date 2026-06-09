@@ -9,6 +9,7 @@ import { sanitizeChildProcessEnv } from "./env.js";
 import { LogBuffer, scrubSecrets } from "./log-buffer.js";
 import { StateStore } from "./state.js";
 import { CodexClient, CodexEvent, CodexHealth, CodexTurnInput } from "./types.js";
+import { killProcessTree } from "./util.js";
 
 type JsonRpcMessage = Record<string, unknown> & { id?: string | number; method?: string; params?: unknown; result?: unknown; error?: unknown };
 
@@ -187,7 +188,8 @@ export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient 
     const child = spawn(this.config.codex.binary, args, {
       cwd: this.config.service.workspace,
       env: safeEnv,
-      stdio: ["ignore", "pipe", "pipe"]
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: true
     });
     this.child = child;
     child.stdout?.on("data", (chunk) => {
@@ -234,8 +236,15 @@ export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient 
     this.ws?.close();
     if (child && child.exitCode === null && !child.killed) {
       const exited = once(child, "exit").then(() => undefined);
-      child.kill("SIGTERM");
-      await Promise.race([exited, new Promise<void>((resolve) => setTimeout(resolve, 2_000))]);
+      killProcessTree(child, "SIGTERM");
+      const graceful = await Promise.race([
+        exited.then(() => true),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 2_000))
+      ]);
+      if (!graceful && child.exitCode === null && !child.killed) {
+        killProcessTree(child, "SIGKILL");
+        await Promise.race([exited, new Promise<void>((resolve) => setTimeout(resolve, 1_000))]);
+      }
     }
   }
 

@@ -167,3 +167,49 @@ describe("app-server subagent backend", () => {
     await backend.shutdown();
   });
 });
+
+describe("codex exec subagent backend", () => {
+  test("skips Codex git repo checks for private assistant workspaces", async () => {
+    vi.resetModules();
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-subagent-exec-"));
+    tempDirs.push(root);
+    const child = fakeChild() as ReturnType<typeof fakeChild> & {
+      stdin: { end: ReturnType<typeof vi.fn> };
+    };
+    child.stdin = { end: vi.fn() };
+    const spawn = vi.fn(() => child);
+    vi.doMock("node:child_process", async () => {
+      const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+      return { ...actual, spawn };
+    });
+    const { CodexExecChildAgentBackend } = await import("../subagent-backends.js");
+    const backend = new CodexExecChildAgentBackend(testConfig(root), fakeLogger() as never);
+    const job: SubagentJob = {
+      id: "job_exec0000000000000000000000000000000",
+      profile: "implementer",
+      route: "return_to_main",
+      status: "running",
+      promptPath: join(root, "prompt.md"),
+      artifactDir: root
+    };
+
+    await backend.start({
+      job,
+      assembledPrompt: "do work",
+      lastMessagePath: join(root, "last-message.md"),
+      stdoutPath: join(root, "events.jsonl"),
+      stderrPath: join(root, "stderr.log"),
+      appServerLogPath: join(root, "app-server.log"),
+      model: "gpt-test",
+      effort: "medium",
+      images: [],
+      onJobUpdated: vi.fn().mockResolvedValue(undefined)
+    });
+
+    expect(spawn).toHaveBeenCalledOnce();
+    const args = spawn.mock.calls[0]?.[1] as string[];
+    expect(args).toContain("--skip-git-repo-check");
+    expect(args.indexOf("--skip-git-repo-check")).toBeLessThan(args.indexOf("--cd"));
+    await backend.shutdown();
+  });
+});

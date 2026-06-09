@@ -1840,10 +1840,26 @@ export class ServiceSupervisor {
   }
 
   private async readCurrentCommit(): Promise<string> {
+    const candidates = [
+      this.config.rootDir,
+      process.cwd(),
+      resolveConfigPath(this.config, this.config.behavior.dir)
+    ];
+    const tried = new Set<string>();
+    for (const cwd of candidates) {
+      if (!cwd || tried.has(cwd)) continue;
+      tried.add(cwd);
+      const commit = await this.readGitCommit(cwd);
+      if (commit !== "unknown") return commit;
+    }
+    return "unknown";
+  }
+
+  private async readGitCommit(cwd: string): Promise<string> {
     return new Promise((resolveCommit) => {
       try {
         const child = spawn("git", ["rev-parse", "--short", "HEAD"], {
-          cwd: this.config.rootDir,
+          cwd,
           env: sanitizeChildProcessEnv(this.config),
           stdio: ["ignore", "pipe", "pipe"]
         });

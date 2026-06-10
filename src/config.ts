@@ -164,7 +164,8 @@ const configSchema = z.object({
   transcription: z.object({
     enabled: z.boolean().default(true),
     provider: z.enum(["openai"]).default("openai"),
-    model: z.string().default("gpt-4o-mini-transcribe"),
+    model: z.string().default("gpt-4o-transcribe"),
+    diarizeModel: z.string().default("gpt-4o-transcribe-diarize"),
     apiKeyEnv: z.string().default("OPENAI_API_KEY"),
     language: z.string().default(""),
     promptPath: z.string().default("")
@@ -284,7 +285,8 @@ const defaultConfig = configSchema.parse({
   transcription: {
     enabled: true,
     provider: "openai",
-    model: "gpt-4o-mini-transcribe",
+    model: "gpt-4o-transcribe",
+    diarizeModel: "gpt-4o-transcribe-diarize",
     apiKeyEnv: "OPENAI_API_KEY",
     language: "",
     promptPath: ""
@@ -423,6 +425,8 @@ function collectEnvOverrides(env: NodeJS.ProcessEnv = process.env): Record<strin
     { name: "CODEX_CHAT_LOOPS_PATH", path: ["loops", "path"] },
     { name: "CODEX_CHAT_MONITORS_PATH", path: ["monitors", "path"] },
     { name: "CODEX_CHAT_TRANSCRIPTION_ENABLED", path: ["transcription", "enabled"], parse: parseBooleanEnv },
+    { name: "CODEX_CHAT_TRANSCRIPTION_MODEL", path: ["transcription", "model"] },
+    { name: "CODEX_CHAT_TRANSCRIPTION_DIARIZE_MODEL", path: ["transcription", "diarizeModel"] },
     { name: "CODEX_CHAT_TRANSCRIPTION_PROMPT_PATH", path: ["transcription", "promptPath"] },
     { name: "CODEXCHAT_AUDIO_INGEST_MAX_MB", path: ["ingest", "audioMaxMb"], parse: parseNumberEnv }
   ];

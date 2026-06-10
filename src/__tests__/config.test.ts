@@ -26,6 +26,8 @@ const overrideEnvNames = [
   "CODEX_CHAT_LOOPS_PATH",
   "CODEX_CHAT_MONITORS_PATH",
   "CODEX_CHAT_TRANSCRIPTION_ENABLED",
+  "CODEX_CHAT_TRANSCRIPTION_MODEL",
+  "CODEX_CHAT_TRANSCRIPTION_DIARIZE_MODEL",
   "CODEX_CHAT_TRANSCRIPTION_PROMPT_PATH",
   "CODEXCHAT_INGEST_API_KEYS",
   "CODEXCHAT_AUDIO_INGEST_MAX_MB",
@@ -75,6 +77,8 @@ userIds = [12345]
     expect(config.subagents.backend).toBe("codex_exec");
     expect(config.api.enabled).toBe(false);
     expect(config.ingest.audioMaxMb).toBe(100);
+    expect(config.transcription.model).toBe("gpt-4o-transcribe");
+    expect(config.transcription.diarizeModel).toBe("gpt-4o-transcribe-diarize");
     expect(config.telegram.allowlist.userIds).toEqual([12345]);
     expect(config.rootDir).toBe(resolve(path, "../.."));
   });
@@ -104,6 +108,17 @@ botTokenEnv = "CUSTOM_TELEGRAM_TOKEN"
     expect(config.codex.model).toBe("from-env");
     expect(config.subagents.backend).toBe("codex_exec");
     expect(config.telegramBotToken).toBe("token-from-custom-env");
+  });
+
+  test("allows transcription model env overrides", async () => {
+    process.env.CODEX_CHAT_TRANSCRIPTION_MODEL = "gpt-4o-transcribe-custom";
+    process.env.CODEX_CHAT_TRANSCRIPTION_DIARIZE_MODEL = "gpt-4o-transcribe-diarize-custom";
+    const path = await tempConfig("version = 1\n");
+
+    const config = await loadConfig(path);
+
+    expect(config.transcription.model).toBe("gpt-4o-transcribe-custom");
+    expect(config.transcription.diarizeModel).toBe("gpt-4o-transcribe-diarize-custom");
   });
 
   test("allows app-server subagent backend opt-in from config and env", async () => {

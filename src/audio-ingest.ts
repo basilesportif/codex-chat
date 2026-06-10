@@ -3,7 +3,7 @@ import type { Logger } from "pino";
 import type { FileStore } from "./file-store.js";
 import type { StateStore } from "./state.js";
 import type { Attachment } from "./types.js";
-import type { Transcriber } from "./transcription.js";
+import type { Transcriber, TranscriptionMode, TranscriptionSpeakerSegment } from "./transcription.js";
 import { makeId, nowIso, sha256Buffer } from "./util.js";
 
 export const AUDIO_INGESTION_STATUSES = ["received", "transcribing", "completed", "failed", "queued"] as const;
@@ -17,6 +17,7 @@ export interface AudioIngestMetadata {
   client_request_id?: string;
   notes?: string;
   prompt?: string;
+  transcription_mode?: TranscriptionMode;
 }
 
 export interface AudioIngestFileInput {
@@ -35,7 +36,11 @@ export interface AudioIngestionRecord {
   file?: Attachment & { ingestionId?: string };
   transcription?: {
     status: "queued" | "completed" | "failed";
+    mode?: TranscriptionMode;
+    model?: string;
     text?: string;
+    speakerSegments?: TranscriptionSpeakerSegment[];
+    rawDiarizedJson?: unknown;
     error?: string;
     completedAt?: string;
   };
@@ -55,7 +60,11 @@ export interface AudioIngestionResponse {
   };
   transcription?: {
     status: "queued" | "completed" | "failed";
+    mode?: TranscriptionMode;
+    model?: string;
     text?: string;
+    speaker_segments?: TranscriptionSpeakerSegment[];
+    raw_diarized_json?: unknown;
     error?: string;
   };
 }
@@ -147,6 +156,7 @@ export class AudioIngestionService {
     await this.state.saveAudioIngestion(record);
 
     try {
+      const transcriptionMode = input.metadata.transcription_mode ?? "regular";
       const file = await this.files.storeIngestedAudio({
         ingestionId,
         buffer: input.file.data,
@@ -159,7 +169,7 @@ export class AudioIngestionService {
         ...record,
         file: { ...file, ingestionId },
         status: "transcribing",
-        transcription: { status: "queued" },
+        transcription: { status: "queued", mode: transcriptionMode },
         updatedAt: nowIso()
       };
       await this.state.saveAudioIngestion(record);
@@ -168,16 +178,25 @@ export class AudioIngestionService {
         event: "transcription_started",
         keyIdentity: input.keyIdentity,
         ingestionId,
+        transcriptionMode,
         filename: safeFilename(input.file.filename),
         contentType: normalizedContentType(input.file.contentType),
         sizeBytes: input.file.data.length
       }, "audio ingestion transcription started");
 
-      const transcript = await this.transcriber.transcribe({ path: file.localPath });
+      const transcript = await this.transcriber.transcribe({ path: file.localPath, mode: transcriptionMode });
       record = {
         ...record,
         status: "completed",
-        transcription: { status: "completed", text: transcript.text, completedAt: nowIso() },
+        transcription: {
+          status: "completed",
+          mode: transcript.mode ?? transcriptionMode,
+          model: transcript.model,
+          text: transcript.text,
+          speakerSegments: transcript.speakerSegments,
+          rawDiarizedJson: transcript.rawDiarizedJson,
+          completedAt: nowIso()
+        },
         updatedAt: nowIso()
       };
       await this.state.saveAudioIngestion(record);
@@ -187,6 +206,8 @@ export class AudioIngestionService {
         keyIdentity: input.keyIdentity,
         ingestionId,
         status: record.status,
+        transcriptionMode: transcript.mode ?? transcriptionMode,
+        speakerSegments: transcript.speakerSegments?.length || undefined,
         transcriptBytes: Buffer.byteLength(transcript.text, "utf8")
       }, "audio ingestion transcription completed");
       return this.responseFromRecord(record);
@@ -246,7 +267,11 @@ export class AudioIngestionService {
       } : undefined,
       transcription: record.transcription ? {
         status: record.transcription.status,
+        mode: record.transcription.mode,
+        model: record.transcription.model,
         text: record.transcription.text,
+        speaker_segments: record.transcription.speakerSegments,
+        raw_diarized_json: record.transcription.rawDiarizedJson,
         error: record.transcription.error
       } : undefined
     };
@@ -259,6 +284,8 @@ export function sanitizeAudioIngestMetadata(fields: Record<string, string>): Aud
     const value = fields[key]?.trim();
     if (value) metadata[key] = value.slice(0, key === "notes" || key === "prompt" ? 10_000 : 512);
   }
+  const mode = fields.transcription_mode?.trim().toLowerCase();
+  if (mode === "regular" || mode === "diarize") metadata.transcription_mode = mode;
   return metadata;
 }
 

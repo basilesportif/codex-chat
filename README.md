@@ -80,7 +80,10 @@ can rotate by replacing the secret in `CODEXCHAT_INGEST_API_KEYS` and
 restarting the service.
 
 Optional form metadata fields: `source`, `device`, `title`, `recorded_at`,
-`client_request_id`, `notes`, and `prompt`. Reusing the same
+`client_request_id`, `notes`, `prompt`, and `transcription_mode`.
+`transcription_mode` may be `regular` (default) or `diarize`; `diarize` uses
+OpenAI `gpt-4o-transcribe-diarize` and returns speaker segments when available.
+Reusing the same
 `client_request_id` with the same authenticated key returns the existing
 `ingestion_id` when possible instead of creating another transcription.
 
@@ -88,11 +91,16 @@ Optional form metadata fields: `source`, `device`, `title`, `recorded_at`,
 (for example, “summarize this into action items”). It is stored with the
 ingestion record and delivered to the main AI/message-handling layer alongside
 the transcript so the assistant can decide what to do. It is **not** passed to
-OpenAI as the Whisper/transcription prompt; transcription still uses the
+OpenAI as the model transcription prompt; transcription still uses the
 existing `[transcription]` config and optional `transcription.promptPath`.
 
 Size limit: `CODEXCHAT_AUDIO_INGEST_MAX_MB` (default `100`). Transcription uses
 the existing `[transcription]` config and `OPENAI_API_KEY`.
+
+If an MP3 upload arrives without a caller `prompt`/context, the main assistant
+is instructed not to assume any source-specific workflow (including Soundcore)
+and to ask what to do with the transcript unless metadata clearly establishes
+intent.
 
 Example:
 
@@ -103,6 +111,7 @@ curl -X POST "https://YOUR_CODEXCHAT_HOST/api/ingest/audio" \
   -F "source=soundcore" \
   -F "device=soundcore-work" \
   -F "title=Soundcore Recording" \
+  -F "transcription_mode=regular" \
   -F "prompt=Summarize this recording into action items."
 ```
 
@@ -112,7 +121,11 @@ Response shape:
 {
   "ingestion_id": "ing_...",
   "status": "completed",
-  "transcription": { "status": "completed", "text": "..." }
+  "transcription": {
+    "status": "completed",
+    "mode": "regular",
+    "text": "..."
+  }
 }
 ```
 
@@ -304,7 +317,21 @@ current canonical behavior lives in `behavior/AGENTS.md`,
 `deleteAfterSend: true`. The service deletes the staged copy only after
 Telegram accepts the upload.
 
-## Voice Transcription Prompt and Dictionary
+## Transcription Modes, Diarization, and Prompt Dictionary
+
+Normal Telegram voice/audio transcription uses regular mode by default with
+`transcription.model` (default `gpt-4o-transcribe`). Diarization is opt-in:
+set `transcription_mode=diarize` on `/api/ingest/audio`, or send/reply with a
+clear Telegram request such as “diarize this” before attaching an MP3. Diarize
+mode uses `transcription.diarizeModel` (default
+`gpt-4o-transcribe-diarize`), requests `response_format=diarized_json`, and
+sets `chunking_strategy=auto`.
+
+Official OpenAI docs/API schema as checked on 2026-06-10: `gpt-4o-transcribe`
+and `gpt-4o-mini-transcribe` support prompts, but
+`gpt-4o-transcribe-diarize` does **not** support `prompt`, `logprobs`, or
+`timestamp_granularities[]`. The service therefore sends `promptPath` contents
+only in regular mode and deliberately omits prompts in diarize mode.
 
 Voice and audio transcription can use an OpenAI transcription prompt file for
 names, project terms, preferred spellings, and lightweight cleanup guidance. Set
@@ -335,9 +362,10 @@ USER DICTIONARY:
 - Derek White → Derrick White
 ```
 
-If `promptPath` is unset, missing, empty, or unreadable, transcription runs
-without a prompt. Keep secrets out of this file: it is sent to OpenAI with each
-voice/audio transcription request.
+If `promptPath` is unset, missing, empty, or unreadable, regular transcription
+runs without a prompt. Keep secrets out of this file: it is sent to OpenAI with
+each regular voice/audio transcription request, but not with diarization
+requests.
 
 ## Server bootstrap skill
 

@@ -150,7 +150,11 @@ allowedSendRoots = [
 [transcription]
 enabled = true
 provider = "openai"
-model = "gpt-4o-mini-transcribe"
+# Regular Telegram voice/audio transcription model.
+model = "gpt-4o-transcribe"
+# Speaker diarization model used when a caller/request explicitly selects
+# transcription_mode="diarize" or a Telegram audio context asks to diarize.
+diarizeModel = "gpt-4o-transcribe-diarize"
 apiKeyEnv = "OPENAI_API_KEY"
 language = ""
 promptPath = ""

@@ -31,7 +31,7 @@ import {
   type SteerJobResult,
   type SubagentBackendStatus
 } from "./subagents.js";
-import { DisabledTranscriber, OpenAITranscriber, Transcriber } from "./transcription.js";
+import { DisabledTranscriber, OpenAITranscriber, Transcriber, type TranscriptionMode, type TranscriptionSpeakerSegment } from "./transcription.js";
 import { sanitizeChildProcessEnv } from "./env.js";
 import { isTelegramAdmin, TelegramGateway } from "./telegram.js";
 import { CodexClient, StoredAction, SubagentBackendKind, SubagentJob, SubagentOwnerType, SubagentResultTarget, UserEvent } from "./types.js";
@@ -511,6 +511,8 @@ export class ServiceSupervisor {
         keyIdentity: event.keyIdentity,
         metadata,
         transcript,
+        transcriptionMode: record?.transcription?.mode ?? event.result.transcription?.mode,
+        speakerSegments: record?.transcription?.speakerSegments ?? event.result.transcription?.speaker_segments,
         audioPath: record?.file?.localPath
       }),
       transcript,
@@ -520,6 +522,9 @@ export class ServiceSupervisor {
         audioIngestKeyIdentity: event.keyIdentity,
         audioIngestMetadata: metadata,
         audioIngestPrompt: metadata.prompt,
+        audioIngestTranscriptionMode: record?.transcription?.mode ?? event.result.transcription?.mode,
+        audioIngestSpeakerSegments: record?.transcription?.speakerSegments ?? event.result.transcription?.speaker_segments,
+        audioIngestRawDiarizedJson: record?.transcription?.rawDiarizedJson ?? event.result.transcription?.raw_diarized_json,
         audioIngestFile: record?.file ? {
           localPath: record.file.localPath,
           mimeType: record.file.mimeType,
@@ -549,13 +554,16 @@ export class ServiceSupervisor {
   private formatAudioIngestionForCodex(input: {
     ingestionId: string;
     keyIdentity: string;
-    metadata: { source?: string; device?: string; title?: string; recorded_at?: string; client_request_id?: string; notes?: string; prompt?: string };
+    metadata: { source?: string; device?: string; title?: string; recorded_at?: string; client_request_id?: string; notes?: string; prompt?: string; transcription_mode?: TranscriptionMode };
     transcript: string;
+    transcriptionMode?: TranscriptionMode;
+    speakerSegments?: TranscriptionSpeakerSegment[];
     audioPath?: string;
   }): string {
     const metadataLines = [
       `ingestion_id: ${input.ingestionId}`,
       `authenticated_key_identity: ${input.keyIdentity}`,
+      `transcription_mode: ${input.transcriptionMode ?? input.metadata.transcription_mode ?? "regular"}`,
       input.metadata.source ? `source: ${this.compactJobText(input.metadata.source)}` : "",
       input.metadata.device ? `device: ${this.compactJobText(input.metadata.device)}` : "",
       input.metadata.title ? `title: ${this.compactJobText(input.metadata.title)}` : "",
@@ -567,15 +575,29 @@ export class ServiceSupervisor {
     const prompt = input.metadata.prompt?.trim();
     const promptSection = prompt
       ? `Caller prompt/instructions for handling this transcript after transcription:\n${prompt}`
-      : "Caller prompt/instructions: none supplied. Use the transcript and metadata to decide whether any action is needed.";
+      : "Caller prompt/instructions: none supplied. Do not assume a source-specific workflow (including Soundcore); ask what the user wants done with the transcript unless metadata clearly establishes the intent.";
     const transcript = input.transcript.trim() || "(empty transcript)";
+    const speakerSection = this.formatAudioSpeakerSegments(input.speakerSegments);
     return [
       "Audio ingestion transcript received via POST /api/ingest/audio.",
       "Treat this as user-supplied audio content. The caller prompt is post-transcription metadata for codex-chat, not an OpenAI transcription prompt.",
       metadataLines,
       promptSection,
-      `Transcript:\n${transcript}`
+      `Transcript:\n${transcript}`,
+      speakerSection
     ].filter(Boolean).join("\n\n");
+  }
+
+  private formatAudioSpeakerSegments(segments?: TranscriptionSpeakerSegment[]): string | undefined {
+    if (!segments || segments.length === 0) return undefined;
+    const maxSegments = 120;
+    const lines = segments.slice(0, maxSegments).map((segment) => {
+      const start = Number.isFinite(segment.start) ? `${Math.max(0, segment.start).toFixed(1)}s` : "?";
+      const end = Number.isFinite(segment.end) ? `${Math.max(0, segment.end).toFixed(1)}s` : "?";
+      return `- ${segment.speaker} [${start}-${end}]: ${segment.text}`;
+    });
+    if (segments.length > maxSegments) lines.push(`- ... ${segments.length - maxSegments} more speaker segments omitted from this prompt.`);
+    return `Speaker segments:\n${lines.join("\n")}`;
   }
 
   async health(): Promise<Record<string, unknown>> {

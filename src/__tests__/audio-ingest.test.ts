@@ -7,14 +7,14 @@ import { loadConfig, type AppConfig } from "../config.js";
 import { FileStore } from "../file-store.js";
 import { createLogger } from "../logger.js";
 import { StateStore } from "../state.js";
-import type { Transcriber, TranscriptionResult } from "../transcription.js";
+import type { Transcriber, TranscriptionResult, TranscribeInput } from "../transcription.js";
 
 const tempDirs: string[] = [];
 const gateways: ApiGateway[] = [];
 const originalEnv = { ...process.env };
 
 class StubTranscriber implements Transcriber {
-  readonly transcribe = vi.fn(async (_input: { path: string }): Promise<TranscriptionResult> => ({ text: "hello transcript" }));
+  readonly transcribe = vi.fn(async (_input: TranscribeInput): Promise<TranscriptionResult> => ({ text: "hello transcript", mode: _input.mode ?? "regular" }));
 }
 
 beforeEach(() => {
@@ -147,11 +147,11 @@ describe("audio ingestion API", () => {
       status: string;
       metadata: Record<string, string>;
       file: { filename: string; content_type: string; size_bytes: number; sha256: string };
-      transcription: { status: string; text: string };
+      transcription: { status: string; mode?: string; text: string };
     };
     expect(body.ingestion_id).toMatch(/^ing_/);
     expect(body.status).toBe("completed");
-    expect(body.transcription).toEqual({ status: "completed", text: "hello transcript" });
+    expect(body.transcription).toMatchObject({ status: "completed", mode: "regular", text: "hello transcript" });
     expect(body.metadata).toMatchObject({
       source: "soundcore",
       device: "soundcore-work",
@@ -169,7 +169,7 @@ describe("audio ingestion API", () => {
         ingestion_id: body.ingestion_id,
         status: "completed",
         metadata: { prompt: "Summarize action items for Tim." },
-        transcription: { status: "completed", text: "hello transcript" }
+        transcription: { status: "completed", mode: "regular", text: "hello transcript" }
       }
     });
 
@@ -182,6 +182,53 @@ describe("audio ingestion API", () => {
     expect(record?.metadata).toMatchObject({ source: "soundcore", device: "soundcore-work", client_request_id: "req-1", prompt: "Summarize action items for Tim." });
     expect(record?.status).toBe("completed");
     expect(record?.file?.localPath).toBe(transcriberInput?.path);
+  });
+
+  test("passes requested diarization mode and returns speaker segments", async () => {
+    const { baseUrl, state, transcriber } = await makeHarness();
+    transcriber.transcribe.mockResolvedValueOnce({
+      text: "A: Hello.\nB: Hi.",
+      mode: "diarize",
+      model: "gpt-4o-transcribe-diarize",
+      speakerSegments: [
+        { id: "seg_1", start: 0, end: 1.2, text: "Hello.", speaker: "A" },
+        { id: "seg_2", start: 1.2, end: 2.4, text: "Hi.", speaker: "B" }
+      ],
+      rawDiarizedJson: { task: "transcribe", duration: 2.4 }
+    });
+
+    const response = await postAudio(baseUrl, formWithMp3({
+      transcription_mode: "diarize",
+      client_request_id: "diarize-request"
+    }), { Authorization: "Bearer test-secret" });
+
+    expect(response.status).toBe(201);
+    const body = await response.json() as {
+      ingestion_id: string;
+      metadata: { transcription_mode?: string };
+      transcription: { status: string; mode?: string; model?: string; text: string; speaker_segments?: unknown[]; raw_diarized_json?: unknown };
+    };
+    expect(transcriber.transcribe).toHaveBeenCalledWith(expect.objectContaining({ mode: "diarize" }));
+    expect(body.metadata.transcription_mode).toBe("diarize");
+    expect(body.transcription).toMatchObject({
+      status: "completed",
+      mode: "diarize",
+      model: "gpt-4o-transcribe-diarize",
+      text: "A: Hello.\nB: Hi.",
+      speaker_segments: [
+        { id: "seg_1", start: 0, end: 1.2, text: "Hello.", speaker: "A" },
+        { id: "seg_2", start: 1.2, end: 2.4, text: "Hi.", speaker: "B" }
+      ],
+      raw_diarized_json: { task: "transcribe", duration: 2.4 }
+    });
+    const record = await state.readAudioIngestion(body.ingestion_id);
+    expect(record?.transcription).toMatchObject({
+      mode: "diarize",
+      speakerSegments: [
+        { id: "seg_1", start: 0, end: 1.2, text: "Hello.", speaker: "A" },
+        { id: "seg_2", start: 1.2, end: 2.4, text: "Hi.", speaker: "B" }
+      ]
+    });
   });
 
   test("accepts X-CodexChat-Ingest-Key header", async () => {

@@ -6,10 +6,10 @@ import type { Context } from "grammy";
 import type { Message } from "grammy/types";
 import type { AppConfig } from "../config.js";
 import { createLogger } from "../logger.js";
-import { extractTelegramReplyContext, TelegramGateway } from "../telegram.js";
+import { decideTelegramAudioTranscription, extractTelegramReplyContext, TelegramGateway } from "../telegram.js";
 import type { StateStore } from "../state.js";
 import type { FileStore } from "../file-store.js";
-import type { Transcriber } from "../transcription.js";
+import type { Transcriber, TranscribeInput, TranscriptionResult } from "../transcription.js";
 
 function testGateway(overrides: { state?: Partial<StateStore>; files?: Partial<FileStore>; config?: Partial<AppConfig> } = {}): TelegramGateway {
   return new TelegramGateway(
@@ -128,6 +128,33 @@ describe("Telegram reply context extraction", () => {
     }));
   });
 
+  test("audio transcription decision uses caption, reply, and previous context", () => {
+    expect(decideTelegramAudioTranscription({
+      caption: "Please diarize this meeting recording",
+      isMp3: true
+    })).toMatchObject({ mode: "diarize", requestKind: "diarize", requestSource: "caption", shouldAskForContext: false });
+
+    expect(decideTelegramAudioTranscription({
+      reply: { replyToMessage: { chatId: 100, messageId: 1, snippet: "Can you transcribe this audio?" } },
+      isMp3: true
+    })).toMatchObject({ mode: "regular", requestKind: "transcribe", requestSource: "reply", shouldAskForContext: false });
+
+    expect(decideTelegramAudioTranscription({
+      previousText: "diarize the next mp3 by speaker",
+      isMp3: true
+    })).toMatchObject({ mode: "diarize", requestKind: "diarize", requestSource: "previous", shouldAskForContext: false });
+
+    expect(decideTelegramAudioTranscription({
+      previousText: "Audio transcript:\nThis was already transcribed.",
+      isMp3: true
+    })).toMatchObject({ mode: "regular", shouldAskForContext: true });
+
+    expect(decideTelegramAudioTranscription({ isMp3: true })).toMatchObject({
+      mode: "regular",
+      shouldAskForContext: true
+    });
+  });
+
   test("fires immediate receipt reaction before recording and queueing the user event", async () => {
     const recordGate = deferred();
     const recordMessage = vi.fn().mockImplementation(async () => {
@@ -233,6 +260,122 @@ describe("Telegram reply context extraction", () => {
         replyToMessage: expect.objectContaining({ chatId: 100, messageId: 20, snippet: "original context" })
       })
     }));
+  });
+
+  test("uses diarize mode for MP3 audio when the previous message requested diarization", async () => {
+    const recordMessage = vi.fn().mockResolvedValue(undefined);
+    const onUserEvent = vi.fn().mockResolvedValue(undefined);
+    const transcribe = vi.fn(async (input: TranscribeInput): Promise<TranscriptionResult> => ({
+      text: "A: Hello.\nB: Hi.",
+      mode: input.mode,
+      speakerSegments: [
+        { id: "seg_1", start: 0, end: 1.2, text: "Hello.", speaker: "A" },
+        { id: "seg_2", start: 1.2, end: 2.4, text: "Hi.", speaker: "B" }
+      ]
+    }));
+    const gateway = new TelegramGateway(
+      {
+        telegram: {
+          allowlist: { userIds: [9], chatIds: [100], adminUserIds: [] }
+        },
+        transcription: { enabled: true }
+      } as AppConfig,
+      {
+        listTelegramUsers: vi.fn().mockResolvedValue([]),
+        listTelegramChats: vi.fn().mockResolvedValue([]),
+        recordMessage,
+        findRecentTelegramInboundMessage: vi.fn().mockResolvedValue({ text: "Please diarize the next MP3 by speaker.", messageId: 20 })
+      } as unknown as StateStore,
+      {} as FileStore,
+      { transcribe } as Transcriber,
+      createLogger("silent"),
+      { onUserEvent }
+    );
+    vi.spyOn(gateway, "sendReaction").mockResolvedValue(undefined);
+    vi.spyOn(gateway, "sendChatAction").mockResolvedValue(undefined);
+    vi.spyOn(gateway as unknown as { downloadTelegramFile(kind: string, fileLike: unknown): Promise<unknown> }, "downloadTelegramFile")
+      .mockResolvedValue({ kind: "audio", localPath: "/tmp/meeting.mp3", mimeType: "audio/mpeg", originalName: "meeting.mp3" });
+
+    await (gateway as unknown as { handleMessage(ctx: Context): Promise<void> }).handleMessage({
+      chat: { id: 100, type: "private", first_name: "Tim" },
+      from: { id: 9, is_bot: false, first_name: "Tim", username: "tim" },
+      message: {
+        message_id: 21,
+        date: 1_700_000_100,
+        chat: { id: 100, type: "private", first_name: "Tim" },
+        from: { id: 9, is_bot: false, first_name: "Tim", username: "tim" },
+        audio: {
+          file_id: "file",
+          file_unique_id: "unique",
+          duration: 10,
+          mime_type: "audio/mpeg",
+          file_name: "meeting.mp3"
+        }
+      }
+    } as Context);
+
+    expect(transcribe).toHaveBeenCalledWith({ path: "/tmp/meeting.mp3", mode: "diarize" });
+    expect(onUserEvent).toHaveBeenCalledWith(expect.objectContaining({
+      source: "telegram",
+      text: expect.stringContaining("Diarized audio transcript:")
+    }));
+    const text = onUserEvent.mock.calls[0]?.[0]?.text as string;
+    expect(text).toContain("Previous Telegram message requested speaker diarization");
+    expect(text).toContain("Speaker segments:");
+  });
+
+  test("regular MP3 audio without context tells Codex to ask what to do", async () => {
+    const onUserEvent = vi.fn().mockResolvedValue(undefined);
+    const transcribe = vi.fn(async (input: TranscribeInput): Promise<TranscriptionResult> => ({
+      text: "Uncaptioned meeting notes.",
+      mode: input.mode
+    }));
+    const gateway = new TelegramGateway(
+      {
+        telegram: {
+          allowlist: { userIds: [9], chatIds: [100], adminUserIds: [] }
+        },
+        transcription: { enabled: true }
+      } as AppConfig,
+      {
+        listTelegramUsers: vi.fn().mockResolvedValue([]),
+        listTelegramChats: vi.fn().mockResolvedValue([]),
+        recordMessage: vi.fn().mockResolvedValue(undefined),
+        findRecentTelegramInboundMessage: vi.fn().mockResolvedValue(undefined)
+      } as unknown as StateStore,
+      {} as FileStore,
+      { transcribe } as Transcriber,
+      createLogger("silent"),
+      { onUserEvent }
+    );
+    vi.spyOn(gateway, "sendReaction").mockResolvedValue(undefined);
+    vi.spyOn(gateway, "sendChatAction").mockResolvedValue(undefined);
+    vi.spyOn(gateway as unknown as { downloadTelegramFile(kind: string, fileLike: unknown): Promise<unknown> }, "downloadTelegramFile")
+      .mockResolvedValue({ kind: "audio", localPath: "/tmp/no-context.mp3", mimeType: "audio/mpeg", originalName: "no-context.mp3" });
+
+    await (gateway as unknown as { handleMessage(ctx: Context): Promise<void> }).handleMessage({
+      chat: { id: 100, type: "private", first_name: "Tim" },
+      from: { id: 9, is_bot: false, first_name: "Tim", username: "tim" },
+      message: {
+        message_id: 30,
+        date: 1_700_000_100,
+        chat: { id: 100, type: "private", first_name: "Tim" },
+        from: { id: 9, is_bot: false, first_name: "Tim", username: "tim" },
+        audio: {
+          file_id: "file",
+          file_unique_id: "unique",
+          duration: 10,
+          mime_type: "audio/mpeg",
+          file_name: "no-context.mp3"
+        }
+      }
+    } as Context);
+
+    expect(transcribe).toHaveBeenCalledWith({ path: "/tmp/no-context.mp3", mode: "regular" });
+    const text = onUserEvent.mock.calls[0]?.[0]?.text as string;
+    expect(text).toContain("MP3 audio arrived without a caption");
+    expect(text).toContain("ask Tim what he wants done");
+    expect(text).toContain("Do not assume a Soundcore-specific workflow");
   });
 
   test("sendText retries unthreaded when Telegram cannot find the reply target", async () => {

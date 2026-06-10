@@ -251,6 +251,7 @@ Recommended transcription dictionary file:
 enabled = true
 provider = "openai"
 model = "gpt-4o-transcribe"
+diarizeModel = "gpt-4o-transcribe-diarize"
 apiKeyEnv = "OPENAI_API_KEY"
 language = ""
 promptPath = "/home/$USERNAME/.assistant-claude/workspace/instructions/prompts/voice-transcription.md"
@@ -273,7 +274,7 @@ PROMPT
 REMOTE
 ```
 
-`codex-chat` reads this file fresh for every voice/audio transcription. Editing the dictionary contents does not require a service restart. Changing `promptPath` itself does require restarting the service because the configured path is loaded at startup. Do not put secrets in the prompt file; it is sent to OpenAI with each transcription request.
+`codex-chat` reads this file fresh for every regular voice/audio transcription. Editing the dictionary contents does not require a service restart. Changing `promptPath` itself does require restarting the service because the configured path is loaded at startup. Do not put secrets in the prompt file; it is sent to OpenAI with each regular transcription request. Diarization uses `gpt-4o-transcribe-diarize` with `diarized_json` and does not send this prompt because OpenAI does not support `prompt` for that model.
 
 If no allowlist is configured yet, start the service and use its one-time `/pair <code>` flow from Telegram.
 

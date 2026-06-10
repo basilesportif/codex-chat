@@ -15,6 +15,16 @@ interface SubagentRuntimeState {
   updatedBy?: string;
 }
 
+export interface RecordedTelegramMessage {
+  direction?: string;
+  source?: string;
+  chatId?: number;
+  userId?: number;
+  messageId?: number;
+  text?: string;
+  receivedAt?: string;
+}
+
 export class StateStore {
   readonly root: string;
   private queues = new Map<string, Promise<void>>();
@@ -69,6 +79,41 @@ export class StateStore {
   async recordMessage(value: unknown): Promise<void> {
     const day = new Date().toISOString().slice(0, 10);
     await this.appendJsonl(`messages/${day}.jsonl`, value);
+  }
+
+  async findRecentTelegramInboundMessage(input: {
+    chatId: number;
+    beforeMessageId?: number;
+    limitFiles?: number;
+  }): Promise<RecordedTelegramMessage | undefined> {
+    const dir = this.path("messages");
+    const files = (await readdir(dir).catch(() => []))
+      .filter((file) => file.endsWith(".jsonl"))
+      .sort()
+      .reverse()
+      .slice(0, input.limitFiles ?? 7);
+    for (const file of files) {
+      const path = join(dir, file);
+      const lines = (await readFile(path, "utf8").catch(() => ""))
+        .split("\n")
+        .filter(Boolean)
+        .reverse();
+      for (const line of lines) {
+        let record: RecordedTelegramMessage;
+        try {
+          record = JSON.parse(line) as RecordedTelegramMessage;
+        } catch {
+          continue;
+        }
+        if (record.direction !== "inbound") continue;
+        if (record.source && record.source !== "telegram") continue;
+        if (record.chatId !== input.chatId) continue;
+        if (record.messageId !== undefined && input.beforeMessageId !== undefined && record.messageId >= input.beforeMessageId) continue;
+        if (typeof record.text !== "string" || !record.text.trim()) continue;
+        return record;
+      }
+    }
+    return undefined;
   }
 
   async recordMonitorEvent(event: MonitorEvent): Promise<void> {

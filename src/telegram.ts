@@ -5,13 +5,14 @@ import type { Logger } from "pino";
 import { AppConfig } from "./config.js";
 import { FileStore } from "./file-store.js";
 import { StateStore } from "./state.js";
-import { Transcriber } from "./transcription.js";
+import { Transcriber, type TranscriptionMode, type TranscriptionResult, type TranscriptionSpeakerSegment } from "./transcription.js";
 import { Attachment, TelegramReplyChatSummary, TelegramReplyContext, TelegramReplySenderSummary, UserEvent } from "./types.js";
 import { chunkText, makePairingCode, nowIso } from "./util.js";
 import { renderTelegramMarkdown } from "./telegram-format.js";
 
 const REPLY_SNIPPET_MAX_CHARS = 280;
 const REPLY_LABEL_MAX_CHARS = 120;
+const TRANSCRIPTION_CONTEXT_MAX_CHARS = 280;
 const TELEGRAM_CONTENT_FIELDS = [
   "animation",
   "audio",
@@ -34,6 +35,16 @@ const TELEGRAM_CONTENT_FIELDS = [
   "checklist",
   "venue"
 ] as const;
+
+type TelegramAudioRequestKind = "diarize" | "transcribe";
+
+interface TelegramAudioDecision {
+  mode: TranscriptionMode;
+  requestKind?: TelegramAudioRequestKind;
+  requestSource?: "caption" | "reply" | "previous";
+  requestSnippet?: string;
+  shouldAskForContext: boolean;
+}
 
 function replyParameters(replyToMessageId?: number): { message_id: number } | undefined {
   return replyToMessageId !== undefined ? { message_id: replyToMessageId } : undefined;
@@ -80,6 +91,66 @@ function compactTelegramText(value: unknown, maxChars: number): string | undefin
   const chars = Array.from(compact);
   if (chars.length <= maxChars) return compact;
   return `${chars.slice(0, maxChars).join("")}...`;
+}
+
+export function detectTelegramAudioRequest(text?: string): TelegramAudioRequestKind | undefined {
+  const normalized = compactTelegramText(text, 2_000);
+  if (!normalized) return undefined;
+  if (/\b(diar(?:ize|ise|ization|isation)|speaker\s+(?:label|labels|segments|separation)|separate\s+(?:the\s+)?speakers|who\s+(?:said|says|spoke))\b/i.test(normalized)) {
+    return "diarize";
+  }
+  if (/\b(transcribe|speech\s*[- ]?to\s*[- ]?text|audio\s*[- ]?to\s*[- ]?text|convert\s+(?:this\s+)?(?:audio|voice|mp3)\s+(?:to|into)\s+text)\b/i.test(normalized)
+    || /\b(?:make|create|generate|get|give|provide|produce|send|write)\b.{0,80}\btranscript\b/i.test(normalized)
+    || /\btranscript\s+(?:this|that|the|next)\b/i.test(normalized)) {
+    return "transcribe";
+  }
+  return undefined;
+}
+
+export function decideTelegramAudioTranscription(input: {
+  caption?: string;
+  reply?: TelegramReplyContext;
+  previousText?: string;
+  isMp3?: boolean;
+}): TelegramAudioDecision {
+  const captionRequest = detectTelegramAudioRequest(input.caption);
+  if (captionRequest) {
+    return {
+      mode: captionRequest === "diarize" ? "diarize" : "regular",
+      requestKind: captionRequest,
+      requestSource: "caption",
+      requestSnippet: compactTelegramText(input.caption, TRANSCRIPTION_CONTEXT_MAX_CHARS),
+      shouldAskForContext: false
+    };
+  }
+
+  const replySnippet = input.reply?.replyToMessage?.snippet ?? input.reply?.quote?.snippet ?? input.reply?.externalReply?.origin?.authorSignature;
+  const replyRequest = detectTelegramAudioRequest(replySnippet);
+  if (replyRequest) {
+    return {
+      mode: replyRequest === "diarize" ? "diarize" : "regular",
+      requestKind: replyRequest,
+      requestSource: "reply",
+      requestSnippet: compactTelegramText(replySnippet, TRANSCRIPTION_CONTEXT_MAX_CHARS),
+      shouldAskForContext: false
+    };
+  }
+
+  const previousRequest = detectTelegramAudioRequest(input.previousText);
+  if (previousRequest) {
+    return {
+      mode: previousRequest === "diarize" ? "diarize" : "regular",
+      requestKind: previousRequest,
+      requestSource: "previous",
+      requestSnippet: compactTelegramText(input.previousText, TRANSCRIPTION_CONTEXT_MAX_CHARS),
+      shouldAskForContext: false
+    };
+  }
+
+  return {
+    mode: "regular",
+    shouldAskForContext: input.isMp3 === true && !input.caption?.trim()
+  };
 }
 
 function summarizeTelegramUser(user?: User): TelegramReplySenderSummary | undefined {
@@ -222,6 +293,28 @@ export function isTelegramAdmin(input: { userId?: number; configAdminUserIds: Ar
   const userId = normalizeTelegramUserId(input.userId);
   const configAdminUserIds = new Set(input.configAdminUserIds.map(normalizeTelegramUserId));
   return configAdminUserIds.has(userId) || Boolean(input.stateUsers?.some((user) => user.userId === input.userId && user.isAdmin));
+}
+
+function isMp3AudioAttachment(attachment: Attachment, telegramAudio: { mime_type?: string; file_name?: string }): boolean {
+  const mimeType = (attachment.mimeType ?? telegramAudio.mime_type ?? "").toLowerCase();
+  const name = (attachment.originalName ?? telegramAudio.file_name ?? "").toLowerCase();
+  return mimeType === "audio/mpeg" || name.endsWith(".mp3");
+}
+
+function formatSpeakerSegments(segments?: TranscriptionSpeakerSegment[]): string | undefined {
+  if (!segments || segments.length === 0) return undefined;
+  const maxSegments = 80;
+  const lines = segments.slice(0, maxSegments).map((segment) => {
+    const start = formatSeconds(segment.start);
+    const end = formatSeconds(segment.end);
+    return `- ${segment.speaker} [${start}-${end}]: ${segment.text}`;
+  });
+  if (segments.length > maxSegments) lines.push(`- ... ${segments.length - maxSegments} more speaker segments omitted from this prompt.`);
+  return `Speaker segments:\n${lines.join("\n")}`;
+}
+
+function formatSeconds(value: number): string {
+  return Number.isFinite(value) ? `${Math.max(0, value).toFixed(1)}s` : "?";
 }
 
 interface TelegramCallbacks {
@@ -445,7 +538,7 @@ export class TelegramGateway {
       const attachment = await this.downloadTelegramFile("voice", message.voice);
       attachments.push(attachment);
       if (this.config.transcription.enabled) {
-        const transcript = await this.transcriber.transcribe({ path: attachment.localPath });
+        const transcript = await this.transcriber.transcribe({ path: attachment.localPath, mode: "regular" });
         text = [
           text,
           "Voice transcript:",
@@ -461,8 +554,23 @@ export class TelegramGateway {
       const attachment = await this.downloadTelegramFile("audio", message.audio);
       attachments.push(attachment);
       if (this.config.transcription.enabled) {
-        const transcript = await this.transcriber.transcribe({ path: attachment.localPath });
-        text = ["Audio transcript:", transcript.text, "", `Audio path: ${attachment.localPath}`].join("\n");
+        const previous = await this.state.findRecentTelegramInboundMessage({
+          chatId: ctx.chat.id,
+          beforeMessageId: message.message_id
+        });
+        const decision = decideTelegramAudioTranscription({
+          caption: text,
+          reply,
+          previousText: previous?.text,
+          isMp3: isMp3AudioAttachment(attachment, message.audio)
+        });
+        const transcript = await this.transcriber.transcribe({ path: attachment.localPath, mode: decision.mode });
+        text = this.formatAudioTranscriptForEvent({
+          caption: text,
+          transcript,
+          audioPath: attachment.localPath,
+          decision
+        });
       }
     }
 
@@ -494,6 +602,35 @@ export class TelegramGateway {
       receivedAt: nowIso(),
       metadata: { telegramMessageId: message.message_id }
     });
+  }
+
+  private formatAudioTranscriptForEvent(input: {
+    caption?: string;
+    transcript: TranscriptionResult;
+    audioPath: string;
+    decision: TelegramAudioDecision;
+  }): string {
+    const lines: string[] = [];
+    const caption = input.caption?.trim();
+    if (caption) {
+      lines.push(`Audio caption/instructions:\n${caption}`);
+    } else if (input.decision.shouldAskForContext) {
+      lines.push("MP3 audio arrived without a caption, reply, or immediately previous request to transcribe/diarize it. Do not assume a Soundcore-specific workflow; after reading the transcript, ask Tim what he wants done with it.");
+    }
+    if (input.decision.requestSource && input.decision.requestKind) {
+      const sourceLabel = input.decision.requestSource === "previous"
+        ? "Previous Telegram message"
+        : input.decision.requestSource === "reply"
+          ? "Replied-to Telegram message"
+          : "Audio caption";
+      lines.push(`${sourceLabel} requested ${input.decision.requestKind === "diarize" ? "speaker diarization" : "transcription"}${input.decision.requestSnippet ? `: ${input.decision.requestSnippet}` : "."}`);
+    }
+    lines.push(input.decision.mode === "diarize" ? "Diarized audio transcript:" : "Audio transcript:");
+    lines.push(input.transcript.text || "(empty transcript)");
+    const speakerSection = formatSpeakerSegments(input.transcript.speakerSegments);
+    if (speakerSection) lines.push(speakerSection);
+    lines.push(`Audio path: ${input.audioPath}`);
+    return lines.filter(Boolean).join("\n\n");
   }
 
   private async downloadTelegramFile(kind: Attachment["kind"], fileLike: any): Promise<Attachment> {

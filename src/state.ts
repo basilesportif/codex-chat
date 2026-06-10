@@ -1,6 +1,8 @@
 import { appendFile, mkdir, readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { createHash } from "node:crypto";
 import { AppConfig, resolveConfigPath } from "./config.js";
+import type { AudioIngestionRecord } from "./audio-ingest.js";
 import { EmployeeRuntimeState, LoopRun, MonitorEvent, StoredAction, SubagentBackendKind, SubagentJob } from "./types.js";
 import { atomicWriteJson, atomicWriteText, ensureDir, nowIso, pathExists, removeIfExists } from "./util.js";
 
@@ -23,7 +25,7 @@ export class StateStore {
 
   async init(): Promise<void> {
     await ensureDir(this.root);
-    for (const dir of ["messages", "files", "turns", "queued_turns", "jobs", "employees", "employee_child_results", "loop_runs", "monitor_events", "actions"]) {
+    for (const dir of ["messages", "files", "turns", "queued_turns", "jobs", "employees", "employee_child_results", "loop_runs", "monitor_events", "actions", "audio_ingestions"]) {
       await ensureDir(join(this.root, dir));
     }
     if (!(await pathExists(join(this.root, "schema.json")))) {
@@ -154,6 +156,36 @@ export class StateStore {
     await this.writeJson(`files/${id}.json`, metadata);
   }
 
+  async saveAudioIngestion(record: AudioIngestionRecord): Promise<void> {
+    await this.writeJson(`audio_ingestions/${record.id}.json`, record);
+  }
+
+  async readAudioIngestion(id: string): Promise<AudioIngestionRecord | undefined> {
+    return this.readJson<AudioIngestionRecord | undefined>(`audio_ingestions/${id}.json`, undefined);
+  }
+
+  async claimAudioIngestionClientRequest(
+    keyIdentity: string,
+    clientRequestId: string,
+    ingestionId: string
+  ): Promise<{ claimed: true } | { claimed: false; ingestionId: string }> {
+    const rel = "audio_ingestions/idempotency.json";
+    return this.withJsonFileLock(rel, async (path) => {
+      const current = await readJsonFile<Record<string, { ingestionId: string; claimedAt: string }>>(path, {});
+      const idempotencyKey = audioIngestionIdempotencyKey(keyIdentity, clientRequestId);
+      const existing = current[idempotencyKey];
+      if (existing?.ingestionId) return { claimed: false, ingestionId: existing.ingestionId };
+      current[idempotencyKey] = { ingestionId, claimedAt: nowIso() };
+      await atomicWriteJson(path, pruneObject(current, 10_000));
+      return { claimed: true };
+    });
+  }
+
+  async findAudioIngestionByClientRequest(keyIdentity: string, clientRequestId: string): Promise<string | undefined> {
+    const current = await this.readJson<Record<string, { ingestionId: string; claimedAt: string }>>("audio_ingestions/idempotency.json", {});
+    return current[audioIngestionIdempotencyKey(keyIdentity, clientRequestId)]?.ingestionId;
+  }
+
   async getCodexSession(name: string): Promise<string | undefined> {
     const sessions = await this.readJson<Record<string, { sessionId?: string }>>("codex_sessions.json", {});
     return sessions[name]?.sessionId;
@@ -218,4 +250,27 @@ export class StateStore {
   async deletePairingCode(): Promise<void> {
     await removeIfExists(this.path(pairingCodePath));
   }
+
+  private async withJsonFileLock<T>(rel: string, fn: (path: string) => Promise<T>): Promise<T> {
+    const path = this.path(rel);
+    const previous = this.queues.get(path) ?? Promise.resolve();
+    const next = previous.then(() => fn(path), () => fn(path));
+    this.queues.set(path, next.then(() => undefined, () => undefined));
+    return next;
+  }
+}
+
+async function readJsonFile<T>(path: string, fallback: T): Promise<T> {
+  if (!(await pathExists(path))) return fallback;
+  return JSON.parse(await readFile(path, "utf8")) as T;
+}
+
+function audioIngestionIdempotencyKey(keyIdentity: string, clientRequestId: string): string {
+  return createHash("sha256").update(`${keyIdentity}\0${clientRequestId}`).digest("hex");
+}
+
+function pruneObject<T>(value: Record<string, T>, maxEntries: number): Record<string, T> {
+  const entries = Object.entries(value);
+  if (entries.length <= maxEntries) return value;
+  return Object.fromEntries(entries.slice(entries.length - maxEntries));
 }

@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { createServer, type Server } from "node:net";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { AppConfig } from "../config.js";
@@ -17,12 +18,14 @@ function fakeChild() {
     stdout: EventEmitter;
     stderr: EventEmitter;
     exitCode: number | null;
+    signalCode: NodeJS.Signals | null;
     killed: boolean;
     kill: ReturnType<typeof vi.fn>;
   };
   child.stdout = new EventEmitter();
   child.stderr = new EventEmitter();
   child.exitCode = null;
+  child.signalCode = null;
   child.killed = false;
   child.kill = vi.fn(() => {
     child.killed = true;
@@ -49,7 +52,7 @@ function testConfig(rootDir: string): AppConfig {
       binary: "codex",
       transport: "app-server",
       appServerHost: "127.0.0.1",
-      appServerPort: 49345,
+      appServerPort: 0,
       model: "gpt-test",
       effort: "medium",
       profile: "",
@@ -66,6 +69,16 @@ function testConfig(rootDir: string): AppConfig {
       apiKeyEnv: "CUSTOM_TRANSCRIPTION_API_KEY"
     }
   } as AppConfig;
+}
+
+async function listenOnLoopback(server: Server, port = 0): Promise<number> {
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("expected TCP server address");
+  return address.port;
 }
 
 afterEach(() => {
@@ -275,6 +288,90 @@ describe("codex clients", () => {
     await expect(client.start()).rejects.toThrow("ECONNREFUSED");
 
     expect(onCrash).not.toHaveBeenCalled();
+    await client.stop();
+  });
+
+  test("refuses to start when the configured app-server port is already occupied", async () => {
+    vi.resetModules();
+    const staleServer = createServer();
+    const port = await listenOnLoopback(staleServer);
+    const spawn = vi.fn(() => fakeChild());
+    vi.doMock("node:child_process", async () => {
+      const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+      return { ...actual, spawn };
+    });
+    const { AppServerCodexClient } = await import("../codex.js");
+    const state = {
+      getCodexSession: vi.fn().mockResolvedValue(undefined),
+      setCodexSession: vi.fn().mockResolvedValue(undefined)
+    };
+    const behavior = {
+      loadBootstrapPrompt: vi.fn().mockResolvedValue("bootstrap"),
+      hash: vi.fn().mockResolvedValue("hash")
+    };
+    const baseConfig = testConfig("/tmp/codex-chat-test");
+    const config = { ...baseConfig, codex: { ...baseConfig.codex, appServerPort: port } };
+    const client = new AppServerCodexClient(config, state as never, behavior as never, fakeLogger() as never);
+
+    try {
+      await expect(client.start()).rejects.toThrow(/already in use before startup/);
+      expect(spawn).not.toHaveBeenCalled();
+    } finally {
+      await new Promise<void>((resolve) => staleServer.close(() => resolve()));
+    }
+  });
+
+  test("does not treat a websocket connection as healthy when the spawned app-server child exits during startup", async () => {
+    vi.resetModules();
+    const child = fakeChild();
+    const spawn = vi.fn(() => {
+      queueMicrotask(() => {
+        child.exitCode = 1;
+        child.emit("exit", 1, null);
+      });
+      return child;
+    });
+    vi.doMock("node:child_process", async () => {
+      const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+      return { ...actual, spawn };
+    });
+    vi.doMock("ws", () => {
+      class FakeWebSocket extends EventEmitter {
+        static OPEN = 1;
+        readyState = 1;
+
+        constructor(readonly url: string) {
+          super();
+          queueMicrotask(() => this.emit("open"));
+        }
+
+        send(raw: string): void {
+          const message = JSON.parse(raw) as { id: number; method: string };
+          const result = message.method === "thread/start" ? { thread: { id: "stale-thread" } } : {};
+          queueMicrotask(() => this.emit("message", JSON.stringify({ id: message.id, result })));
+        }
+
+        close(): void {
+          this.readyState = 3;
+          this.emit("close");
+        }
+      }
+      return { default: FakeWebSocket };
+    });
+    const { AppServerCodexClient } = await import("../codex.js");
+    const state = {
+      getCodexSession: vi.fn().mockResolvedValue(undefined),
+      setCodexSession: vi.fn().mockResolvedValue(undefined)
+    };
+    const behavior = {
+      loadBootstrapPrompt: vi.fn().mockResolvedValue("bootstrap"),
+      hash: vi.fn().mockResolvedValue("hash")
+    };
+    const client = new AppServerCodexClient(testConfig("/tmp/codex-chat-test"), state as never, behavior as never, fakeLogger() as never);
+
+    await expect(client.start()).rejects.toThrow(/exited during startup/);
+
+    await expect(client.health()).resolves.toMatchObject({ ok: false });
     await client.stop();
   });
 

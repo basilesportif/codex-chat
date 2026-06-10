@@ -53,6 +53,77 @@ codex-chat jobs list
 - Employee runtime state/proposals: `data/state/employees/`
 - Disposable generated-image staging: `data/artifacts/generated-images/`
 
+## Audio Ingestion API
+
+`POST /api/ingest/audio` accepts authenticated `multipart/form-data` uploads
+for transcription. The endpoint is general-purpose (not Soundcore-specific) and
+currently accepts MP3 files sent as form field `file` with content type
+`audio/mpeg` and a `.mp3` filename.
+
+Auth:
+
+- `Authorization: Bearer <key>`, or
+- `X-CodexChat-Ingest-Key: <key>`
+
+Set `CODEXCHAT_INGEST_API_KEYS` in the service environment. Values are
+comma/newline-separated; optional labels use `label:secret` (for example
+`iphone:...`). Labels or hashed key fingerprints may appear in logs, but raw
+keys are not logged. Setting this env var auto-enables the local HTTP API;
+otherwise enable `[api]` in config and provide keys.
+
+To create a key, generate a high-entropy random secret on the server (for
+example with `openssl rand -base64 32`), store only `label:secret` in the
+systemd environment file (`~/.config/codex-chat/env`, mode `0600`), and restart
+`codex-chat.service`. Give the raw secret to the caller exactly once over a
+secure channel; do not paste it into logs, Git, or chat transcripts. Operators
+can rotate by replacing the secret in `CODEXCHAT_INGEST_API_KEYS` and
+restarting the service.
+
+Optional form metadata fields: `source`, `device`, `title`, `recorded_at`,
+`client_request_id`, `notes`, and `prompt`. Reusing the same
+`client_request_id` with the same authenticated key returns the existing
+`ingestion_id` when possible instead of creating another transcription.
+
+`prompt` is a general-purpose post-transcription instruction for codex-chat
+(for example, “summarize this into action items”). It is stored with the
+ingestion record and delivered to the main AI/message-handling layer alongside
+the transcript so the assistant can decide what to do. It is **not** passed to
+OpenAI as the Whisper/transcription prompt; transcription still uses the
+existing `[transcription]` config and optional `transcription.promptPath`.
+
+Size limit: `CODEXCHAT_AUDIO_INGEST_MAX_MB` (default `100`). Transcription uses
+the existing `[transcription]` config and `OPENAI_API_KEY`.
+
+Example:
+
+```bash
+curl -X POST "https://YOUR_CODEXCHAT_HOST/api/ingest/audio" \
+  -H "Authorization: Bearer $CODEXCHAT_INGEST_API_KEY" \
+  -F "file=@recording.mp3;type=audio/mpeg" \
+  -F "source=soundcore" \
+  -F "device=soundcore-work" \
+  -F "title=Soundcore Recording" \
+  -F "prompt=Summarize this recording into action items."
+```
+
+Response shape:
+
+```json
+{
+  "ingestion_id": "ing_...",
+  "status": "completed",
+  "transcription": { "status": "completed", "text": "..." }
+}
+```
+
+Unauthenticated requests return `401 {"error":"unauthorized"}`. Invalid/missing
+files return JSON errors such as `missing_file`, `unsupported_file_type`, or
+`file_too_large`.
+
+iOS Shortcuts: use “Get Contents of URL”, method `POST`, request body “Form”,
+add the selected MP3 as field `file`, set its MIME type to `audio/mpeg`, and add
+the Authorization header above. Add metadata fields as text form fields.
+
 ## Service Commands
 
 Telegram messages that match service commands bypass Codex and return

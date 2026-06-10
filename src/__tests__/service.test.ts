@@ -5,7 +5,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { loadConfig } from "../config.js";
 import { createLogger } from "../logger.js";
 import { injectFilePath, INJECT_TELEGRAM_USER_ID, ServiceSupervisor } from "../service.js";
-import type { CodexEvent, UserEvent } from "../types.js";
+import type { CodexEvent, SubagentJob, UserEvent } from "../types.js";
 
 const tempDirs: string[] = [];
 
@@ -728,6 +728,136 @@ describe("service supervisor", () => {
 
     expect(sendText).toHaveBeenCalledTimes(1);
     expect(sendText).toHaveBeenCalledWith(253768951, "Direct subagent result.", 701);
+  });
+
+  test("failed subagent return_to_main bypasses main synthesis and replies directly to origin chat", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    const sendTurn = vi.spyOn(service.codex, "sendTurn");
+    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+    const notifyOps = vi.spyOn(service.telegram, "notifyOps").mockResolvedValue();
+    const job: SubagentJob = {
+      id: "job_failed00000000000000000000000000",
+      profile: "implementer",
+      route: "return_to_main",
+      status: "failed",
+      promptPath: "/tmp/prompt.md",
+      artifactDir: "/tmp/artifacts",
+      summary: "Fix a scoped bug",
+      error: "child exited with code 1",
+      originChatId: 253768951,
+      originMessageId: 711
+    };
+
+    await (service as unknown as {
+      handleSubagentReturnToMain(job: SubagentJob, result: string): Promise<void>;
+    }).handleSubagentReturnToMain(job, "Subagent job_failed00000000000000000000000000 (implementer) failed: child exited with code 1.\n\npartial failure details");
+
+    expect(sendTurn).not.toHaveBeenCalled();
+    expect(notifyOps).not.toHaveBeenCalled();
+    expect(sendText).toHaveBeenCalledWith(
+      253768951,
+      expect.stringContaining("Subagent failed: implementer"),
+      711
+    );
+    expect(sendText.mock.calls[0]?.[1]).toContain("partial failure details");
+  });
+
+  test("timed-out subagent return_to_main without origin chat notifies admins directly", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    const sendTurn = vi.spyOn(service.codex, "sendTurn");
+    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+    const notifyOps = vi.spyOn(service.telegram, "notifyOps").mockResolvedValue();
+    const job: SubagentJob = {
+      id: "job_timeout0000000000000000000000000",
+      profile: "debugger",
+      route: "return_to_main",
+      status: "timed_out",
+      promptPath: "/tmp/prompt.md",
+      artifactDir: "/tmp/artifacts",
+      cancelReason: "timeout",
+      signal: "SIGTERM"
+    };
+
+    await (service as unknown as {
+      handleSubagentReturnToMain(job: SubagentJob, result: string): Promise<void>;
+    }).handleSubagentReturnToMain(job, "Subagent job_timeout0000000000000000000000000 (debugger) timed out: exit code null signal SIGTERM.");
+
+    expect(sendTurn).not.toHaveBeenCalled();
+    expect(sendText).not.toHaveBeenCalled();
+    expect(notifyOps).toHaveBeenCalledWith(expect.stringContaining("Subagent timed out: debugger"));
+  });
+
+  test("completed audio ingestion events pass prompt metadata and transcript to Codex", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    await service.state.saveAudioIngestion({
+      id: "ing_test",
+      status: "completed",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      keyIdentity: "shortcut",
+      metadata: {
+        source: "shortcut",
+        title: "Road note",
+        prompt: "Turn this into a concise task list."
+      },
+      file: {
+        kind: "audio",
+        localPath: "/tmp/recording.mp3",
+        mimeType: "audio/mpeg",
+        originalName: "recording.mp3",
+        sizeBytes: 8,
+        sha256: "abc123",
+        ingestionId: "ing_test"
+      },
+      transcription: {
+        status: "completed",
+        text: "Buy milk and schedule the appointment."
+      }
+    });
+    let turnInput: { text?: string; attachments?: unknown[]; source?: string } | undefined;
+    vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (input): AsyncIterable<CodexEvent> {
+      turnInput = input;
+      yield { type: "final", text: "   " };
+    });
+
+    await (service as unknown as {
+      enqueueAudioIngestionForCodex(event: {
+        keyIdentity: string;
+        result: {
+          ingestion_id: string;
+          status: string;
+          transcription: { status: string; text: string };
+        };
+      }): Promise<void>;
+    }).enqueueAudioIngestionForCodex({
+      keyIdentity: "shortcut",
+      result: {
+        ingestion_id: "ing_test",
+        status: "completed",
+        transcription: { status: "completed", text: "Buy milk and schedule the appointment." }
+      }
+    });
+    await waitForIdle(service);
+
+    expect(turnInput?.source).toBe("audio_ingest");
+    expect(turnInput?.text).toContain("Audio ingestion transcript received via POST /api/ingest/audio.");
+    expect(turnInput?.text).toContain("Caller prompt/instructions for handling this transcript after transcription:");
+    expect(turnInput?.text).toContain("Turn this into a concise task list.");
+    expect(turnInput?.text).toContain("Transcript:\nBuy milk and schedule the appointment.");
+    expect(turnInput?.attachments).toEqual([expect.objectContaining({ localPath: "/tmp/recording.mp3", kind: "audio" })]);
+    const day = new Date().toISOString().slice(0, 10);
+    const messages = await readFile(join(config.rootDir, "state", "messages", `${day}.jsonl`), "utf8");
+    expect(messages).toContain("\"source\":\"audio_ingest\"");
+    expect(messages).toContain("Turn this into a concise task list.");
   });
 
   test.each([

@@ -1,9 +1,10 @@
-import { extname, join, resolve } from "node:path";
+import { dirname, extname, join, resolve } from "node:path";
 import { writeFile } from "node:fs/promises";
 import { AppConfig, resolveConfigPath } from "./config.js";
 import { StateStore } from "./state.js";
 import { Attachment } from "./types.js";
 import { ensureDir, isInsidePath, nowIso, sha256Buffer } from "./util.js";
+import { audioIngestFileMetadata, audioIngestStoragePath, type AudioIngestMetadata } from "./audio-ingest.js";
 
 const mimeExtensions: Record<string, string> = {
   "image/jpeg": ".jpg",
@@ -70,6 +71,28 @@ export class FileStore {
     await this.state.saveFileMetadata(safeUnique, {
       ...attachment,
       receivedFromUserId: input.receivedFromUserId,
+      storedAt: nowIso()
+    });
+    return attachment;
+  }
+
+  async storeIngestedAudio(input: {
+    ingestionId: string;
+    buffer: Buffer;
+    mimeType?: string;
+    originalName?: string;
+    keyIdentity: string;
+    metadata: AudioIngestMetadata;
+  }): Promise<Attachment & { ingestionId: string }> {
+    const localPath = audioIngestStoragePath(this.fileRoot, input.ingestionId, input.originalName, input.mimeType);
+    await ensureDir(dirname(localPath));
+    await writeFile(localPath, input.buffer, { mode: 0o600 });
+    const attachment = audioIngestFileMetadata({ ...input, localPath });
+    await this.state.saveFileMetadata(input.ingestionId, {
+      ...attachment,
+      receivedVia: "audio_ingest",
+      keyIdentity: input.keyIdentity,
+      metadata: input.metadata,
       storedAt: nowIso()
     });
     return attachment;

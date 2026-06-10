@@ -30,7 +30,8 @@ const SECRET_PATTERNS: Array<{ regex: RegExp; replacement: string }> = [
   { regex: /AKIA[0-9A-Z]{16}/g, replacement: "[REDACTED:aws]" },
   // Generic bearer-token-ish strings in headers / json
   { regex: /(authorization\s*[:=]\s*"?(?:bearer\s+)?)[A-Za-z0-9._-]{20,}/gi, replacement: "$1[REDACTED]" },
-  { regex: /(api[_-]?key\s*[:=]\s*"?)[A-Za-z0-9._-]{20,}/gi, replacement: "$1[REDACTED]" }
+  { regex: /(api[_-]?key\s*[:=]\s*"?)[A-Za-z0-9._-]{20,}/gi, replacement: "$1[REDACTED]" },
+  { regex: /(CODEXCHAT_INGEST_API_KEYS\s*=\s*)[^\s]+/g, replacement: "$1[REDACTED]" }
 ];
 
 export function scrubSecrets(line: string): string {

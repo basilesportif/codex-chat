@@ -70,6 +70,12 @@ The shared workflow doc at `/home/tim/pkg/tim/assistant-agent-logic/config/TELEG
 - The service-level 👀 reaction still applies to voice messages.
 - If the transcript is unclear, ask for confirmation instead of guessing.
 
+## Audio Ingestion API Transcripts
+
+- `POST /api/ingest/audio` events arrive as `source: audio_ingest` after the service stores and transcribes the uploaded audio.
+- Treat the transcript as user-authored input. The optional uploaded `prompt` field is post-transcription metadata/instructions for handling that transcript; it is not a Whisper/OpenAI transcription prompt.
+- If no prompt is supplied, use the transcript and metadata to decide whether any action is needed. Do not assume Soundcore-specific behavior.
+
 ## Images and Files
 
 - Images and image documents arrive as local file paths.

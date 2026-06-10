@@ -44,6 +44,15 @@ userIds = []
 chatIds = []
 adminUserIds = []
 
+[api]
+# HTTP API for server-to-server integrations such as audio ingestion.
+# This also auto-enables when CODEXCHAT_INGEST_API_KEYS is set.
+enabled = false
+host = "127.0.0.1"
+port = 49346
+# Set true only when binding behind trusted private networking / reverse proxy.
+allowNonLocalhost = false
+
 [behavior]
 dir = "behavior"
 entrypoint = "AGENTS.md"
@@ -145,6 +154,12 @@ model = "gpt-4o-mini-transcribe"
 apiKeyEnv = "OPENAI_API_KEY"
 language = ""
 promptPath = ""
+
+[ingest]
+# Ingestion API keys are secret and read only from this env var. Format:
+# CODEXCHAT_INGEST_API_KEYS="iphone:secret-one,soundcore:secret-two"
+apiKeysEnv = "CODEXCHAT_INGEST_API_KEYS"
+audioMaxMb = 100
 
 [security]
 redactSecretsInLogs = true

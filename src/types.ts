@@ -92,7 +92,7 @@ export interface TelegramReplyContext {
 }
 
 export interface UserEvent {
-  source: "telegram" | "loop" | "monitor" | "subagent" | "system";
+  source: "telegram" | "loop" | "monitor" | "subagent" | "audio_ingest" | "system";
   chatId?: number;
   userId?: number;
   username?: string;

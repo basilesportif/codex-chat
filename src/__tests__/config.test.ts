@@ -18,11 +18,17 @@ const overrideEnvNames = [
   "CODEX_CHAT_CODEX_SANDBOX",
   "CODEX_CHAT_CODEX_APPROVAL_POLICY",
   "CODEX_CHAT_SUBAGENTS_BACKEND",
+  "CODEX_CHAT_API_ENABLED",
+  "CODEX_CHAT_API_HOST",
+  "CODEX_CHAT_API_PORT",
+  "CODEX_CHAT_API_ALLOW_NON_LOCALHOST",
   "CODEX_CHAT_TELEGRAM_MODE",
   "CODEX_CHAT_LOOPS_PATH",
   "CODEX_CHAT_MONITORS_PATH",
   "CODEX_CHAT_TRANSCRIPTION_ENABLED",
   "CODEX_CHAT_TRANSCRIPTION_PROMPT_PATH",
+  "CODEXCHAT_INGEST_API_KEYS",
+  "CODEXCHAT_AUDIO_INGEST_MAX_MB",
   "TELEGRAM_ALLOWED_USER_IDS",
   "TELEGRAM_ADMIN_USER_IDS",
   "CUSTOM_TELEGRAM_TOKEN"
@@ -67,6 +73,8 @@ userIds = [12345]
     expect(config.codex.model).toBe("gpt-test");
     expect(config.codex.sandbox).toBe("danger-full-access");
     expect(config.subagents.backend).toBe("codex_exec");
+    expect(config.api.enabled).toBe(false);
+    expect(config.ingest.audioMaxMb).toBe(100);
     expect(config.telegram.allowlist.userIds).toEqual([12345]);
     expect(config.rootDir).toBe(resolve(path, "../.."));
   });
@@ -110,6 +118,20 @@ backend = "codex_exec"
     const config = await loadConfig(path);
 
     expect(config.subagents.backend).toBe("codex_app_server");
+  });
+
+  test("loads audio ingest keys from environment without storing raw keys", async () => {
+    process.env.CODEXCHAT_INGEST_API_KEYS = "iphone:first-secret,second-secret";
+    process.env.CODEXCHAT_AUDIO_INGEST_MAX_MB = "42";
+    const path = await tempConfig("version = 1\n");
+
+    const config = await loadConfig(path);
+
+    expect(config.api.enabled).toBe(true);
+    expect(config.ingest.audioMaxMb).toBe(42);
+    expect(config.ingest.apiKeys).toHaveLength(2);
+    expect(config.ingest.apiKeys[0]).toMatchObject({ identity: "iphone" });
+    expect(config.ingest.apiKeys.map((key) => key.hash)).not.toContain("first-secret");
   });
 
 

@@ -22,12 +22,14 @@ function fakeChild() {
     stdout: EventEmitter;
     stderr: EventEmitter;
     exitCode: number | null;
+    signalCode: NodeJS.Signals | null;
     killed: boolean;
     kill: ReturnType<typeof vi.fn>;
   };
   child.stdout = new EventEmitter();
   child.stderr = new EventEmitter();
   child.exitCode = null;
+  child.signalCode = null;
   child.killed = false;
   child.kill = vi.fn(() => {
     child.killed = true;
@@ -164,6 +166,75 @@ describe("app-server subagent backend", () => {
     expect(sent.some((message) => message.method === "thread/resume")).toBe(false);
     expect(job.backendThreadId).toBe("subagent-thread");
     await started.kill("SIGTERM");
+    await backend.shutdown();
+  });
+
+  test("does not accept a stale websocket if the spawned subagent app-server exits during startup", async () => {
+    vi.resetModules();
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-subagent-backend-"));
+    tempDirs.push(root);
+    const child = fakeChild();
+    const spawn = vi.fn(() => {
+      queueMicrotask(() => {
+        child.exitCode = 1;
+        child.emit("exit", 1, null);
+      });
+      return child;
+    });
+    vi.doMock("node:child_process", async () => {
+      const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+      return { ...actual, spawn };
+    });
+    vi.doMock("ws", () => {
+      class FakeWebSocket extends EventEmitter {
+        static OPEN = 1;
+        readyState = 1;
+
+        constructor(readonly url: string) {
+          super();
+          queueMicrotask(() => this.emit("open"));
+        }
+
+        send(raw: string): void {
+          const message = JSON.parse(raw) as { id: number; method: string; params: Record<string, unknown> };
+          const result = message.method === "thread/start"
+            ? { thread: { id: "stale-subagent-thread" } }
+            : message.method === "turn/start" ? { turn: { id: "turn-stale" } } : {};
+          queueMicrotask(() => this.emit("message", JSON.stringify({ id: message.id, result })));
+        }
+
+        close(): void {
+          this.readyState = 3;
+          this.emit("close");
+        }
+      }
+      return { default: FakeWebSocket };
+    });
+    const { CodexAppServerChildAgentBackend } = await import("../subagent-backends.js");
+    const backend = new CodexAppServerChildAgentBackend(testConfig(root), fakeLogger() as never);
+    const job: SubagentJob = {
+      id: "job_stale0000000000000000000000000000",
+      profile: "implementer",
+      route: "return_to_main",
+      status: "running",
+      promptPath: join(root, "prompt.md"),
+      artifactDir: root
+    };
+
+    await expect(backend.start({
+      job,
+      assembledPrompt: "do work",
+      lastMessagePath: join(root, "last-message.md"),
+      stdoutPath: join(root, "events.jsonl"),
+      stderrPath: join(root, "stderr.log"),
+      appServerLogPath: join(root, "app-server.log"),
+      model: "gpt-test",
+      effort: "medium",
+      images: [],
+      onJobUpdated: vi.fn().mockResolvedValue(undefined)
+    })).rejects.toThrow(/exited during startup/);
+
+    expect(job.backendThreadId).toBeUndefined();
     await backend.shutdown();
   });
 });

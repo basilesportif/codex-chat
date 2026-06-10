@@ -272,7 +272,8 @@ class ChildAppServerSession {
       this.settle({ code, signal: signal ?? null, error });
     });
 
-    try {
+    const startupExit = this.rejectOnStartupExit(child);
+    const startupSequence = (async () => {
       await this.connectWithRetry(listenUrl);
       await this.request("initialize", {
         clientInfo: { name: "codex-chat-subagent", title: "codex-chat subagent", version: "0.1.0" },
@@ -280,9 +281,16 @@ class ChildAppServerSession {
       });
       await this.startThreadAndTurn();
       await this.input.onJobUpdated(this.input.job);
+    })();
+    try {
+      await Promise.race([startupSequence, startupExit.promise]);
+      if (!this.isAlive()) throw new Error(this.formatStartupExitMessage(child.exitCode, this.childSignalCode(child)));
     } catch (error) {
+      startupSequence.catch(() => undefined);
       this.rejectAll(error instanceof Error ? error : new Error(String(error)));
       throw error;
+    } finally {
+      startupExit.cleanup();
     }
 
     return {
@@ -329,8 +337,28 @@ class ChildAppServerSession {
 
   isAlive(): boolean {
     if (!this.child) return false;
-    const signalCode = (this.child as ChildProcess & { signalCode?: NodeJS.Signals | null }).signalCode;
-    return this.child.exitCode === null && signalCode === null;
+    return this.child.exitCode === null && this.childSignalCode(this.child) === null && !this.child.killed;
+  }
+
+  private rejectOnStartupExit(child: ChildProcess): { promise: Promise<never>; cleanup: () => void } {
+    let cleanup = (): void => undefined;
+    const promise = new Promise<never>((_resolve, reject) => {
+      const onExit = (code: number | null, signal: NodeJS.Signals | null): void => {
+        if (this.child !== child || this.stopping) return;
+        reject(new Error(this.formatStartupExitMessage(code, signal)));
+      };
+      child.once("exit", onExit);
+      cleanup = () => child.off("exit", onExit);
+    });
+    return { promise, cleanup };
+  }
+
+  private formatStartupExitMessage(code: number | null | undefined, signal: NodeJS.Signals | null | undefined): string {
+    return `Codex app-server subagent child exited during startup: code=${code ?? "null"} signal=${signal ?? "null"}`;
+  }
+
+  private childSignalCode(child: ChildProcess): NodeJS.Signals | null {
+    return (child as ChildProcess & { signalCode?: NodeJS.Signals | null }).signalCode ?? null;
   }
 
   private async startThreadAndTurn(): Promise<void> {

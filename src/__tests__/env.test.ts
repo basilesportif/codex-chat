@@ -2,8 +2,11 @@ import { describe, expect, test } from "vitest";
 import type { AppConfig } from "../config.js";
 import { childSecretEnvNames, sanitizeChildProcessEnv } from "../env.js";
 
-function config(apiKeyEnv = "TRANSCRIPTION_API_KEY"): Pick<AppConfig, "transcription"> {
-  return { transcription: { apiKeyEnv } } as Pick<AppConfig, "transcription">;
+function config(apiKeyEnv = "TRANSCRIPTION_API_KEY", ingestKeysEnv?: string): Pick<AppConfig, "transcription"> & Partial<Pick<AppConfig, "ingest">> {
+  return {
+    transcription: { apiKeyEnv },
+    ingest: ingestKeysEnv ? { apiKeysEnv: ingestKeysEnv } : undefined
+  } as Pick<AppConfig, "transcription"> & Partial<Pick<AppConfig, "ingest">>;
 }
 
 describe("child process environment sanitizer", () => {
@@ -38,5 +41,15 @@ describe("child process environment sanitizer", () => {
   test("reports the literal and configured secret env names", () => {
     expect(new Set(childSecretEnvNames(config("CUSTOM_TRANSCRIPTION_KEY")))).toEqual(new Set(["OPENAI_API_KEY", "CUSTOM_TRANSCRIPTION_KEY"]));
     expect(childSecretEnvNames(config("OPENAI_API_KEY"))).toEqual(["OPENAI_API_KEY"]);
+  });
+
+  test("strips configured ingest API key env", () => {
+    const sanitized = sanitizeChildProcessEnv(
+      config("CUSTOM_TRANSCRIPTION_KEY", "CODEXCHAT_INGEST_API_KEYS"),
+      { OPENAI_API_KEY: "parent", CUSTOM_TRANSCRIPTION_KEY: "parent", CODEXCHAT_INGEST_API_KEYS: "secret", OTHER_VAR: "keep" }
+    );
+
+    expect(sanitized).not.toHaveProperty("CODEXCHAT_INGEST_API_KEYS");
+    expect(sanitized.OTHER_VAR).toBe("keep");
   });
 });

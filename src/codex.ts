@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
+import { createServer } from "node:net";
 import WebSocket from "ws";
 import type { Logger } from "pino";
 import { AppConfig } from "./config.js";
@@ -180,7 +181,9 @@ export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient 
   async start(): Promise<void> {
     this.stopping = false;
     this.startupComplete = false;
+    this.connected = false;
     const listenUrl = `ws://${this.config.codex.appServerHost}:${this.config.codex.appServerPort}`;
+    await this.assertAppServerListenAddressAvailable();
     const args = ["app-server", "--listen", listenUrl];
     for (const item of this.config.codex.extraConfig) args.push("-c", item);
     this.logger.info({ component: "codex", event: "spawn_app_server", args }, "starting codex app-server");
@@ -217,13 +220,31 @@ export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient 
         this.onCrash?.(reason, { signal: signal ?? null, code: code ?? null, wasKilled, source: "process_exit" });
       }
     });
-    await this.connectWithRetry(listenUrl);
-    this.startupComplete = true;
-    await this.request("initialize", {
-      clientInfo: { name: "codex-chat", title: "codex-chat", version: "0.1.0" },
-      capabilities: { experimentalApi: true }
-    });
-    await this.ensureThread({ verifyExisting: true });
+    const startupExit = this.rejectOnStartupExit(child);
+    const startupSequence = (async () => {
+      await this.connectWithRetry(listenUrl);
+      await this.request("initialize", {
+        clientInfo: { name: "codex-chat", title: "codex-chat", version: "0.1.0" },
+        capabilities: { experimentalApi: true }
+      });
+      await this.ensureThread({ verifyExisting: true });
+    })();
+    try {
+      await Promise.race([startupSequence, startupExit.promise]);
+      if (!this.isChildAlive(child)) throw new Error(this.formatStartupExitMessage(child.exitCode, this.childSignalCode(child)));
+      this.startupComplete = true;
+    } catch (error) {
+      startupSequence.catch(() => undefined);
+      const failure = error instanceof Error ? error : new Error(String(error));
+      this.connected = false;
+      this.rejectAll(failure);
+      this.failActiveQueues(failure);
+      this.ws?.close();
+      if (this.child === child && this.isChildAlive(child)) killProcessTree(child, "SIGTERM");
+      throw failure;
+    } finally {
+      startupExit.cleanup();
+    }
   }
 
   async stop(): Promise<void> {
@@ -250,7 +271,7 @@ export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient 
 
   async health(): Promise<CodexHealth> {
     return {
-      ok: this.connected && !!this.child && this.child.exitCode === null,
+      ok: this.connected && this.isChildAlive(),
       transport: "app-server",
       sessionId: this.sessionId,
       detail: this.connected ? "connected" : "not connected"
@@ -528,6 +549,58 @@ export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient 
       }
     }
     throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  }
+
+  private async assertAppServerListenAddressAvailable(): Promise<void> {
+    const host = this.config.codex.appServerHost;
+    const port = this.config.codex.appServerPort;
+    const server = createServer();
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", (error: NodeJS.ErrnoException) => {
+          if (error.code === "EADDRINUSE") {
+            reject(new Error(`Codex app-server listen address ${host}:${port} is already in use before startup; refusing to attach to a possibly stale existing server.`));
+            return;
+          }
+          reject(error);
+        });
+        server.listen(port, host, () => resolve());
+      });
+    } finally {
+      await new Promise<void>((resolve) => {
+        if (!server.listening) {
+          resolve();
+          return;
+        }
+        server.close(() => resolve());
+      });
+    }
+  }
+
+  private rejectOnStartupExit(child: ChildProcess): { promise: Promise<never>; cleanup: () => void } {
+    let cleanup = (): void => undefined;
+    const promise = new Promise<never>((_resolve, reject) => {
+      const onExit = (code: number | null, signal: NodeJS.Signals | null): void => {
+        if (this.child !== child || this.stopping) return;
+        reject(new Error(this.formatStartupExitMessage(code, signal)));
+      };
+      child.once("exit", onExit);
+      cleanup = () => child.off("exit", onExit);
+    });
+    return { promise, cleanup };
+  }
+
+  private formatStartupExitMessage(code: number | null | undefined, signal: NodeJS.Signals | null | undefined): string {
+    return `Codex app-server child exited during startup: code=${code ?? "null"} signal=${signal ?? "null"}`;
+  }
+
+  private isChildAlive(child: ChildProcess | undefined = this.child): boolean {
+    if (!child) return false;
+    return child.exitCode === null && this.childSignalCode(child) === null && !child.killed;
+  }
+
+  private childSignalCode(child: ChildProcess): NodeJS.Signals | null {
+    return (child as ChildProcess & { signalCode?: NodeJS.Signals | null }).signalCode ?? null;
   }
 
   private async connect(url: string): Promise<void> {

@@ -2,6 +2,8 @@ import type { Logger } from "pino";
 import { spawn } from "node:child_process";
 import { readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { ApiGateway, type AudioIngestionCompletedEvent } from "./api.js";
+import type { AudioIngestMetadata } from "./audio-ingest.js";
 import { AppConfig, ensureConfiguredDirectories, resolveConfigPath } from "./config.js";
 import { BehaviorPack } from "./behavior.js";
 import { AppServerCodexClient, CodexCrashInfo } from "./codex.js";
@@ -219,6 +221,7 @@ export class ServiceSupervisor {
   readonly codex: CodexClient;
   readonly loops: LoopManager;
   readonly monitors: MonitorManager;
+  readonly api: ApiGateway;
   private readonly heartbeat: CodexHeartbeat;
   private readonly ipc: LocalIpcServer;
   private readonly subagents: SubagentManager;
@@ -246,6 +249,9 @@ export class ServiceSupervisor {
     this.behavior = new BehaviorPack(config);
     this.files = new FileStore(config, this.state);
     const transcriber = this.createTranscriber();
+    this.api = new ApiGateway(config, this.state, this.files, transcriber, logger, {
+      onAudioIngestionCompleted: (event) => this.enqueueAudioIngestionForCodex(event)
+    });
     if (config.codex.transport !== "app-server") {
       throw new Error(DISABLED_EXEC_RESUME_MESSAGE);
     }
@@ -268,18 +274,10 @@ export class ServiceSupervisor {
       logger,
       {
         onReturnToMain: async (job: SubagentJob, result: string) => {
-          await this.enqueueSynthetic(this.formatSubagentCallbackText(job, result), {
-            source: "subagent",
-            jobId: job.id,
-            profile: job.profile,
-            subagentStatus: job.status,
-            subagentResult: result,
-            originChatId: job.originChatId,
-            originMessageId: job.originMessageId
-          });
+          await this.handleSubagentReturnToMain(job, result);
         },
         onSendToUser: async (job: SubagentJob, result: string) => {
-          if (job.originChatId) await this.telegram.sendText(job.originChatId, result, job.originMessageId);
+          if (job.originChatId !== undefined) await this.telegram.sendText(job.originChatId, result, job.originMessageId);
         },
         onReturnToEmployee: async (job: SubagentJob, result: string) => {
           await this.employees.deliverChildSubagentResult(job, result);
@@ -379,6 +377,7 @@ export class ServiceSupervisor {
     await this.codex.start();
     await this.employees.recoverRuntimesOnStartup();
     await this.telegram.start();
+    await this.api.start();
     await this.recoverAbandonedWork();
     await this.ipc.start();
     if (this.config.loops.enabled) await syncCron(this.config, this.logger).catch((error) => this.logger.warn({ component: "loops", event: "cron_sync_failed", error: error instanceof Error ? { message: error.message, stack: error.stack } : String(error) }, "cron sync failed; loops will not fire on schedule until this is resolved"));
@@ -402,6 +401,7 @@ export class ServiceSupervisor {
     this.stopping = true;
     await this.telegram.notifyOps("codex-chat shutting down").catch(() => undefined);
     await this.ipc.stop().catch(() => undefined);
+    await this.api.stop().catch(() => undefined);
     await this.telegram.stop().catch(() => undefined);
     await this.monitors.stop().catch(() => undefined);
     this.heartbeat.stop();
@@ -496,6 +496,86 @@ export class ServiceSupervisor {
       return;
     }
     this.runTurn(event);
+  }
+
+  private async enqueueAudioIngestionForCodex(event: AudioIngestionCompletedEvent): Promise<void> {
+    const record = await this.state.readAudioIngestion(event.result.ingestion_id);
+    const metadata: AudioIngestMetadata = record?.metadata ?? event.result.metadata ?? {};
+    const transcript = record?.transcription?.text ?? event.result.transcription?.text ?? "";
+    const receivedAt = nowIso();
+    const attachments = record?.file ? [record.file] : [];
+    const userEvent: UserEvent = {
+      source: "audio_ingest",
+      text: this.formatAudioIngestionForCodex({
+        ingestionId: event.result.ingestion_id,
+        keyIdentity: event.keyIdentity,
+        metadata,
+        transcript,
+        audioPath: record?.file?.localPath
+      }),
+      transcript,
+      attachments,
+      metadata: {
+        audioIngestionId: event.result.ingestion_id,
+        audioIngestKeyIdentity: event.keyIdentity,
+        audioIngestMetadata: metadata,
+        audioIngestPrompt: metadata.prompt,
+        audioIngestFile: record?.file ? {
+          localPath: record.file.localPath,
+          mimeType: record.file.mimeType,
+          originalName: record.file.originalName,
+          sizeBytes: record.file.sizeBytes,
+          sha256: record.file.sha256
+        } : undefined
+      },
+      receivedAt
+    };
+    await this.state.recordMessage({
+      direction: "inbound",
+      source: "audio_ingest",
+      text: userEvent.text,
+      transcript,
+      attachments,
+      receivedAt,
+      metadata: userEvent.metadata
+    });
+    if (this.shouldQueueTurn()) {
+      await this.queueEvent("audio_ingest", userEvent);
+      return;
+    }
+    this.runTurn(userEvent);
+  }
+
+  private formatAudioIngestionForCodex(input: {
+    ingestionId: string;
+    keyIdentity: string;
+    metadata: { source?: string; device?: string; title?: string; recorded_at?: string; client_request_id?: string; notes?: string; prompt?: string };
+    transcript: string;
+    audioPath?: string;
+  }): string {
+    const metadataLines = [
+      `ingestion_id: ${input.ingestionId}`,
+      `authenticated_key_identity: ${input.keyIdentity}`,
+      input.metadata.source ? `source: ${this.compactJobText(input.metadata.source)}` : "",
+      input.metadata.device ? `device: ${this.compactJobText(input.metadata.device)}` : "",
+      input.metadata.title ? `title: ${this.compactJobText(input.metadata.title)}` : "",
+      input.metadata.recorded_at ? `recorded_at: ${this.compactJobText(input.metadata.recorded_at)}` : "",
+      input.metadata.client_request_id ? `client_request_id: ${this.compactJobText(input.metadata.client_request_id)}` : "",
+      input.metadata.notes ? `notes: ${this.compactJobText(input.metadata.notes)}` : "",
+      input.audioPath ? `audio_path: ${input.audioPath}` : ""
+    ].filter(Boolean).join("\n");
+    const prompt = input.metadata.prompt?.trim();
+    const promptSection = prompt
+      ? `Caller prompt/instructions for handling this transcript after transcription:\n${prompt}`
+      : "Caller prompt/instructions: none supplied. Use the transcript and metadata to decide whether any action is needed.";
+    const transcript = input.transcript.trim() || "(empty transcript)";
+    return [
+      "Audio ingestion transcript received via POST /api/ingest/audio.",
+      "Treat this as user-supplied audio content. The caller prompt is post-transcription metadata for codex-chat, not an OpenAI transcription prompt.",
+      metadataLines,
+      promptSection,
+      `Transcript:\n${transcript}`
+    ].filter(Boolean).join("\n\n");
   }
 
   async health(): Promise<Record<string, unknown>> {
@@ -991,6 +1071,74 @@ export class ServiceSupervisor {
         ? "cancelled"
         : job.status === "timed_out" ? "timed out" : "completed";
     return `Subagent ${job.id} (${job.profile}) ${status}.\n\nResult path: ${job.lastMessagePath ?? "unknown"}\n\n${result}`;
+  }
+
+  private async handleSubagentReturnToMain(job: SubagentJob, result: string): Promise<void> {
+    if (this.shouldDirectDeliverTerminalSubagent(job)) {
+      await this.deliverDirectTerminalSubagent(job, result);
+      return;
+    }
+    await this.enqueueSynthetic(this.formatSubagentCallbackText(job, result), {
+      source: "subagent",
+      jobId: job.id,
+      profile: job.profile,
+      subagentStatus: job.status,
+      subagentResult: result,
+      originChatId: job.originChatId,
+      originMessageId: job.originMessageId
+    });
+  }
+
+  private shouldDirectDeliverTerminalSubagent(job: SubagentJob): boolean {
+    return job.status === "failed" || job.status === "cancelled" || job.status === "timed_out";
+  }
+
+  private async deliverDirectTerminalSubagent(job: SubagentJob, result: string): Promise<void> {
+    const text = this.formatDirectTerminalSubagentText(job, result);
+    if (job.originChatId !== undefined) {
+      await this.telegram.sendText(job.originChatId, text, job.originMessageId);
+      return;
+    }
+    await this.telegram.notifyOps(text);
+  }
+
+  private formatDirectTerminalSubagentText(job: SubagentJob, result: string): string {
+    const label = job.status === "timed_out"
+      ? "timed out"
+      : job.status === "cancelled" ? "cancelled" : "failed";
+    const icon = job.status === "cancelled" ? "ℹ️" : "⚠️";
+    const lines = [
+      `${icon} Subagent ${label}: ${this.compactJobText(job.profile)} (${this.formatJobDisplayId(job)})`,
+      `job: ${job.id}`
+    ];
+    if (job.summary) lines.push(`task: ${this.truncateSubagentNotice(this.compactJobText(job.summary), 240)}`);
+    if (job.error) lines.push(`error: ${this.truncateSubagentNotice(this.compactJobText(job.error), 320)}`);
+    if (job.cancelReason && job.status !== "failed") lines.push(`reason: ${this.compactJobText(job.cancelReason)}`);
+    if (job.exitCode !== undefined || job.signal !== undefined) {
+      lines.push(`exit: ${job.exitCode ?? "null"} signal: ${job.signal ?? "null"}`);
+    }
+    const preview = this.subagentTerminalResultPreview(job, result);
+    if (preview) lines.push("", preview);
+    return lines.join("\n");
+  }
+
+  private subagentTerminalResultPreview(job: SubagentJob, result: string): string {
+    const trimmed = result.trim();
+    if (!trimmed) return "";
+    const escapedId = job.id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const escapedProfile = job.profile.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const headerPattern = new RegExp(
+      `^Subagent\\s+${escapedId}\\s+\\(${escapedProfile}\\)\\s+(?:failed|timed out|was cancelled):[^\\n]*(?:\\n\\n)?`,
+      "i"
+    );
+    const withoutHeader = trimmed.replace(headerPattern, "").trim();
+    if (withoutHeader !== trimmed) return withoutHeader ? this.truncateSubagentNotice(withoutHeader, 1400) : "";
+    return this.truncateSubagentNotice(trimmed, 1400);
+  }
+
+  private truncateSubagentNotice(text: string, maxChars: number): string {
+    if (text.length <= maxChars) return text;
+    return `${text.slice(0, Math.max(0, maxChars - 32)).trimEnd()}\n… (${text.length - Math.max(0, maxChars - 32)} chars omitted)`;
   }
 
   private async deliverSubagentFallbackIfNeeded(event: UserEvent): Promise<void> {

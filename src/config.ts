@@ -2,6 +2,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { z } from "zod";
+import { parseIngestApiKeys } from "./ingest-auth.js";
 import { ensureDir, pathExists, resolveFrom } from "./util.js";
 
 const effortSchema = z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]);
@@ -108,6 +109,12 @@ const configSchema = z.object({
       adminUserIds: z.array(telegramUserIdSchema).default([])
     }).default({ userIds: [], chatIds: [], adminUserIds: [] })
   }),
+  api: z.object({
+    enabled: z.boolean().default(false),
+    host: z.string().default("127.0.0.1"),
+    port: z.number().int().min(0).max(65535).default(49346),
+    allowNonLocalhost: z.boolean().default(false)
+  }),
   behavior: z.object({
     dir: z.string().default("behavior"),
     entrypoint: z.string().default("AGENTS.md"),
@@ -161,6 +168,11 @@ const configSchema = z.object({
     apiKeyEnv: z.string().default("OPENAI_API_KEY"),
     language: z.string().default(""),
     promptPath: z.string().default("")
+  }),
+  ingest: z.object({
+    apiKeysEnv: z.string().default("CODEXCHAT_INGEST_API_KEYS"),
+    apiKeys: z.array(z.object({ identity: z.string(), hash: z.string() })).default([]),
+    audioMaxMb: z.number().positive().default(100)
   }),
   security: z.object({
     redactSecretsInLogs: z.boolean().default(true),
@@ -217,6 +229,12 @@ const defaultConfig = configSchema.parse({
     opsChatId: 0,
     allowlist: { userIds: [], chatIds: [], adminUserIds: [] }
   },
+  api: {
+    enabled: false,
+    host: "127.0.0.1",
+    port: 49346,
+    allowNonLocalhost: false
+  },
   behavior: {
     dir: "behavior",
     entrypoint: "AGENTS.md",
@@ -271,6 +289,11 @@ const defaultConfig = configSchema.parse({
     language: "",
     promptPath: ""
   },
+  ingest: {
+    apiKeysEnv: "CODEXCHAT_INGEST_API_KEYS",
+    apiKeys: [],
+    audioMaxMb: 100
+  },
   security: {
     redactSecretsInLogs: true,
     requireLocalFileForSend: true,
@@ -306,6 +329,12 @@ function parseBooleanEnv(value: string): boolean {
   if (["1", "true", "yes", "on"].includes(value.toLowerCase())) return true;
   if (["0", "false", "no", "off"].includes(value.toLowerCase())) return false;
   throw new Error(`Invalid boolean environment override: ${value}`);
+}
+
+function parseNumberEnv(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) throw new Error(`Invalid numeric environment override: ${value}`);
+  return parsed;
 }
 
 function parseTelegramUserIdEnvList(value: string): Array<number | string> {
@@ -386,11 +415,16 @@ function collectEnvOverrides(env: NodeJS.ProcessEnv = process.env): Record<strin
     { name: "CODEX_CHAT_CODEX_SANDBOX", path: ["codex", "sandbox"] },
     { name: "CODEX_CHAT_CODEX_APPROVAL_POLICY", path: ["codex", "approvalPolicy"] },
     { name: "CODEX_CHAT_SUBAGENTS_BACKEND", path: ["subagents", "backend"] },
+    { name: "CODEX_CHAT_API_ENABLED", path: ["api", "enabled"], parse: parseBooleanEnv },
+    { name: "CODEX_CHAT_API_HOST", path: ["api", "host"] },
+    { name: "CODEX_CHAT_API_PORT", path: ["api", "port"], parse: parseNumberEnv },
+    { name: "CODEX_CHAT_API_ALLOW_NON_LOCALHOST", path: ["api", "allowNonLocalhost"], parse: parseBooleanEnv },
     { name: "CODEX_CHAT_TELEGRAM_MODE", path: ["telegram", "mode"] },
     { name: "CODEX_CHAT_LOOPS_PATH", path: ["loops", "path"] },
     { name: "CODEX_CHAT_MONITORS_PATH", path: ["monitors", "path"] },
     { name: "CODEX_CHAT_TRANSCRIPTION_ENABLED", path: ["transcription", "enabled"], parse: parseBooleanEnv },
-    { name: "CODEX_CHAT_TRANSCRIPTION_PROMPT_PATH", path: ["transcription", "promptPath"] }
+    { name: "CODEX_CHAT_TRANSCRIPTION_PROMPT_PATH", path: ["transcription", "promptPath"] },
+    { name: "CODEXCHAT_AUDIO_INGEST_MAX_MB", path: ["ingest", "audioMaxMb"], parse: parseNumberEnv }
   ];
   for (const spec of specs) {
     const value = env[spec.name];
@@ -420,7 +454,10 @@ export async function loadConfig(configPath = "config/codex-chat.toml"): Promise
   const rootDir = resolve(dirname(absoluteConfigPath), "..");
   const telegramBotToken = process.env[telegram.botTokenEnv];
   const openaiApiKey = process.env[config.transcription.apiKeyEnv];
-  return { ...config, telegram, configPath: absoluteConfigPath, rootDir, telegramBotToken, openaiApiKey };
+  const ingestApiKeys = parseIngestApiKeys(process.env[config.ingest.apiKeysEnv]);
+  const api = { ...config.api, enabled: config.api.enabled || ingestApiKeys.length > 0 };
+  const ingest = { ...config.ingest, apiKeys: ingestApiKeys };
+  return { ...config, api, ingest, telegram, configPath: absoluteConfigPath, rootDir, telegramBotToken, openaiApiKey };
 }
 
 export function resolveConfigPath(config: AppConfig, candidate: string): string {
@@ -432,6 +469,7 @@ export async function ensureConfiguredDirectories(config: AppConfig): Promise<vo
     config.service.stateDir,
     config.files.dir,
     config.files.artifactDir,
+    "data/files/audio-ingest",
     config.subagents.artifactDir,
     config.subagents.childSocketDir,
     config.employees.rootDir,

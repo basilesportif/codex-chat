@@ -11,8 +11,11 @@ export function createLogger(level: string, redactSecrets = true): Logger {
             "token",
             "openaiApiKey",
             "apiKey",
+            "ingestApiKey",
+            "ingestKey",
             "*.TELEGRAM_BOT_TOKEN",
-            "*.OPENAI_API_KEY"
+            "*.OPENAI_API_KEY",
+            "*.CODEXCHAT_INGEST_API_KEYS"
           ],
           censor: "[REDACTED]"
         }

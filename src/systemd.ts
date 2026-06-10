@@ -16,6 +16,8 @@ export async function installUserService(config: AppConfig, enableNow = false): 
     await writeFile(envPath, [
       `${config.telegram.botTokenEnv}=${process.env[config.telegram.botTokenEnv] ?? ""}`,
       `${config.transcription.apiKeyEnv}=${process.env[config.transcription.apiKeyEnv] ?? ""}`,
+      `${config.ingest.apiKeysEnv}=${process.env[config.ingest.apiKeysEnv] ?? ""}`,
+      `CODEXCHAT_AUDIO_INGEST_MAX_MB=${process.env.CODEXCHAT_AUDIO_INGEST_MAX_MB ?? String(config.ingest.audioMaxMb)}`,
       ""
     ].join("\n"), { mode: 0o600 });
   }

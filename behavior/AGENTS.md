@@ -285,9 +285,9 @@ For any reasoning, investigation, repo inspection, code or docs editing, code re
 
 Default routing rubric:
 
-- Mechanical, well-scoped code/docs edits with clear instructions and low blast radius: `model: "gpt-5.5"`, `effort: "medium"`.
-- Normal research, repo inspection, calendar/email lookup, external-data lookup, and non-trivial analysis: `model: "gpt-5.5"`, `effort: "high"`.
-- Risky, ambiguous, debugging, architecture, multi-step, cross-module, deploy-sensitive, or high-stakes tasks: `model: "gpt-5.5"`, `effort: "xhigh"`.
+- Most bounded research, repo-file inspection, log inspection, docs lookup/editing, calendar/email lookup, external-data lookup, and routine non-trivial analysis: `model: "gpt-5.5"`, `effort: "medium"`.
+- Coding, implementation, debugging, code review, architecture, cross-module work, deploy-sensitive work, or tasks with meaningful correctness risk: `model: "gpt-5.5"`, `effort: "high"`.
+- Very intensive research or especially risky, ambiguous, high-stakes, large-scope, multi-step, or production-sensitive tasks: `model: "gpt-5.5"`, `effort: "xhigh"`.
 - Simple deterministic main-loop work: use the current top-level model/effort and disclose it as `main_loop`.
 
 Subagent directive shape:
@@ -301,7 +301,7 @@ Subagent directive shape:
   "summary": "Short user-visible task summary",
   "prompt": "Detailed subagent task",
   "model": "gpt-5.5",
-  "effort": "high"
+  "effort": "medium"
 }
 ~~~
 
@@ -436,7 +436,7 @@ When the user sends a message like "stress test 5 subagents", "run stress test",
    - `summary`: a short user-visible task summary.
    - `prompt`: `"Read and summarize the file /home/tim/pkg/tim/codex-chat/src/<filename>.ts in 2-3 sentences."`
    - `model`: `"gpt-5.5"`
-   - `effort`: `"high"`
+   - `effort`: `"medium"`
 4. After the dispatch directives, emit a `send_text` directive telling the user: `"Dispatched N subagents. Use 'agents' to monitor progress."`
 
 The fan-out goes through Codex — you decide how many and which files. Do NOT use `dispatch_subagent` on the same file twice in the same batch.
@@ -448,11 +448,11 @@ The fan-out goes through Codex — you decide how many and which files. Do NOT u
 {
   "version": 1,
   "actions": [
-    { "type": "dispatch_subagent", "idempotencyKey": "stress-1-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize service.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/service.ts in 2-3 sentences.", "model": "gpt-5.5", "effort": "high" },
-    { "type": "dispatch_subagent", "idempotencyKey": "stress-2-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize codex.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/codex.ts in 2-3 sentences.", "model": "gpt-5.5", "effort": "high" },
-    { "type": "dispatch_subagent", "idempotencyKey": "stress-3-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize directives.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/directives.ts in 2-3 sentences.", "model": "gpt-5.5", "effort": "high" },
-    { "type": "dispatch_subagent", "idempotencyKey": "stress-4-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize telegram.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/telegram.ts in 2-3 sentences.", "model": "gpt-5.5", "effort": "high" },
-    { "type": "dispatch_subagent", "idempotencyKey": "stress-5-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize subagents.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/subagents.ts in 2-3 sentences.", "model": "gpt-5.5", "effort": "high" },
+    { "type": "dispatch_subagent", "idempotencyKey": "stress-1-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize service.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/service.ts in 2-3 sentences.", "model": "gpt-5.5", "effort": "medium" },
+    { "type": "dispatch_subagent", "idempotencyKey": "stress-2-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize codex.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/codex.ts in 2-3 sentences.", "model": "gpt-5.5", "effort": "medium" },
+    { "type": "dispatch_subagent", "idempotencyKey": "stress-3-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize directives.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/directives.ts in 2-3 sentences.", "model": "gpt-5.5", "effort": "medium" },
+    { "type": "dispatch_subagent", "idempotencyKey": "stress-4-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize telegram.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/telegram.ts in 2-3 sentences.", "model": "gpt-5.5", "effort": "medium" },
+    { "type": "dispatch_subagent", "idempotencyKey": "stress-5-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize subagents.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/subagents.ts in 2-3 sentences.", "model": "gpt-5.5", "effort": "medium" },
     { "type": "send_text", "idempotencyKey": "stress-ack-<msgId>", "chatId": 253768951, "text": "Dispatched 5 subagents. Use 'agents' to monitor progress." }
   ]
 }

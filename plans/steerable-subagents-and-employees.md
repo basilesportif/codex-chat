@@ -297,7 +297,7 @@ Directive surface:
 ```
 
 2. Consider `interrupt_subagent` only if `cancel_job` cannot express the desired graceful interrupt semantics. Prefer reusing `cancel_job` after it delegates to `turn/interrupt` for app-server jobs.
-3. Document steering in `behavior/directives.md` after implementation so the main Codex loop can steer child jobs when appropriate.
+3. Document steering in `behavior/AGENTS.md` after implementation so the main Codex loop can steer child jobs when appropriate; keep the directive schema source of truth in `src/directives.ts`.
 
 IPC/API path:
 

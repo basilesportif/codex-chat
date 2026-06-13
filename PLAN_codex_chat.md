@@ -580,7 +580,7 @@ Implementation details:
 - Store Telegram response metadata so file IDs can be reused.
 
 Generated images from imagegen are governed by the current behavior pack, not
-this planning note. See `behavior/AGENTS.md`, `behavior/directives.md`, and
+this planning note. See `behavior/AGENTS.md` and
 `behavior/subagents/implementer.md`: user image generation/editing requests
 dispatch an `implementer` subagent, stage the selected
 `/home/tim/.codex/generated_images` output under
@@ -649,7 +649,6 @@ Suggested structure:
 behavior/
   AGENTS.md
   router.md
-  directives.md
   skills/
     imagegen/
       SKILL.md
@@ -701,7 +700,7 @@ Users can customize or replace `AGENTS.md` to change how the main agent behaves.
 - Monitor match.
 - Subagent result.
 
-`directives.md` documents the directive JSON schema in prose for the agent.
+Directive schemas are defined in `src/directives.ts`; behavior guidance that tells the agent when and how to emit directives belongs in `AGENTS.md`.
 
 `skills/*/SKILL.md` follow the Claude Code style: each skill has a name, trigger rules, workflow, and output contract.
 

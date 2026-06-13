@@ -309,9 +309,8 @@ reserved for malformed directive blocks, leaked directive fragments, and other
 transport safety cases.
 
 User image generation and image-editing requests are also routed work. The
-current canonical behavior lives in `behavior/AGENTS.md`,
-`behavior/directives.md`, and `behavior/subagents/implementer.md`: dispatch an
-`implementer` subagent, let it use imagegen, copy the selected output from
+current canonical behavior lives in `behavior/AGENTS.md` and
+`behavior/subagents/implementer.md`: dispatch an `implementer` subagent, let it use imagegen, copy the selected output from
 `/home/tim/.codex/generated_images` into an allowed temporary path under
 `data/artifacts/generated-images/...`, then send that staged copy with
 `deleteAfterSend: true`. The service deletes the staged copy only after

@@ -274,7 +274,6 @@ async function loadTestConfig() {
   const configDir = join(root, "config");
   await mkdir(configDir, { recursive: true });
   await writeFile(join(root, "AGENTS.md"), "test behavior\n");
-  await writeFile(join(root, "directives.md"), "");
   await writeFile(join(root, "loops.json"), JSON.stringify({ version: 1, defaults: {}, loops: [] }));
   await writeFile(join(root, "monitors.json"), JSON.stringify({ version: 1, monitors: [] }));
   await writeFile(join(configDir, "codex-chat.toml"), `

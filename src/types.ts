@@ -130,6 +130,8 @@ export interface CodexClient {
   stop(): Promise<void>;
   health(): Promise<CodexHealth>;
   sendTurn(input: CodexTurnInput): AsyncIterable<CodexEvent>;
+  /** Drop the current main thread/session and create a fresh one. */
+  resetSession?(reason?: string): Promise<CodexHealth>;
   /** Optional — clients may expose recent app-server output for introspection. */
   getRecentLogs?(n?: number, includeRaw?: boolean): string[];
 }

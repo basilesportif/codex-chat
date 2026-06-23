@@ -278,6 +278,19 @@ export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient 
     };
   }
 
+  async resetSession(reason = "manual_reset"): Promise<CodexHealth> {
+    this.assertConnected();
+    const previousSessionId = this.sessionId;
+    this.logger.warn(
+      { component: "codex", event: "reset_session", reason, previousSessionId },
+      "resetting Codex app-server main session"
+    );
+    this.sessionId = undefined;
+    await this.state.clearCodexSession(this.config.codex.mainSessionName);
+    await this.ensureThread({ forceNew: true });
+    return this.health();
+  }
+
 
   async *sendTurn(input: CodexTurnInput): AsyncIterable<CodexEvent> {
     this.assertConnected();
@@ -312,14 +325,17 @@ export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient 
     };
     this.notificationHandlers.add(handler);
     this.activeQueues.add(queue);
+    let turnCompletionTimer: ReturnType<typeof setTimeout> | undefined;
     try {
       const response = await this.startTurnRequest(userInput);
       const turn = response.turn as Record<string, unknown> | undefined;
       turnId = typeof turn?.id === "string" ? turn.id : "";
       if (!turnId) throw new Error("Codex app-server did not return a turn id");
       this.logBuffer.append("event", scrubSecrets(`[TURN START] turn_id=${turnId} session_id=${this.sessionId ?? "?"}`));
+      turnCompletionTimer = this.startTurnCompletionTimer(queue, turnId, "main");
       for await (const event of queue.iterate()) yield event;
     } finally {
+      if (turnCompletionTimer) clearTimeout(turnCompletionTimer);
       this.notificationHandlers.delete(handler);
       this.activeQueues.delete(queue);
       queue.close();
@@ -393,6 +409,7 @@ export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient 
     };
     this.notificationHandlers.add(handler);
     this.activeQueues.add(queue);
+    let turnCompletionTimer: ReturnType<typeof setTimeout> | undefined;
     try {
       const response = await this.request<Record<string, unknown>>("turn/start", {
         threadId: input.backendThreadId,
@@ -407,8 +424,10 @@ export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient 
       if (!turnId) throw new Error(`Codex app-server did not return a turn id for Employee ${input.id}`);
       await input.onTurnStarted?.(turnId);
       this.logBuffer.append("event", scrubSecrets(`[EMPLOYEE TURN START] employee=${input.id} turn_id=${turnId} thread_id=${input.backendThreadId}`));
+      turnCompletionTimer = this.startTurnCompletionTimer(queue, turnId, `employee:${input.id}`);
       for await (const event of queue.iterate()) yield event;
     } finally {
+      if (turnCompletionTimer) clearTimeout(turnCompletionTimer);
       this.notificationHandlers.delete(handler);
       this.activeQueues.delete(queue);
       queue.close();
@@ -697,6 +716,15 @@ export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient 
         }
       });
     });
+  }
+
+  private startTurnCompletionTimer(queue: AsyncQueue<CodexEvent>, turnId: string, scope: string): ReturnType<typeof setTimeout> {
+    const timeoutMs = this.config.codex.turnTimeoutSec * 1000;
+    return setTimeout(() => {
+      const error = new Error(`Codex app-server turn timed out after ${this.config.codex.turnTimeoutSec}s without completion: ${turnId}`);
+      this.logger.warn({ component: "codex", event: "turn_completion_timeout", turnId, scope, timeoutMs }, error.message);
+      queue.fail(error);
+    }, timeoutMs);
   }
 
   private rejectAll(error: Error): void {

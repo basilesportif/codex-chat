@@ -336,6 +336,7 @@ describe("service supervisor", () => {
     await service.state.init();
     const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
     vi.spyOn(service.telegram, "notifyOps").mockResolvedValue();
+    const clearCodexSession = vi.spyOn(service.state, "clearCodexSession");
     const restartCodex = vi.spyOn(service as unknown as { restartCodex(reason: string): Promise<void> }, "restartCodex").mockResolvedValue();
     const blockedTurn = deferred();
     vi.spyOn(service as unknown as { processEvent(event: UserEvent): Promise<void> }, "processEvent").mockReturnValue(blockedTurn.promise);
@@ -346,6 +347,7 @@ describe("service supervisor", () => {
     await (service as unknown as { checkTurnTimeout(): Promise<void> }).checkTurnTimeout();
 
     expect(sendText).toHaveBeenCalledWith(253768951, "⚠️ Your previous request timed out after 80 seconds. Please resend your message.", 80);
+    expect(clearCodexSession).toHaveBeenCalledWith("codex-chat-main");
     expect(restartCodex).toHaveBeenCalledWith(expect.stringContaining("Watchdog force-aborted a stuck turn"));
     expect((service as unknown as { turnRunning: boolean }).turnRunning).toBe(false);
     blockedTurn.resolve();
@@ -859,6 +861,167 @@ describe("service supervisor", () => {
     expect(messages).toContain("Turn this into a concise task list.");
   });
 
+  test("diarized Telegram audio dispatches a subagent instead of running the main turn first", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    const sendTurn = vi.spyOn(service.codex, "sendTurn");
+    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+    const dispatch = vi.spyOn((service as unknown as {
+      subagents: { dispatch(input: Record<string, unknown>): Promise<string> };
+    }).subagents, "dispatch").mockResolvedValue("job_diarized_audio");
+
+    await service.enqueueUserEvent({
+      ...userEvent(800, [
+        "Previous Telegram message requested speaker diarization: Please diarize the next MP3 by speaker.",
+        "",
+        "Diarized audio transcript:",
+        "A: Hello.",
+        "B: Hi.",
+        "",
+        "Speaker segments:",
+        "- A [0.0s-1.2s]: Hello.",
+        "- B [1.2s-2.4s]: Hi."
+      ].join("\n")),
+      transcript: "A: Hello.\nB: Hi.",
+      metadata: {
+        telegramMessageId: 800,
+        telegramAudioTranscriptionMode: "diarize",
+        telegramAudioRequestKind: "diarize",
+        telegramAudioRequestSource: "previous",
+        telegramAudioRequestSnippet: "Please diarize the next MP3 by speaker.",
+        telegramAudioPath: "/tmp/meeting.mp3"
+      }
+    });
+
+    expect(sendTurn).not.toHaveBeenCalled();
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({
+      profile: "researcher",
+      route: "return_to_main",
+      ownerType: "main",
+      ownerRequestId: "telegram-diarize:253768951:800",
+      resultTarget: "main",
+      originChatId: 253768951,
+      originMessageId: 800,
+      model: "gpt-5.5",
+      effort: "high",
+      summary: expect.stringContaining("Process diarized Telegram audio")
+    }));
+    const prompt = dispatch.mock.calls[0]?.[0]?.prompt as string;
+    expect(prompt).toContain("trusted codex-chat service has already performed transcription/diarization");
+    expect(prompt).toContain("Do not attempt to transcribe or diarize the audio again");
+    expect(prompt).toContain("Diarized audio transcript:");
+    expect(prompt).toContain("Speaker segments:");
+    expect(sendText).toHaveBeenCalledWith(
+      253768951,
+      expect.stringContaining("Sub: Process diarized Telegram audio"),
+      800
+    );
+  });
+
+  test("regular Telegram audio stays on the normal main-loop path without subagent dispatch", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    const dispatch = vi.spyOn((service as unknown as {
+      subagents: { dispatch(input: Record<string, unknown>): Promise<string> };
+    }).subagents, "dispatch").mockResolvedValue("job_should_not_start");
+    vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
+      yield { type: "final", text: "Main loop handled regular audio." };
+    });
+    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+
+    await service.enqueueUserEvent({
+      ...userEvent(801, "Audio transcript:\nRegular transcript text."),
+      transcript: "Regular transcript text.",
+      metadata: {
+        telegramMessageId: 801,
+        telegramAudioTranscriptionMode: "regular",
+        telegramAudioShouldAskForContext: true
+      }
+    });
+    await waitForIdle(service);
+
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(sendText).toHaveBeenCalledWith(253768951, "Main loop handled regular audio.", 801);
+  });
+
+  test("diarized audio ingestion dispatches a subagent after trusted service-side diarization", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    await service.state.saveAudioIngestion({
+      id: "ing_diarized",
+      status: "completed",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      keyIdentity: "shortcut",
+      metadata: {
+        source: "shortcut",
+        title: "Team meeting",
+        prompt: "Summarize decisions and action items.",
+        transcription_mode: "diarize"
+      },
+      file: {
+        kind: "audio",
+        localPath: "/tmp/team.mp3",
+        mimeType: "audio/mpeg",
+        originalName: "team.mp3",
+        sizeBytes: 8,
+        sha256: "abc123",
+        ingestionId: "ing_diarized"
+      },
+      transcription: {
+        status: "completed",
+        mode: "diarize",
+        text: "A: We ship Friday.\nB: I will update docs.",
+        speakerSegments: [
+          { id: "seg_1", start: 0, end: 1.5, speaker: "A", text: "We ship Friday." },
+          { id: "seg_2", start: 1.5, end: 3, speaker: "B", text: "I will update docs." }
+        ]
+      }
+    });
+    const sendTurn = vi.spyOn(service.codex, "sendTurn");
+    const dispatch = vi.spyOn((service as unknown as {
+      subagents: { dispatch(input: Record<string, unknown>): Promise<string> };
+    }).subagents, "dispatch").mockResolvedValue("job_ingest_diarized");
+
+    await (service as unknown as {
+      enqueueAudioIngestionForCodex(event: {
+        keyIdentity: string;
+        result: {
+          ingestion_id: string;
+          status: string;
+          transcription: { status: string; mode?: string; text: string };
+        };
+      }): Promise<void>;
+    }).enqueueAudioIngestionForCodex({
+      keyIdentity: "shortcut",
+      result: {
+        ingestion_id: "ing_diarized",
+        status: "completed",
+        transcription: { status: "completed", mode: "diarize", text: "A: We ship Friday.\nB: I will update docs." }
+      }
+    });
+
+    expect(sendTurn).not.toHaveBeenCalled();
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({
+      profile: "researcher",
+      route: "return_to_main",
+      ownerRequestId: "audio-ingest-diarize:ing_diarized",
+      summary: "Process diarized audio: Team meeting",
+      originChatId: undefined,
+      originMessageId: undefined
+    }));
+    const prompt = dispatch.mock.calls[0]?.[0]?.prompt as string;
+    expect(prompt).toContain("Audio ingestion transcript received via POST /api/ingest/audio.");
+    expect(prompt).toContain("Summarize decisions and action items.");
+    expect(prompt).toContain("Speaker segments:");
+  });
+
   test.each([
     ["ping"],
     ["list todos"],
@@ -878,6 +1041,78 @@ describe("service supervisor", () => {
     await waitForIdle(service);
 
     expect(sendText).toHaveBeenCalledWith(253768951, "Pong.", 501);
+  });
+
+  test("resets the main Codex session after a terminal stream-disconnect error with no output", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    const resetSession = vi.fn().mockResolvedValue({ ok: true, transport: "app-server", sessionId: "fresh-thread" });
+    service.codex.resetSession = resetSession;
+    vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
+      yield {
+        type: "error",
+        message: JSON.stringify({
+          error: {
+            message: "stream disconnected before completion: An error occurred while processing your request.",
+            codexErrorInfo: "other"
+          },
+          willRetry: false
+        }),
+        raw: {
+          error: {
+            message: "stream disconnected before completion: An error occurred while processing your request.",
+            codexErrorInfo: "other"
+          },
+          willRetry: false
+        }
+      };
+      yield { type: "final", text: "" };
+    });
+    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+    vi.spyOn(service.telegram, "notifyOps").mockResolvedValue();
+
+    await service.enqueueUserEvent(userEvent(511, "hello"));
+    await waitForIdle(service);
+
+    expect(resetSession).toHaveBeenCalledWith("terminal_stream_disconnect");
+    expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("Codex encountered an error:"), 511);
+  });
+
+  test("does not reset the main Codex session for usage limit errors", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    const resetSession = vi.fn().mockResolvedValue({ ok: true, transport: "app-server", sessionId: "fresh-thread" });
+    service.codex.resetSession = resetSession;
+    vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
+      yield {
+        type: "error",
+        message: JSON.stringify({
+          error: {
+            message: "You've hit your usage limit.",
+            codexErrorInfo: "usageLimitExceeded"
+          },
+          willRetry: false
+        }),
+        raw: {
+          error: {
+            message: "You've hit your usage limit.",
+            codexErrorInfo: "usageLimitExceeded"
+          },
+          willRetry: false
+        }
+      };
+      yield { type: "final", text: "" };
+    });
+    vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+
+    await service.enqueueUserEvent(userEvent(512, "hello"));
+    await waitForIdle(service);
+
+    expect(resetSession).not.toHaveBeenCalled();
   });
 
   test("dispatches a subagent when Codex chooses subagent routing for a research prompt", async () => {

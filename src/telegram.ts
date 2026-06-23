@@ -527,6 +527,8 @@ export class TelegramGateway {
     let text = "text" in message && typeof message.text === "string" ? message.text : "";
     if ("caption" in message && typeof message.caption === "string") text = message.caption;
     const reply = extractTelegramReplyContext(message);
+    const eventMetadata: Record<string, unknown> = { telegramMessageId: message.message_id };
+    let eventTranscript: string | undefined;
 
     if ("photo" in message && Array.isArray(message.photo) && message.photo.length > 0) {
       attachments.push(await this.downloadTelegramFile("image", message.photo.at(-1)));
@@ -539,6 +541,7 @@ export class TelegramGateway {
       attachments.push(attachment);
       if (this.config.transcription.enabled) {
         const transcript = await this.transcriber.transcribe({ path: attachment.localPath, mode: "regular" });
+        eventTranscript = transcript.text;
         text = [
           text,
           "Voice transcript:",
@@ -565,6 +568,17 @@ export class TelegramGateway {
           isMp3: isMp3AudioAttachment(attachment, message.audio)
         });
         const transcript = await this.transcriber.transcribe({ path: attachment.localPath, mode: decision.mode });
+        eventTranscript = transcript.text;
+        eventMetadata.telegramAudioTranscriptionMode = transcript.mode ?? decision.mode;
+        eventMetadata.telegramAudioRequestKind = decision.requestKind;
+        eventMetadata.telegramAudioRequestSource = decision.requestSource;
+        eventMetadata.telegramAudioRequestSnippet = decision.requestSnippet;
+        eventMetadata.telegramAudioShouldAskForContext = decision.shouldAskForContext;
+        eventMetadata.telegramAudioModel = transcript.model;
+        eventMetadata.telegramAudioSpeakerSegments = transcript.speakerSegments;
+        eventMetadata.telegramAudioPath = attachment.localPath;
+        eventMetadata.telegramAudioOriginalName = attachment.originalName;
+        eventMetadata.telegramAudioMimeType = attachment.mimeType;
         text = this.formatAudioTranscriptForEvent({
           caption: text,
           transcript,
@@ -587,6 +601,7 @@ export class TelegramGateway {
       reply,
       text,
       attachments,
+      metadata: eventMetadata,
       receivedAt: nowIso()
     });
 
@@ -598,9 +613,10 @@ export class TelegramGateway {
       messageId: message.message_id,
       reply,
       text,
+      transcript: eventTranscript,
       attachments,
       receivedAt: nowIso(),
-      metadata: { telegramMessageId: message.message_id }
+      metadata: eventMetadata
     });
   }
 

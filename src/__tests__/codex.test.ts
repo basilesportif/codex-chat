@@ -441,4 +441,61 @@ describe("codex clients", () => {
     expect(state.setCodexSession).toHaveBeenCalledWith("codex-chat-main", expect.objectContaining({ sessionId: "fresh-thread" }));
     await client.stop();
   });
+
+  test("fails an app-server turn when no completion event arrives", async () => {
+    vi.resetModules();
+    const spawn = vi.fn(() => fakeChild());
+    vi.doMock("node:child_process", async () => {
+      const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+      return { ...actual, spawn };
+    });
+    vi.doMock("ws", () => {
+      class FakeWebSocket extends EventEmitter {
+        static OPEN = 1;
+        readyState = 1;
+
+        constructor(readonly url: string) {
+          super();
+          queueMicrotask(() => this.emit("open"));
+        }
+
+        send(raw: string): void {
+          const message = JSON.parse(raw) as { id: number; method: string };
+          if (message.method === "turn/start") {
+            queueMicrotask(() => this.emit("message", JSON.stringify({ id: message.id, result: { turn: { id: "turn-silent" } } })));
+            return;
+          }
+          const result = message.method === "thread/start" ? { thread: { id: "main-thread" } } : {};
+          queueMicrotask(() => this.emit("message", JSON.stringify({ id: message.id, result })));
+        }
+
+        close(): void {
+          this.readyState = 3;
+        }
+      }
+      return { default: FakeWebSocket };
+    });
+    const { AppServerCodexClient } = await import("../codex.js");
+    const state = {
+      getCodexSession: vi.fn().mockResolvedValue(undefined),
+      setCodexSession: vi.fn().mockResolvedValue(undefined)
+    };
+    const behavior = {
+      loadBootstrapPrompt: vi.fn().mockResolvedValue("bootstrap"),
+      hash: vi.fn().mockResolvedValue("hash")
+    };
+    const config = testConfig("/tmp/codex-chat-test");
+    config.codex.turnTimeoutSec = 0.01;
+    const client = new AppServerCodexClient(config, state as never, behavior as never, fakeLogger() as never);
+
+    await client.start();
+    const consume = async (): Promise<void> => {
+      for await (const _event of client.sendTurn({ text: "hello" })) {
+        // No events are expected; the fake server intentionally never completes.
+      }
+    };
+
+    await expect(consume()).rejects.toThrow(/turn timed out after 0\.01s without completion: turn-silent/);
+    await client.stop();
+  });
 });

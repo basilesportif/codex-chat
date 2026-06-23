@@ -317,6 +317,13 @@ describe("Telegram reply context extraction", () => {
     expect(transcribe).toHaveBeenCalledWith({ path: "/tmp/meeting.mp3", mode: "diarize" });
     expect(onUserEvent).toHaveBeenCalledWith(expect.objectContaining({
       source: "telegram",
+      transcript: "A: Hello.\nB: Hi.",
+      metadata: expect.objectContaining({
+        telegramAudioTranscriptionMode: "diarize",
+        telegramAudioRequestKind: "diarize",
+        telegramAudioRequestSource: "previous",
+        telegramAudioPath: "/tmp/meeting.mp3"
+      }),
       text: expect.stringContaining("Diarized audio transcript:")
     }));
     const text = onUserEvent.mock.calls[0]?.[0]?.text as string;

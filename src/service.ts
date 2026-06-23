@@ -83,6 +83,15 @@ type QueuedEvent = {
 type DispatchSubagentAction = Extract<DirectiveAction, { type: "dispatch_subagent" }>;
 type SendTextAction = Extract<DirectiveAction, { type: "send_text" }>;
 
+interface DiarizedAudioSubagentRequest {
+  source: "telegram" | "audio_ingest";
+  event: UserEvent;
+  summary: string;
+  ownerRequestId: string;
+  eventText: string;
+  dispatchNote?: string;
+}
+
 export function injectFilePath(config: AppConfig): string {
   return join(config.service.workspace, "inject.json");
 }
@@ -467,12 +476,12 @@ export class ServiceSupervisor {
         return;
       }
     }
-    const key = event.chatId ? String(event.chatId) : "system";
-    if (this.shouldQueueTurn()) {
-      await this.queueEvent(key, event);
+
+    if (await this.dispatchDiarizedTelegramAudioIfNeeded(event)) {
       return;
     }
-    this.runTurn(event);
+
+    await this.enqueueMainEvent(event.chatId ? String(event.chatId) : "system", event);
   }
 
   async enqueueSynthetic(text: string, metadata?: Record<string, unknown>): Promise<void> {
@@ -491,11 +500,7 @@ export class ServiceSupervisor {
       metadata,
       receivedAt: nowIso()
     };
-    if (this.shouldQueueTurn()) {
-      await this.queueEvent("system", event);
-      return;
-    }
-    this.runTurn(event);
+    await this.enqueueMainEvent("system", event);
   }
 
   private async enqueueAudioIngestionForCodex(event: AudioIngestionCompletedEvent): Promise<void> {
@@ -544,11 +549,157 @@ export class ServiceSupervisor {
       receivedAt,
       metadata: userEvent.metadata
     });
-    if (this.shouldQueueTurn()) {
-      await this.queueEvent("audio_ingest", userEvent);
+    const mode = record?.transcription?.mode ?? event.result.transcription?.mode;
+    if (mode === "diarize" && await this.dispatchDiarizedAudioSubagent({
+      source: "audio_ingest",
+      event: userEvent,
+      summary: this.compactJobText(`Process diarized audio${metadata.title ? `: ${metadata.title}` : ""}`).slice(0, 160),
+      ownerRequestId: `audio-ingest-diarize:${event.result.ingestion_id}`,
+      eventText: userEvent.text,
+      dispatchNote: "Diarized audio ingestion is ready; processing speaker-labelled output in a subagent."
+    })) {
       return;
     }
-    this.runTurn(userEvent);
+
+    await this.enqueueMainEvent("audio_ingest", userEvent);
+  }
+
+  private async enqueueMainEvent(key: string, event: UserEvent): Promise<void> {
+    if (this.shouldQueueTurn()) {
+      await this.queueEvent(key, event);
+      return;
+    }
+    this.runTurn(event);
+  }
+
+  private async dispatchDiarizedTelegramAudioIfNeeded(event: UserEvent): Promise<boolean> {
+    if (event.source !== "telegram") return false;
+    if (event.metadata?.telegramAudioTranscriptionMode !== "diarize") return false;
+    const requestKind = typeof event.metadata.telegramAudioRequestKind === "string" ? event.metadata.telegramAudioRequestKind : undefined;
+    const requestSource = typeof event.metadata.telegramAudioRequestSource === "string" ? event.metadata.telegramAudioRequestSource : undefined;
+    const requestSnippet = typeof event.metadata.telegramAudioRequestSnippet === "string" ? event.metadata.telegramAudioRequestSnippet : undefined;
+    const summaryParts = ["Process diarized Telegram audio"];
+    if (requestKind === "diarize") summaryParts.push("speaker request");
+    const summary = this.compactJobText(summaryParts.join(" — ")).slice(0, 160);
+    const ownerRequestId = `telegram-diarize:${event.chatId ?? "no-chat"}:${event.messageId ?? event.receivedAt}`;
+    const contextLines = [
+      requestSource && requestKind ? `Detected Telegram ${requestSource} request: ${requestKind}` : "",
+      requestSnippet ? `Request snippet: ${requestSnippet}` : "",
+      event.metadata.telegramAudioPath ? `Audio path: ${event.metadata.telegramAudioPath}` : ""
+    ].filter(Boolean).join("\n");
+    const eventText = contextLines ? `${contextLines}\n\n${event.text}` : event.text;
+    return this.dispatchDiarizedAudioSubagent({
+      source: "telegram",
+      event,
+      summary,
+      ownerRequestId,
+      eventText,
+      dispatchNote: "Diarized transcript is ready; processing speaker-labelled output in a subagent."
+    });
+  }
+
+  private async dispatchDiarizedAudioSubagent(input: DiarizedAudioSubagentRequest): Promise<boolean> {
+    const profile = "researcher";
+    const model = this.subagents.resolveModel(this.config.subagents.defaultModel || this.config.codex.model);
+    const effort = "high";
+    const prompt = this.formatDiarizedAudioSubagentPrompt(input);
+    try {
+      const jobId = await this.subagents.dispatch({
+        profile,
+        prompt,
+        route: "return_to_main",
+        ownerType: "main",
+        ownerId: "main",
+        ownerRequestId: input.ownerRequestId,
+        resultTarget: "main",
+        timeoutSec: 1800,
+        model,
+        effort,
+        summary: input.summary,
+        originChatId: input.event.chatId,
+        originMessageId: input.event.messageId
+      });
+      this.logger.info({
+        component: "service",
+        event: "diarized_audio_subagent_dispatched",
+        source: input.source,
+        jobId,
+        chatId: input.event.chatId,
+        messageId: input.event.messageId,
+        ownerRequestId: input.ownerRequestId
+      }, "diarized audio handling dispatched to subagent");
+      if (input.event.chatId !== undefined) {
+        await this.telegram.sendText(
+          input.event.chatId,
+          this.formatServiceSubagentDispatchSummary({ summary: input.summary, profile, model, effort, followupText: input.dispatchNote }),
+          input.event.messageId
+        ).catch((error) => {
+          this.logger.warn({ component: "service", event: "diarized_audio_dispatch_ack_failed", error }, "failed to send diarized audio subagent dispatch acknowledgement");
+        });
+      }
+      return true;
+    } catch (error) {
+      this.logger.error({
+        component: "service",
+        event: "diarized_audio_subagent_dispatch_failed",
+        source: input.source,
+        chatId: input.event.chatId,
+        messageId: input.event.messageId,
+        ownerRequestId: input.ownerRequestId,
+        error
+      }, "failed to dispatch diarized audio subagent; falling back to main loop");
+      return false;
+    }
+  }
+
+  private formatServiceSubagentDispatchSummary(input: {
+    summary: string;
+    profile: string;
+    model: string;
+    effort: string;
+    followupText?: string;
+  }): string {
+    const lines = [`Sub: ${input.summary}`, `${input.profile} · ${input.model} · ${input.effort}`];
+    if (input.followupText) lines.push("", input.followupText);
+    return lines.join("\n");
+  }
+
+  private formatDiarizedAudioSubagentPrompt(input: DiarizedAudioSubagentRequest): string {
+    const header = [
+      "# Diarized audio handling subagent task",
+      "",
+      "A trusted codex-chat service has already performed transcription/diarization with the service-side OpenAI API key.",
+      "Do not attempt to transcribe or diarize the audio again, do not call OpenAI audio APIs, and do not request or expose secrets.",
+      "Use only the supplied transcript, speaker segments, metadata, and caller/Telegram instructions.",
+      "Speaker labels are model-generated and may be generic; preserve them, but do not infer real identities unless the supplied text clearly establishes them.",
+      "",
+      "Task:",
+      "- Interpret, format, summarize, or otherwise use the diarized output according to the supplied instructions.",
+      "- If the only instruction is to diarize/transcribe, return a concise speaker-labelled summary with key points/action items and note any uncertainty.",
+      "- If intent is unclear, ask a concise follow-up rather than assuming a source-specific workflow.",
+      "- Return concise findings for the main loop to deliver or act on."
+    ].join("\n");
+    const source = [
+      "",
+      "## Source",
+      `source: ${input.source}`,
+      input.event.chatId !== undefined ? `telegram_chat_id: ${input.event.chatId}` : "",
+      input.event.messageId !== undefined ? `telegram_message_id: ${input.event.messageId}` : "",
+      `received_at: ${input.event.receivedAt}`,
+      `owner_request_id: ${input.ownerRequestId}`
+    ].filter(Boolean).join("\n");
+    const prelude = `${header}\n${source}\n\n## Service-prepared diarized transcript event\n`;
+    const suffix = "\n\nEnd of service-prepared diarized transcript event.";
+    const budget = Math.max(2_000, this.config.subagents.maxPromptBytes - Buffer.byteLength(prelude, "utf8") - Buffer.byteLength(suffix, "utf8") - 512);
+    return `${prelude}${this.truncateUtf8ForPrompt(input.eventText, budget)}${suffix}`;
+  }
+
+  private truncateUtf8ForPrompt(text: string, maxBytes: number): string {
+    const bytes = Buffer.byteLength(text, "utf8");
+    if (bytes <= maxBytes) return text;
+    const omitted = bytes - maxBytes;
+    const truncated = Buffer.from(text, "utf8").subarray(0, maxBytes).toString("utf8").replace(/\uFFFD+$/g, "").trimEnd();
+    return `${truncated}\n\n[diarized audio event truncated by service: ${omitted} UTF-8 byte(s) omitted]`;
   }
 
   private formatAudioIngestionForCodex(input: {
@@ -954,6 +1105,7 @@ export class ServiceSupervisor {
       let output = "";
       let hadError = false;
       let errorMessage = "";
+      let errorRaw: unknown;
       let userFacingDelivered = false;
       // Track which directive actions have already been pre-executed during
       // streaming so the final pass can skip only those actions.
@@ -984,6 +1136,7 @@ export class ServiceSupervisor {
           if (codexEvent.type === "error") {
             hadError = true;
             errorMessage = codexEvent.message ?? "unknown error";
+            errorRaw = codexEvent.raw;
             this.logger.error({ component: "codex", event: "turn_event_error", turnId, detail: codexEvent.message });
           }
         }
@@ -1001,11 +1154,14 @@ export class ServiceSupervisor {
         }
         return;
       }
-      if (hadError && !output.trim() && event.chatId) {
+      if (hadError && !output.trim()) {
         const brief = errorMessage.split("\n")[0].slice(0, 100);
+        await this.resetMainCodexSessionAfterTerminalError(errorMessage, errorRaw);
         const closed = await closeTurn({ id: turnId, status: "error", input: event, errorMessage, completedAt: nowIso() });
         if (!closed) return;
-        await this.telegram.sendText(event.chatId, `Codex encountered an error: ${brief}. Please try again.`, event.messageId);
+        if (event.chatId) {
+          await this.telegram.sendText(event.chatId, `Codex encountered an error: ${brief}. Please try again.`, event.messageId);
+        }
         return;
       }
       if (this.isStaleTurnToken(turnToken)) return;
@@ -1080,6 +1236,50 @@ export class ServiceSupervisor {
     const compact = lines.join("\n");
     if (compact.length > DISPATCH_ACK_MAX_CHARS) return undefined;
     return compact;
+  }
+
+  private async resetMainCodexSessionAfterTerminalError(errorMessage: string, raw: unknown): Promise<void> {
+    if (!this.shouldResetMainCodexSession(errorMessage, raw)) return;
+    if (typeof this.codex.resetSession !== "function") return;
+    try {
+      const health = await this.codex.resetSession("terminal_stream_disconnect");
+      this.logger.warn(
+        { component: "codex", event: "terminal_error_session_reset", sessionId: health.sessionId },
+        "reset Codex main session after terminal stream-disconnect error"
+      );
+      await this.telegram.notifyOps(
+        `Codex main session was reset after a terminal stream-disconnect error.\nnew session: ${health.sessionId ?? "unknown"}`
+      ).catch(() => undefined);
+    } catch (error) {
+      this.logger.error({ component: "codex", event: "terminal_error_session_reset_failed", error }, "failed to reset Codex main session after terminal error");
+      await this.telegram.notifyOps(
+        `⚠️ Codex hit a terminal stream-disconnect error, but session reset failed: ${error instanceof Error ? error.message : String(error)}`
+      ).catch(() => undefined);
+    }
+  }
+
+  private shouldResetMainCodexSession(errorMessage: string, raw: unknown): boolean {
+    const event = this.codexErrorRecord(raw) ?? this.codexErrorRecordFromMessage(errorMessage);
+    const text = `${errorMessage}\n${JSON.stringify(event ?? raw ?? "")}`.toLowerCase();
+    if (text.includes("usagelimitexceeded") || text.includes("insufficient_quota") || text.includes("you've hit your usage limit")) {
+      return false;
+    }
+    if (event && event.willRetry !== false) return false;
+    return text.includes("stream disconnected before completion") || text.includes("responsestreamdisconnected");
+  }
+
+  private codexErrorRecordFromMessage(message: string): Record<string, unknown> | undefined {
+    try {
+      const parsed = JSON.parse(message) as unknown;
+      return this.codexErrorRecord(parsed);
+    } catch {
+      return undefined;
+    }
+  }
+
+  private codexErrorRecord(raw: unknown): Record<string, unknown> | undefined {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+    return raw as Record<string, unknown>;
   }
 
   private isUserFacingSendDirective(action: DirectiveAction): boolean {
@@ -1700,12 +1900,31 @@ export class ServiceSupervisor {
     await this.telegram.notifyOps(
       `Watchdog: aborted a turn that had been running for ${ageMs ?? "?"}ms (chat=${event?.chatId ?? "n/a"}, source=${event?.source ?? "n/a"}).`
     ).catch(() => undefined);
+    await this.resetPersistedMainSessionAfterWatchdogAbort();
     this.restartingCodex = false;
     await this.restartCodex(
       `Watchdog force-aborted a stuck turn after ${ageMs ?? TURN_ABORT_MS}ms; restarting Codex before draining queued work.`
     ).catch((error) => {
       this.logger.error({ component: "service", event: "turn_abort_restart_failed", error }, "Failed to restart Codex after watchdog abort");
     });
+  }
+
+  private async resetPersistedMainSessionAfterWatchdogAbort(): Promise<void> {
+    try {
+      await this.state.clearCodexSession(this.config.codex.mainSessionName);
+      this.logger.warn(
+        { component: "codex", event: "watchdog_cleared_main_session", sessionName: this.config.codex.mainSessionName },
+        "cleared persisted Codex main session after watchdog abort"
+      );
+    } catch (error) {
+      this.logger.error(
+        { component: "codex", event: "watchdog_clear_main_session_failed", error },
+        "failed to clear persisted Codex main session after watchdog abort"
+      );
+      await this.telegram.notifyOps(
+        `⚠️ Watchdog aborted a stuck turn, but failed to clear the persisted Codex session: ${error instanceof Error ? error.message : String(error)}`
+      ).catch(() => undefined);
+    }
   }
 
   private async markActiveTurnAborted(event?: UserEvent): Promise<void> {

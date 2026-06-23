@@ -89,9 +89,11 @@ Reusing the same
 
 `prompt` is a general-purpose post-transcription instruction for codex-chat
 (for example, “summarize this into action items”). It is stored with the
-ingestion record and delivered to the main AI/message-handling layer alongside
-the transcript so the assistant can decide what to do. It is **not** passed to
-OpenAI as the model transcription prompt; transcription still uses the
+ingestion record and delivered alongside the transcript so the assistant can
+decide what to do. For diarized uploads, the trusted service still performs
+the actual diarization first, then dispatches a subagent to interpret, format,
+summarize, or otherwise use the speaker-labelled output. It is **not** passed
+to OpenAI as the model transcription prompt; transcription still uses the
 existing `[transcription]` config and optional `transcription.promptPath`.
 
 Size limit: `CODEXCHAT_AUDIO_INGEST_MAX_MB` (default `100`). Transcription uses
@@ -325,6 +327,13 @@ clear Telegram request such as “diarize this” before attaching an MP3. Diari
 mode uses `transcription.diarizeModel` (default
 `gpt-4o-transcribe-diarize`), requests `response_format=diarized_json`, and
 sets `chunking_strategy=auto`.
+
+After a diarized transcript is produced, codex-chat routes handling of that
+speaker-labelled output through a subagent. Regular Telegram transcription
+continues through the normal main-loop path and does not create a subagent just
+because an audio file was received. An uncaptioned/uncontexted MP3 still uses
+the existing regular-transcription flow that asks what to do with the
+transcript rather than assuming a workflow.
 
 Official OpenAI docs/API schema as checked on 2026-06-10: `gpt-4o-transcribe`
 and `gpt-4o-mini-transcribe` support prompts, but

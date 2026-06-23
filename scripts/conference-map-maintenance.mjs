@@ -28,12 +28,14 @@ const BLOCKED_STAGE_NAMES = new Set([".env", ".git", "node_modules", ".npmrc", "
 
 function usage() {
   return `Usage: node scripts/conference-map-maintenance.mjs [options]\n\n` +
-    `Prune Decisive Outcomes canonical conference records ending before the canonical cutoff,\n` +
+    `Prune Decisive Outcomes canonical conference records ending before the configured cutoff,\n` +
     `rebuild the derived conference-map data, and republish the map via codex-chat-web.\n\n` +
     `Options:\n` +
     `  --dry-run              Validate and stage only; do not write canonical/list data or publish.\n` +
     `  --skip-publish         Update canonical/list data but do not call the publisher.\n` +
     `  --cutoff YYYY-MM-DD    Override canonical cutoff for this run.\n` +
+    `  --cutoff-today         Use the current UTC date as the cutoff and strictly prune records ending before it.\n` +
+    `  --strict-end-date      Do not honor retainInActiveMap exceptions; any valid end date before cutoff is pruned.\n` +
     `  --canonical <path>     Override canonical JSON resource path.\n` +
     `  --stage-dir <path>     Override staging directory.\n` +
     `  --runtime-page <path>  Override existing runtime page template directory.\n` +
@@ -56,9 +58,18 @@ function parseArgs(argv) {
     const token = argv[i];
     if (token === "--dry-run") args.dryRun = true;
     else if (token === "--skip-publish") args.skipPublish = true;
+    else if (token === "--cutoff-today") {
+      args.cutoff = currentUtcDate();
+      args.cutoffSource = "current UTC date";
+      args.strictEndDate = true;
+    }
+    else if (token === "--strict-end-date") args.strictEndDate = true;
     else if (token === "--json") args.json = true;
     else if (token === "--help" || token === "-h") args.help = true;
-    else if (token === "--cutoff") args.cutoff = requireValue(argv, ++i, token);
+    else if (token === "--cutoff") {
+      args.cutoff = requireValue(argv, ++i, token);
+      args.cutoffSource = "override";
+    }
     else if (token === "--canonical") args.canonical = requireValue(argv, ++i, token);
     else if (token === "--stage-dir") args.stageDir = requireValue(argv, ++i, token);
     else if (token === "--runtime-page") args.runtimePage = requireValue(argv, ++i, token);
@@ -93,6 +104,10 @@ function normalizeIsoDate(value) {
   return date.toISOString().slice(0, 10);
 }
 
+function currentUtcDate() {
+  return new Date().toISOString().slice(0, 10);
+}
+
 function dateKey(value) {
   const normalized = normalizeIsoDate(value);
   return normalized ? Number(normalized.replaceAll("-", "")) : null;
@@ -107,19 +122,30 @@ function cutoffFromCanonical(store, override) {
   return normalized;
 }
 
-function activeRecordsFromCanonical(store, cutoff) {
+function activeRecordsFromCanonical(store, cutoff, options = {}) {
   if (!store || typeof store !== "object" || !Array.isArray(store.records)) {
     throw new Error("Canonical conference resource must be a JSON object with records[].");
   }
   const cutoffKey = dateKey(cutoff);
+  const strictEndDate = options.strictEndDate === true;
   const active = [];
   const pruned = [];
+  const retainedByException = [];
+  const missingEndDate = [];
   for (const record of store.records) {
+    if (record?.retainInActiveMap === true && !strictEndDate) {
+      active.push(record);
+      retainedByException.push(record);
+      continue;
+    }
     const endKey = dateKey(record?.end);
     if (endKey !== null && endKey < cutoffKey) pruned.push(record);
-    else active.push(record);
+    else {
+      if (endKey === null) missingEndDate.push(record);
+      active.push(record);
+    }
   }
-  return { active, pruned };
+  return { active, pruned, retainedByException, missingEndDate };
 }
 
 function summarizeFavorites(rows) {
@@ -209,7 +235,20 @@ function buildDerivedManifest(existing, { canonicalPath, store, active, cutoff, 
   };
 }
 
-async function stagePagePackage({ runtimePage, stageDir, active }) {
+function assetVersionFromIso(iso) {
+  return iso.replace(/\D/g, "").slice(0, 14);
+}
+
+async function refreshStageIndex(stageDir, assetVersion) {
+  const indexPath = path.join(stageDir, "index.html");
+  let html = await readFile(indexPath, "utf8");
+  html = html
+    .replace(/app\.js(?:\?v=\d+)?/g, `app.js?v=${assetVersion}`)
+    .replace(/styles\.css(?:\?v=\d+)?/g, `styles.css?v=${assetVersion}`);
+  await writeFile(indexPath, html, { mode: 0o644 });
+}
+
+async function stagePagePackage({ runtimePage, stageDir, active, assetVersion }) {
   await access(path.join(runtimePage, "index.html"), fsConstants.R_OK);
   await rm(stageDir, { recursive: true, force: true });
   await mkdir(stageDir, { recursive: true, mode: 0o755 });
@@ -225,6 +264,7 @@ async function stagePagePackage({ runtimePage, stageDir, active }) {
     }
   }
   await writeFile(path.join(stageDir, "conferences.json"), `${JSON.stringify(active, null, 2)}\n`, { mode: 0o644 });
+  await refreshStageIndex(stageDir, assetVersion);
   return validateStage(stageDir);
 }
 
@@ -306,12 +346,13 @@ async function main() {
   const canonicalPath = path.resolve(args.canonical);
   const store = await readJson(canonicalPath);
   const cutoff = cutoffFromCanonical(store, args.cutoff);
-  const { active, pruned } = activeRecordsFromCanonical(store, cutoff);
+  const { active, pruned, retainedByException, missingEndDate } = activeRecordsFromCanonical(store, cutoff, { strictEndDate: args.strictEndDate });
   const { next: nextCanonical, changed: canonicalWouldChange } = updateCanonical(store, active, pruned, cutoff, now);
   const existingManifest = await readJson(DERIVED_MANIFEST).catch(() => ({}));
   const nextManifest = buildDerivedManifest(existingManifest, { canonicalPath, store: nextCanonical, active, cutoff, now });
 
-  const stage = await stagePagePackage({ runtimePage: path.resolve(args.runtimePage), stageDir: path.resolve(args.stageDir), active });
+  const assetVersion = assetVersionFromIso(now);
+  const stage = await stagePagePackage({ runtimePage: path.resolve(args.runtimePage), stageDir: path.resolve(args.stageDir), active, assetVersion });
 
   if (!args.dryRun) {
     if (canonicalWouldChange) await writeJsonAtomic(canonicalPath, nextCanonical);
@@ -325,12 +366,18 @@ async function main() {
     ok: true,
     dryRun: args.dryRun,
     cutoffEndOnOrAfter: cutoff,
+    cutoffSource: args.cutoffSource || (args.cutoff ? "override" : "canonical resource"),
+    strictEndDate: args.strictEndDate === true,
     sourceRecords: store.records.length,
     activeRecords: active.length,
     prunedRecords: pruned.length,
+    retainedByExceptionRecords: retainedByException.length,
+    missingEndDateRecordsKept: missingEndDate.length,
+    missingEndDateRule: "Records without a valid end date are kept; existing convention does not fall back to start date.",
     canonicalUpdated: !args.dryRun && canonicalWouldChange,
     derivedUpdated: !args.dryRun,
     stageDir: path.resolve(args.stageDir),
+    assetVersion,
     stagedFiles: stage.fileCount,
     stagedConferencesSha256: await hashFile(path.join(path.resolve(args.stageDir), "conferences.json")),
     published: Boolean(publish && !args.dryRun),
@@ -340,8 +387,10 @@ async function main() {
   if (args.json) console.log(JSON.stringify(summary, null, 2));
   else {
     console.log(`conference-map maintenance ${args.dryRun ? "dry-run" : "complete"}`);
-    console.log(`cutoff: keep events ending on/after ${cutoff}`);
+    console.log(`cutoff: keep events ending on/after ${cutoff}${summary.strictEndDate ? " (strict end-date pruning)" : ""}`);
     console.log(`records: ${store.records.length} source -> ${active.length} active; ${pruned.length} pruned${canonicalWouldChange ? " (canonical would change)" : ""}`);
+    if (retainedByException.length > 0) console.log(`retained by exception: ${retainedByException.length}`);
+    if (missingEndDate.length > 0) console.log(`missing/invalid end date: ${missingEndDate.length} kept; no start-date fallback is used`);
     console.log(`staged: ${summary.stageDir} (${stage.fileCount} files)`);
     if (publish) console.log(`publisher: ${publish.dryRun ? "dry-run " : ""}${publish.url}`);
   }

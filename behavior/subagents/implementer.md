@@ -29,14 +29,14 @@ Never point `send_image` at `/home/tim/.codex/generated_images` or at a user-upl
 
 ## Generated Web Pages And Visualizations
 
-When assigned a simple data visualization, map, report, chart, table, calculator, one-off scratch page, small tool, Google Maps-style static page, or other functional static HTML/CSS/JS page request, use the generated webpage skill from assistant-agent-logic. Phrases like "scratch page", "temporary page", "private preview page", "quick page", or "one-off page" route here even when Tim does not name the configured scratch host; default to publishing through `codex-chat-web` using the publisher's configured public base URL as the source of truth unless Tim asks otherwise:
+When assigned a simple data visualization, map, report, chart, table, calculator, one-off scratch page, small tool, Google Maps-style static page, or other functional static HTML/CSS/JS page request, use the generated webpage skill from assistant-agent-logic. Phrases like "scratch page", "temporary page", "private preview page", "quick page", or "one-off page" route here even when Tim does not name the configured scratch host; default to publishing through `codex-chat-web` using the publisher's configured private Clerk-protected base URL as the source of truth unless Tim asks otherwise:
 
 ```text
 /home/tim/pkg/tim/assistant-agent-logic/config/skills/generated-web-page.md
 ```
 
 
-The configured `codex-chat-web` public base URL is the source of truth for scratch page URLs. Treat that host as an on-demand scratch page host, not a dashboard. Default generated pages are unlisted static URLs under `/pages/<id>/` with TTL/pruning unless Tim explicitly asks to promote the page.
+The configured `codex-chat-web` private Clerk-protected base URL is the source of truth for scratch page URLs. Treat that host as an on-demand scratch page host, not a dashboard. Default generated pages are Clerk-protected URLs under `/private/pages/<id>/` with TTL/pruning unless Tim explicitly asks to promote the page. The legacy `/pages/<id>/` route is removed and must not be used.
 
 Use `generated-web-page.md`, not `web-page-design.md`, for these scratch artifacts unless Tim explicitly asks for a serious visual redesign, design system, or real site design. If both skills seem relevant, design first only for real site, landing page, or app page work.
 
@@ -47,5 +47,5 @@ Workflow:
 2. Build the self-contained static page package in this job's artifact directory, not inside a durable source repo unless Tim explicitly asked to promote it.
 3. Validate that the package has root `index.html`, static files only, no path traversal, no secret-like files, and no server-side runtime dependency.
 4. Run a static-server or browser smoke test when practical, especially for interactive pages.
-5. Publish only through the `codex-chat-web` publisher (`npm run publish:page -- ...`) to an unlisted `/pages/<id>/` URL. Do not hand-copy files into `/srv/codex-chat-web/pages/`.
-6. Verify the `assistant-agent-data:data/web-pages/manifest.json` entry and return the public URL, TTL/pruning or promotion status, changed files if any source repos were edited, verification performed, and remaining risk.
+5. Publish only through the `codex-chat-web` publisher (`npm run publish:page -- ...`) to a Clerk-protected `/private/pages/<id>/` URL. Do not hand-copy files into `/srv/codex-chat-web/private-pages/` or the removed legacy `/srv/codex-chat-web/pages/`.
+6. Verify the `assistant-agent-data:data/web-pages/manifest.json` entry and return the private URL, TTL/pruning or promotion status, changed files if any source repos were edited, verification performed, and remaining risk.

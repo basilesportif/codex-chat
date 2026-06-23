@@ -16,7 +16,7 @@ const DERIVED_LIST_DIR = path.join(WORKSPACE_ROOT, "data/conference-lists/confer
 const DERIVED_CONFERENCES = path.join(DERIVED_LIST_DIR, "conferences.json");
 const DERIVED_MANIFEST = path.join(DERIVED_LIST_DIR, "manifest.json");
 const WEB_MANIFEST = path.join(WORKSPACE_ROOT, "data/web-pages/manifest.json");
-const RUNTIME_PAGE_DIR = "/srv/codex-chat-web/pages/conference-map";
+const RUNTIME_PAGE_DIR = "/srv/codex-chat-web/private-pages/conference-map";
 const CODEX_CHAT_WEB_DIR = "/home/tim/pkg/tim/codex-chat-web";
 const STAGE_DIR = path.join(REPO_ROOT, "data/artifacts/conference-map-maintenance/latest");
 const PAGE_ID = "conference-map";
@@ -38,7 +38,7 @@ function usage() {
     `  --strict-end-date      Do not honor retainInActiveMap exceptions; any valid end date before cutoff is pruned.\n` +
     `  --canonical <path>     Override canonical JSON resource path.\n` +
     `  --stage-dir <path>     Override staging directory.\n` +
-    `  --runtime-page <path>  Override existing runtime page template directory.\n` +
+    `  --runtime-page <path>  Override existing private runtime page template directory.\n` +
     `  --web-dir <path>       Override codex-chat-web checkout path.\n` +
     `  --json                 Print machine-readable JSON.\n` +
     `  --help                 Show this help.\n`;

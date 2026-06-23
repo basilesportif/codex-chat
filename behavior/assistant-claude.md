@@ -52,3 +52,4 @@ Full documentation for each capability is in the assistant-agent-logic repo:
 - `config/skills/whoop.md`
 - `config/skills/web-page-design.md` - real site/page visual design, visual redesign, and design systems
 - `config/skills/generated-web-page.md` - static scratch/temporary/private preview/quick/one-off pages, simple visualizations, maps, reports, charts, tables, calculators, and publishing; default these page requests through `codex-chat-web` using the configured private Clerk-protected base URL unless Tim asks otherwise
+- `config/skills/secret-injection.md` - installing, rotating, uploading, or repairing API keys/env secrets on remote services; resolve the target from registry/deploy metadata and run SSH-based commands from Tim's local/control machine rather than asking Tim to first SSH into the server

@@ -18,8 +18,8 @@ appServerHost = "127.0.0.1"
 appServerPort = 49345
 model = "gpt-5.5"
 effort = "medium"
-# Main-loop Codex service tier. "fast" enables Codex Fast mode for the main thread by default.
-serviceTier = "fast"
+# Main-loop Codex service tier. Default to standard; set "fast" only for an explicit Fast-mode deployment.
+serviceTier = "standard"
 profile = ""
 sandbox = "danger-full-access"
 approvalPolicy = "never"

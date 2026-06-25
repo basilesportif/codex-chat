@@ -64,7 +64,7 @@ function testConfig(rootDir: string): AppConfig {
       keepAliveSec: 60,
       extraConfig: [],
       addDirs: [],
-      serviceTier: "fast"
+      serviceTier: "standard"
     },
     transcription: {
       apiKeyEnv: "CUSTOM_TRANSCRIPTION_API_KEY"
@@ -146,12 +146,61 @@ describe("codex clients", () => {
 
     expect(spawn).toHaveBeenCalledOnce();
     const args = spawn.mock.calls[0]?.[1] as string[];
-    expect(args).toContain("features.fast_mode=true");
+    expect(args).not.toContain("features.fast_mode=true");
     const options = spawn.mock.calls[0]?.[2] as { env?: NodeJS.ProcessEnv; detached?: boolean };
     expect(options.env).not.toHaveProperty("OPENAI_API_KEY");
     expect(options.env).not.toHaveProperty("CUSTOM_TRANSCRIPTION_API_KEY");
     expect(options.env?.OTHER_VAR).toBe("keep-me");
     expect(options.detached).toBe(true);
+    await client.stop();
+  });
+
+  test("adds Fast mode app-server config only when explicitly configured", async () => {
+    vi.resetModules();
+    const spawn = vi.fn(() => fakeChild());
+    vi.doMock("node:child_process", async () => {
+      const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+      return { ...actual, spawn };
+    });
+    vi.doMock("ws", () => {
+      class FakeWebSocket extends EventEmitter {
+        static OPEN = 1;
+        readyState = 1;
+
+        constructor(readonly url: string) {
+          super();
+          queueMicrotask(() => this.emit("open"));
+        }
+
+        send(raw: string): void {
+          const message = JSON.parse(raw) as { id: number; method: string };
+          const result = message.method === "thread/start" ? { thread: { id: "thread-fast" } } : {};
+          queueMicrotask(() => this.emit("message", JSON.stringify({ id: message.id, result })));
+        }
+
+        close(): void {
+          this.readyState = 3;
+        }
+      }
+      return { default: FakeWebSocket };
+    });
+    const { AppServerCodexClient } = await import("../codex.js");
+    const state = {
+      getCodexSession: vi.fn().mockResolvedValue(undefined),
+      setCodexSession: vi.fn().mockResolvedValue(undefined)
+    };
+    const behavior = {
+      loadBootstrapPrompt: vi.fn().mockResolvedValue("bootstrap"),
+      hash: vi.fn().mockResolvedValue("hash")
+    };
+    const config = testConfig("/tmp/codex-chat-test");
+    config.codex.serviceTier = "fast";
+    const client = new AppServerCodexClient(config, state as never, behavior as never, fakeLogger() as never);
+
+    await client.start();
+
+    const args = spawn.mock.calls[0]?.[1] as string[];
+    expect(args).toContain("features.fast_mode=true");
     await client.stop();
   });
 
@@ -202,7 +251,7 @@ describe("codex clients", () => {
 
     await client.start();
     const mainStart = sent.find((message) => message.method === "thread/start" && message.params.serviceName === "codex-chat");
-    expect(mainStart?.params).toMatchObject({ serviceTier: "fast" });
+    expect(mainStart?.params).toMatchObject({ serviceTier: "standard" });
     const result = await client.startEmployeeThread({
       id: "email-calendar",
       name: "Email/calendar",

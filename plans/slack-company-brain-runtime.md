@@ -475,8 +475,8 @@ Compression/context management should be explicit:
 - [x] Fast mode support is present.
 - [x] Existing Brain/runtime planning notes exist in the local system.
 - [x] Add this architecture plan to `plans/`.
-- [ ] Inventory Telegram-shaped types that must become adapter-neutral.
-- [ ] Add tests around current Telegram behavior before refactoring.
+- [x] Inventory Telegram-shaped types that must become adapter-neutral. See `docs/telegram-runtime-baseline.md`.
+- [x] Add tests around current Telegram behavior before refactoring. See `src/__tests__/telegram-baseline.test.ts` plus existing Telegram/service/introspection coverage.
 
 ### Phase 1 — introduce shared runtime types behind Telegram
 

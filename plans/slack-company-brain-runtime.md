@@ -101,6 +101,7 @@ loops, monitors, and Employees.
 It should contain:
 
 - run ID and parent run ID
+- conversation session ID
 - actor context
 - origin target and default output target
 - capability grants effective for this run
@@ -114,6 +115,55 @@ It should contain:
 Subagents should receive a narrowed `RunContext` view: enough metadata to do
 their job and report progress, never raw bot tokens or unrestricted channel
 access.
+
+### Conversation-scoped main loops / sessions
+
+The runtime should treat a live Codex main loop as scoped to one conversation,
+not to the whole Slack workspace, the whole Telegram service, or a global bot
+context. A `ConversationKey` is the stable adapter-derived key for that scope.
+A `ConversationSession` is the durable runtime record that owns the active or
+hibernated main-loop state, mailbox, current checklist/progress state, active
+leases, compressed memory, effective grants, and archive metadata for that key.
+
+Default conversation granularity:
+
+- Slack app mention in a channel creates or resumes a Slack thread session
+  keyed by workspace/team ID, channel ID, and `thread_ts` (falling back to the
+  message timestamp when starting a thread).
+- Slack DM creates or resumes the DM conversation ID.
+- Slack MPIM/private group creates or resumes the Slack conversation ID, with
+  member and capability context captured as part of the session metadata.
+- Telegram creates or resumes by chat ID, plus `message_thread_id`/forum topic
+  where available.
+
+Channel-level state is ambient memory, retrieval index, summary state, and
+capability scope. It is not a live main loop by default. A channel gets a live
+session only for explicit watch, triage, digest, monitor, or similar modes with
+bounded leases and clear output policy.
+
+Session lifecycle:
+
+1. Start: derive the `ConversationKey`, create the `ConversationSession`, attach
+   initial grants/output targets, and create the first `RunContext`.
+2. Run: process mailbox items, dispatch tools/subagents, emit progress events,
+   and persist compressed session state.
+3. Wait/hibernate: when blocked on user input, approvals, timers, queues, or
+   idle time, release expensive model/worker resources while preserving durable
+   session state.
+4. Resume: reacquire an active lease when a new event, scheduler wakeup,
+   approval, or subagent result arrives for the same `ConversationKey`.
+5. Expire/archive: after retention/TTL policy, close active leases, retain audit
+   records and summaries, and archive or prune heavyweight state.
+
+Hibernation and scheduling are runtime requirements, not optimizations. The
+session registry should enforce max active leases, per-workspace and per-surface
+rate limits, backoff, wakeup scheduling, and cost controls so many quiet Slack
+threads or Telegram chats do not become immortal model contexts.
+
+Subagents are owned by `{conversationSessionId, runId, checklistItemId}`. They
+return output, artifacts, and progress to the owning session mailbox/progress
+sink, where the session runtime performs capability checks, output routing, and
+final composition.
 
 ### `CapabilityGrant` and capability checks
 
@@ -283,9 +333,15 @@ audit, and executes through the adapter.
 
 Capability state should support:
 
-- user grants: stable actor-level permissions
-- chat/channel grants: permissions tied to a Telegram chat or Slack channel
-- temporary chat capabilities: short-lived grants approved in-context
+- actor grants: stable actor-level permissions
+- conversation grants: permissions tied to a specific Slack thread, DM, MPIM,
+  private group, Telegram chat, or Telegram forum topic
+- workspace grants: permissions tied to a Slack workspace/team, Telegram
+  administrative scope, or other organization-level resource
+- temporary run grants: short-lived grants approved in-context for one run or
+  session and automatically expired
+- output-target grants: separate routing permissions for where results,
+  progress, artifacts, or notifications may be sent
 - explicit target routing: separate capability to read a source versus post to a
   target
 - unique IDs and descriptions for every grant
@@ -296,6 +352,16 @@ Temporary capabilities are useful for one-off questions like "summarize this
 private Slack thread and send it to this Telegram chat". The runtime should show
 exactly what access and output routing is being granted, for how long, and by
 whom.
+
+Capability selectors must distinguish narrow and broad resources. Examples:
+
+- reading the source Slack thread is different from reading the whole channel
+- reading a Slack channel is different from exporting its summary to Telegram
+- posting back to the source thread is different from posting to an arbitrary
+  Slack channel
+- DMing the requesting actor is different from DMing any workspace member
+- source-attributed summaries, embeddings, and compressed memories inherit the
+  source capabilities and must be filtered before retrieval or export
 
 Long-term company-mode capability state should not live in JSON files. JSON is
 fine for early prototypes, local tests, or import/export, but durable operation
@@ -353,7 +419,8 @@ assigned item.
 
 Recommended flow:
 
-1. Main loop receives normalized event and creates `RunContext`.
+1. Main loop receives normalized event, creates/resumes a `ConversationSession`,
+   and creates `RunContext`.
 2. Main loop plans checklist items with required capabilities and output target.
 3. Runtime posts or updates an initial progress message.
 4. Main loop dispatches subagents per item where useful.
@@ -361,8 +428,8 @@ Recommended flow:
 6. Runtime renderer checks off items in Slack and sends simpler Telegram status
    updates where appropriate.
 7. Main loop composes final answer from item results and persisted summaries.
-8. Audit records link checklist items, subagents, tool calls, outputs, and
-   capability checks by correlation ID.
+8. Audit records link conversation sessions, checklist items, subagents, tool
+   calls, outputs, and capability checks by correlation ID.
 
 Slack should get the richest renderer first: an updating checklist message,
 threaded details, approval buttons, and final answer. Telegram can initially use
@@ -413,10 +480,13 @@ Compression/context management should be explicit:
 
 ### Phase 1 — introduce shared runtime types behind Telegram
 
-- [ ] Add `ActorContext`, `OutputTarget`, `RunContext`, `CapabilityGrant`, and
-      `ProgressEvent` TypeScript types.
+- [ ] Add `ActorContext`, `OutputTarget`, `RunContext`, `ConversationKey`,
+      `ConversationSession`, `CapabilityGrant`, and `ProgressEvent` TypeScript
+      types.
 - [ ] Wrap current Telegram inbound handling into `ActorContext` and
       `OutputTarget` without changing user behavior.
+- [ ] Create/resume Telegram conversation sessions by chat ID and
+      `message_thread_id`/forum topic where available.
 - [ ] Route current Telegram sends through `OutputTarget`.
 - [ ] Add correlation IDs to inbound events, runs, subagents, directives, and
       outputs.
@@ -440,6 +510,8 @@ Compression/context management should be explicit:
       values.
 - [ ] Implement Events API verification, idempotency, fast ack, and queueing.
 - [ ] Normalize app mentions and DMs into shared runtime events.
+- [ ] Create/resume thread-scoped sessions for channel app mentions and
+      conversation-scoped sessions for DMs/MPIM/private groups.
 - [ ] Resolve Slack user/channel metadata as adapter metadata.
 - [ ] Implement Slack renderer for source-thread replies and final answers.
 - [ ] Implement progress message updates from `ProgressEvent`s.
@@ -482,6 +554,8 @@ Compression/context management should be explicit:
 ### Phase 6 — central server and scale-out subagents
 
 - [ ] Centralize event ingestion, queueing, progress fanout, audits, and indexes.
+- [ ] Add durable session registry with hibernation, scheduler wakeups, max
+      active leases, and per-workspace/per-surface rate and cost limits.
 - [ ] Support many subagent workers with per-run narrowed contexts.
 - [ ] Persist run summaries, source summaries, and artifacts.
 - [ ] Add retrieval/index maintenance jobs for Slack and Telegram history.
@@ -492,6 +566,9 @@ Compression/context management should be explicit:
 ## Avoid
 
 - Do not bolt Slack onto Telegram-shaped types.
+- Do not run one global main context for unrelated conversations.
+- Do not create immortal per-channel model contexts when hibernated
+  conversation sessions and channel summaries suffice.
 - Do not trust Slack ACLs alone; use runtime capabilities and audit checks.
 - Do not expose Slack bot/user tokens to the main Codex prompt or subagents.
 - Do not run long Codex turns inline in Slack event handlers; fast-ack and queue.

@@ -5,7 +5,7 @@ import { AppConfig, resolveConfigPath } from "./config.js";
 import { BehaviorPack } from "./behavior.js";
 import { DirectiveAction } from "./directives.js";
 import { StateStore } from "./state.js";
-import { Route, ServiceTier, SubagentBackendKind, SubagentJob, SubagentOwnerType, SubagentResultTarget } from "./types.js";
+import { OutputTarget, Route, ServiceTier, SubagentBackendKind, SubagentJob, SubagentOwnerType, SubagentResultTarget } from "./types.js";
 import {
   ChildAgentBackend,
   ChildAgentFinish,
@@ -34,6 +34,10 @@ interface DispatchInput {
   ownerId?: string;
   ownerRequestId?: string;
   parentTurnId?: string;
+  conversationSessionId?: string;
+  correlationId?: string;
+  originTarget?: OutputTarget;
+  defaultOutputTarget?: OutputTarget;
   resultTarget?: SubagentResultTarget;
   timeoutSec?: number;
   model?: string;
@@ -134,6 +138,8 @@ export interface ActiveSubagentJobSnapshot {
   ownerId?: string;
   ownerRequestId?: string;
   parentTurnId?: string;
+  conversationSessionId?: string;
+  correlationId?: string;
   resultTarget: SubagentResultTarget;
 }
 
@@ -181,7 +187,15 @@ export class SubagentManager {
 
   async dispatchFromDirective(
     action: Extract<DirectiveAction, { type: "dispatch_subagent" }>,
-    origin?: { chatId?: number; messageId?: number; parentTurnId?: string }
+    origin?: {
+      chatId?: number;
+      messageId?: number;
+      parentTurnId?: string;
+      conversationSessionId?: string;
+      correlationId?: string;
+      originTarget?: OutputTarget;
+      defaultOutputTarget?: OutputTarget;
+    }
   ): Promise<string> {
     return this.dispatch({
       profile: action.profile,
@@ -191,6 +205,10 @@ export class SubagentManager {
       ownerId: "main",
       ownerRequestId: action.idempotencyKey,
       parentTurnId: origin?.parentTurnId,
+      conversationSessionId: origin?.conversationSessionId,
+      correlationId: origin?.correlationId,
+      originTarget: origin?.originTarget,
+      defaultOutputTarget: origin?.defaultOutputTarget,
       resultTarget: this.resultTargetForRoute(action.route),
       timeoutSec: action.timeoutSec,
       model: action.model,
@@ -233,6 +251,10 @@ export class SubagentManager {
       ownerId,
       ownerRequestId: input.ownerRequestId,
       parentTurnId: input.parentTurnId,
+      conversationSessionId: input.conversationSessionId,
+      correlationId: input.correlationId,
+      originTarget: input.originTarget,
+      defaultOutputTarget: input.defaultOutputTarget,
       resultTarget,
       status: "queued",
       promptPath: join(artifactDir, "prompt.md"),
@@ -249,7 +271,7 @@ export class SubagentManager {
     this.jobs.set(input.id, queuedJob);
     await this.state.saveJob(queuedJob);
     this.queue.push(input);
-    void this.drain();
+    await this.drain();
     return input.id;
   }
 
@@ -593,6 +615,10 @@ export class SubagentManager {
       ownerId,
       ownerRequestId: input.ownerRequestId,
       parentTurnId: input.parentTurnId,
+      conversationSessionId: input.conversationSessionId,
+      correlationId: input.correlationId,
+      originTarget: input.originTarget,
+      defaultOutputTarget: input.defaultOutputTarget,
       resultTarget,
       status: "queued",
       promptPath,
@@ -613,6 +639,10 @@ export class SubagentManager {
       ownerId,
       ownerRequestId: input.ownerRequestId ?? job.ownerRequestId,
       parentTurnId: input.parentTurnId ?? job.parentTurnId,
+      conversationSessionId: input.conversationSessionId ?? job.conversationSessionId,
+      correlationId: input.correlationId ?? job.correlationId,
+      originTarget: input.originTarget ?? job.originTarget,
+      defaultOutputTarget: input.defaultOutputTarget ?? job.defaultOutputTarget,
       resultTarget,
       status: "running" as const,
       promptPath,
@@ -765,6 +795,8 @@ export class SubagentManager {
       ownerId: job.ownerId,
       ownerRequestId: job.ownerRequestId,
       parentTurnId: job.parentTurnId,
+      conversationSessionId: job.conversationSessionId,
+      correlationId: job.correlationId,
       resultTarget: this.jobResultTarget(job)
     };
   }

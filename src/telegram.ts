@@ -7,6 +7,7 @@ import { FileStore } from "./file-store.js";
 import { StateStore } from "./state.js";
 import { Transcriber, type TranscriptionMode, type TranscriptionResult, type TranscriptionSpeakerSegment } from "./transcription.js";
 import { Attachment, TelegramReplyChatSummary, TelegramReplyContext, TelegramReplySenderSummary, UserEvent } from "./types.js";
+import { withTelegramRuntimeContext } from "./runtime.js";
 import { chunkText, makePairingCode, nowIso } from "./util.js";
 import { renderTelegramMarkdown } from "./telegram-format.js";
 
@@ -528,6 +529,7 @@ export class TelegramGateway {
     if ("caption" in message && typeof message.caption === "string") text = message.caption;
     const reply = extractTelegramReplyContext(message);
     const eventMetadata: Record<string, unknown> = { telegramMessageId: message.message_id };
+    if (typeof message.message_thread_id === "number") eventMetadata.telegramMessageThreadId = message.message_thread_id;
     let eventTranscript: string | undefined;
 
     if ("photo" in message && Array.isArray(message.photo) && message.photo.length > 0) {
@@ -605,7 +607,9 @@ export class TelegramGateway {
       receivedAt: nowIso()
     });
 
-    await this.callbacks.onUserEvent({
+    const receivedAt = nowIso();
+    const stateUsers = await this.state.listTelegramUsers();
+    const runtimeEvent = withTelegramRuntimeContext({
       source: "telegram",
       chatId: ctx.chat.id,
       userId: ctx.from.id,
@@ -615,9 +619,28 @@ export class TelegramGateway {
       text,
       transcript: eventTranscript,
       attachments,
-      receivedAt: nowIso(),
+      receivedAt,
+      metadata: eventMetadata
+    }, {
+      chatId: ctx.chat.id,
+      userId: ctx.from.id,
+      username: ctx.from.username,
+      firstName: ctx.from.first_name,
+      lastName: ctx.from.last_name,
+      messageId: message.message_id,
+      messageThreadId: typeof message.message_thread_id === "number" ? message.message_thread_id : undefined,
+      chatType: ctx.chat.type,
+      chatTitle: "title" in ctx.chat ? ctx.chat.title : undefined,
+      isAdmin: isTelegramAdmin({
+        userId: ctx.from.id,
+        configAdminUserIds: this.config.telegram.allowlist.adminUserIds,
+        stateUsers
+      }),
+      receivedAt,
       metadata: eventMetadata
     });
+
+    await this.callbacks.onUserEvent(runtimeEvent);
   }
 
   private formatAudioTranscriptForEvent(input: {

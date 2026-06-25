@@ -1,5 +1,135 @@
 export type JsonRecord = Record<string, unknown>;
 
+export type SurfaceKind = "telegram" | "slack" | "dashboard" | "system" | "loop" | "monitor" | "audio_ingest";
+
+export interface ActorContext {
+  id: string;
+  surfaceKind: SurfaceKind;
+  surfaceUserId?: string;
+  displayName?: string;
+  handle?: string;
+  organizationId?: string;
+  workspaceId?: string;
+  teamId?: string;
+  isAdmin?: boolean;
+  isPersonalOwner?: boolean;
+  authenticatedAt?: string;
+  correlationId: string;
+  metadata?: JsonRecord;
+}
+
+export interface OutputTarget {
+  id: string;
+  surfaceKind: SurfaceKind;
+  workspaceId?: string;
+  teamId?: string;
+  channelId?: string;
+  chatId?: string;
+  threadId?: string;
+  messageId?: string;
+  routingPolicy: "source_reply" | "explicit_target" | "admin_notify" | "artifact_only" | "silent";
+  allowedOutputTypes: Array<"text" | "image" | "document" | "reaction" | "progress" | "artifact">;
+  auditLabels?: string[];
+  metadata?: JsonRecord;
+}
+
+export interface ConversationKey {
+  id: string;
+  surfaceKind: SurfaceKind;
+  workspaceId?: string;
+  channelId?: string;
+  chatId?: string;
+  threadId?: string;
+  metadata?: JsonRecord;
+}
+
+export interface CapabilityGrant {
+  id: string;
+  name: string;
+  description: string;
+  scope: "user" | "chat" | "channel" | "workspace" | "temporary" | "system";
+  operations: string[];
+  resourceSelectors: JsonRecord;
+  source: string;
+  grantor?: string;
+  actorId?: string;
+  conversationSessionId?: string;
+  expiresAt?: string;
+  auditPolicy?: "log" | "log_denials" | "silent";
+  createdAt: string;
+}
+
+export interface CapabilityCheckResult {
+  allowed: boolean;
+  operation: string;
+  grantIds: string[];
+  reason?: string;
+  checkedAt: string;
+}
+
+export interface ProgressEvent {
+  id: string;
+  type:
+    | "checklist_created"
+    | "checklist_updated"
+    | "item_started"
+    | "item_completed"
+    | "item_failed"
+    | "subagent_dispatched"
+    | "subagent_steered"
+    | "subagent_cancelled"
+    | "subagent_completed"
+    | "tool_call_started"
+    | "tool_call_completed"
+    | "tool_call_failed"
+    | "partial_summary"
+    | "waiting"
+    | "final_result";
+  conversationSessionId?: string;
+  runId?: string;
+  parentRunId?: string;
+  checklistItemId?: string;
+  message: string;
+  status?: "pending" | "running" | "completed" | "failed" | "cancelled" | "skipped";
+  correlationId: string;
+  outputTarget?: OutputTarget;
+  metadata?: JsonRecord;
+  occurredAt: string;
+}
+
+export interface RunContext {
+  runId: string;
+  parentRunId?: string;
+  conversationSessionId: string;
+  actor: ActorContext;
+  originTarget: OutputTarget;
+  defaultOutputTarget: OutputTarget;
+  capabilityGrants: CapabilityGrant[];
+  surfaceMetadata?: JsonRecord;
+  progressSink?: OutputTarget;
+  cancellation?: JsonRecord;
+  steering?: JsonRecord;
+  artifactDir?: string;
+  correlationId: string;
+  inboundEventId?: string;
+  contextBudget?: JsonRecord;
+  createdAt: string;
+}
+
+export interface ConversationSession {
+  id: string;
+  key: ConversationKey;
+  status: "active" | "hibernated" | "archived";
+  actorIds: string[];
+  defaultOutputTarget?: OutputTarget;
+  effectiveGrantIds: string[];
+  currentRunId?: string;
+  metadata?: JsonRecord;
+  createdAt: string;
+  updatedAt: string;
+  lastSeenAt: string;
+}
+
 export type Route =
   | "return_to_main"
   | "send_to_user"
@@ -103,6 +233,13 @@ export interface UserEvent {
   transcript?: string;
   attachments: Attachment[];
   metadata?: JsonRecord;
+  correlationId?: string;
+  actor?: ActorContext;
+  outputTarget?: OutputTarget;
+  conversationKey?: ConversationKey;
+  conversationSessionId?: string;
+  capabilityGrants?: CapabilityGrant[];
+  runContext?: RunContext;
   receivedAt: string;
 }
 
@@ -144,6 +281,10 @@ export interface StoredAction {
   status: "pending" | "running" | "completed" | "failed" | "skipped";
   createdAt: string;
   completedAt?: string;
+  runId?: string;
+  conversationSessionId?: string;
+  correlationId?: string;
+  outputTarget?: OutputTarget;
   payload: unknown;
   error?: string;
 }
@@ -156,6 +297,10 @@ export interface SubagentJob {
   ownerId?: string;
   ownerRequestId?: string;
   parentTurnId?: string;
+  conversationSessionId?: string;
+  correlationId?: string;
+  originTarget?: OutputTarget;
+  defaultOutputTarget?: OutputTarget;
   resultTarget?: SubagentResultTarget;
   status: "queued" | "running" | "cancelling" | "completed" | "failed" | "cancelled" | "timed_out" | "abandoned";
   promptPath: string;

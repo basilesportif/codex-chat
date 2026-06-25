@@ -208,7 +208,13 @@ describe("Telegram reply context extraction", () => {
       source: "telegram",
       chatId: 100,
       messageId: 77,
-      text: "hello"
+      text: "hello",
+      actor: expect.objectContaining({ id: "telegram:user:9", surfaceKind: "telegram", handle: "tim" }),
+      outputTarget: expect.objectContaining({ surfaceKind: "telegram", chatId: "100", messageId: "77" }),
+      conversationKey: expect.objectContaining({ id: "telegram:chat:100" }),
+      conversationSessionId: expect.stringMatching(/^session_[0-9a-f]{24}$/),
+      correlationId: expect.stringMatching(/^corr_/),
+      capabilityGrants: expect.arrayContaining([expect.objectContaining({ operations: expect.arrayContaining(["telegram:write"]) })])
     }));
   });
 

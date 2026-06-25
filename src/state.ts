@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
 import { AppConfig, resolveConfigPath } from "./config.js";
 import type { AudioIngestionRecord } from "./audio-ingest.js";
-import { EmployeeRuntimeState, LoopRun, MonitorEvent, StoredAction, SubagentBackendKind, SubagentJob } from "./types.js";
+import { ConversationSession, EmployeeRuntimeState, LoopRun, MonitorEvent, ProgressEvent, StoredAction, SubagentBackendKind, SubagentJob } from "./types.js";
 import { atomicWriteJson, atomicWriteText, ensureDir, nowIso, pathExists, removeIfExists } from "./util.js";
 
 const pairingCodePath = "data/pairing_code.txt";
@@ -35,7 +35,7 @@ export class StateStore {
 
   async init(): Promise<void> {
     await ensureDir(this.root);
-    for (const dir of ["messages", "files", "turns", "queued_turns", "jobs", "employees", "employee_child_results", "loop_runs", "monitor_events", "actions", "audio_ingestions"]) {
+    for (const dir of ["messages", "files", "turns", "queued_turns", "jobs", "employees", "employee_child_results", "loop_runs", "monitor_events", "actions", "audio_ingestions", "conversation_sessions", "progress_events"]) {
       await ensureDir(join(this.root, dir));
     }
     if (!(await pathExists(join(this.root, "schema.json")))) {
@@ -119,6 +119,19 @@ export class StateStore {
   async recordMonitorEvent(event: MonitorEvent): Promise<void> {
     const day = new Date().toISOString().slice(0, 10);
     await this.appendJsonl(`monitor_events/${day}.jsonl`, event);
+  }
+
+  async saveConversationSession(session: ConversationSession): Promise<void> {
+    await this.writeJson(`conversation_sessions/${session.id}.json`, session);
+  }
+
+  async readConversationSession(id: string): Promise<ConversationSession | undefined> {
+    return this.readJson<ConversationSession | undefined>(`conversation_sessions/${id}.json`, undefined);
+  }
+
+  async recordProgressEvent(event: ProgressEvent): Promise<void> {
+    const day = new Date().toISOString().slice(0, 10);
+    await this.appendJsonl(`progress_events/${day}.jsonl`, event);
   }
 
   async saveAction(action: StoredAction): Promise<void> {

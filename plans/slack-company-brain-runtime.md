@@ -47,7 +47,7 @@ Based on the current repo/system state:
       system, including Brain monorepo/runtime parity plans that already frame
       Telegram as an adapter over a channel-neutral runtime.
 - [ ] Slack adapter exists.
-- [ ] Capability-aware runtime abstractions are implemented in `codex-chat`.
+- [x] Capability-aware runtime abstractions are implemented in `codex-chat`.
 - [ ] Durable company-mode capability state exists outside long-term JSON files.
 - [ ] Admin dashboard exists for users, channel mappings, capabilities, audits,
       and running jobs.
@@ -480,18 +480,18 @@ Compression/context management should be explicit:
 
 ### Phase 1 — introduce shared runtime types behind Telegram
 
-- [ ] Add `ActorContext`, `OutputTarget`, `RunContext`, `ConversationKey`,
+- [x] Add `ActorContext`, `OutputTarget`, `RunContext`, `ConversationKey`,
       `ConversationSession`, `CapabilityGrant`, and `ProgressEvent` TypeScript
       types.
-- [ ] Wrap current Telegram inbound handling into `ActorContext` and
+- [x] Wrap current Telegram inbound handling into `ActorContext` and
       `OutputTarget` without changing user behavior.
-- [ ] Create/resume Telegram conversation sessions by chat ID and
+- [x] Create/resume Telegram conversation sessions by chat ID and
       `message_thread_id`/forum topic where available.
-- [ ] Route current Telegram sends through `OutputTarget`.
-- [ ] Add correlation IDs to inbound events, runs, subagents, directives, and
+- [x] Route current Telegram sends through `OutputTarget`.
+- [x] Add correlation IDs to inbound events, runs, subagents, directives, and
       outputs.
-- [ ] Represent Tim/current allowed Telegram users as explicit capability grants.
-- [ ] Add capability-check helper APIs with permissive personal/admin grants for
+- [x] Represent Tim/current allowed Telegram users as explicit capability grants.
+- [x] Add capability-check helper APIs with permissive personal/admin grants for
       existing Telegram flows.
 
 ### Phase 2 — capability enforcement and audit spine

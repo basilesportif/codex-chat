@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -6,6 +6,7 @@ import { loadConfig } from "../config.js";
 import { createLogger } from "../logger.js";
 import { ServiceSupervisor } from "../service.js";
 import type { UserEvent } from "../types.js";
+import { buildTelegramRuntimeContext, checkCapability } from "../runtime.js";
 
 const tempDirs: string[] = [];
 
@@ -73,6 +74,43 @@ afterEach(async () => {
 });
 
 describe("Phase 0 Telegram baseline", () => {
+  test("maps Telegram identity, conversation, target, and grants into platform-neutral runtime context", () => {
+    const runtime = buildTelegramRuntimeContext({
+      chatId: 253768951,
+      userId: 253768951,
+      username: "tim",
+      messageId: 42,
+      messageThreadId: 10,
+      isAdmin: true,
+      receivedAt: "2026-06-25T00:00:00.000Z",
+      correlationId: "corr_test"
+    });
+
+    expect(runtime.actor).toMatchObject({
+      id: "telegram:user:253768951",
+      surfaceKind: "telegram",
+      handle: "tim",
+      isAdmin: true,
+      correlationId: "corr_test"
+    });
+    expect(runtime.outputTarget).toMatchObject({
+      surfaceKind: "telegram",
+      chatId: "253768951",
+      threadId: "10",
+      messageId: "42",
+      routingPolicy: "source_reply"
+    });
+    expect(runtime.conversationKey).toMatchObject({
+      id: "telegram:chat:253768951:thread:10",
+      surfaceKind: "telegram"
+    });
+    expect(runtime.conversationSessionId).toMatch(/^session_[0-9a-f]{24}$/);
+    expect(checkCapability(runtime.capabilityGrants, "service:deploy")).toMatchObject({
+      allowed: true,
+      operation: "service:deploy"
+    });
+  });
+
   test("documents Fast as the current main-loop default while subagent tier stays prompt-routed", async () => {
     const config = await tempConfig();
     const behavior = await readFile(join(process.cwd(), "behavior", "AGENTS.md"), "utf8");
@@ -109,6 +147,10 @@ describe("Phase 0 Telegram baseline", () => {
     }));
 
     expect(prompt).toContain("codex-chat event source: telegram");
+    expect(prompt).toContain("conversation_session_id:");
+    expect(prompt).toContain("correlation_id:");
+    expect(prompt).toContain("actor: telegram:user:253768951");
+    expect(prompt).toContain("output_target: telegram:chat:253768951:message:42");
     expect(prompt).toContain("telegram chat_id: 253768951");
     expect(prompt).toContain("telegram user_id: 253768951");
     expect(prompt).toContain("telegram message_id: 42");
@@ -132,5 +174,12 @@ describe("Phase 0 Telegram baseline", () => {
 
     expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("Codex app-server log buffer"), 77);
     expect(sendTurn).not.toHaveBeenCalled();
+
+    const sessionsDir = service.state.path("conversation_sessions");
+    const files = await readdir(sessionsDir);
+    expect(files).toHaveLength(1);
+    const session = JSON.parse(await readFile(join(sessionsDir, files[0]!), "utf8")) as { key?: { id?: string }; defaultOutputTarget?: { chatId?: string } };
+    expect(session.key?.id).toBe("telegram:chat:253768951");
+    expect(session.defaultOutputTarget?.chatId).toBe("253768951");
   });
 });

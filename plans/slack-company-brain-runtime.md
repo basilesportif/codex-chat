@@ -146,6 +146,13 @@ Important capability families:
 - operate admin/dashboard functions
 - approve temporary chat capabilities
 
+Future capability planning should likely split these families into individual
+abilities for each repo the company brain can access or mutate. For example,
+`repo:codex-chat:read`, `repo:codex-chat:write`, `repo:assistant-agent-logic:read`,
+and `repo:assistant-agent-logic:write` should be distinct enough that a user can
+read plans, inspect diffs, open PRs, or run deploy actions for only the repos
+they are trusted to operate.
+
 ### `ProgressEvent` and progress sink
 
 Long-running work should emit structured `ProgressEvent`s rather than ad hoc
@@ -300,14 +307,38 @@ query support.
 Build an admin/dashboard surface that can manage and inspect:
 
 - users/actors and identity mappings across Telegram and Slack
+- allowed dashboard users and their admin status
 - Slack workspace/channel mappings
 - Telegram chat mappings
 - capability grants, temporary grants, and revocations
+- bundled capability assignments for common user roles or trust levels
 - audit viewer filtered by actor, channel, run, capability, and correlation ID
 - running jobs/subagents/Employees with steering and cancellation
 - queue health, loops, monitors, and stuck jobs
 - AI-assisted capability assignment proposals
 - button-click operations for approvals, grants, reroutes, cancels, and retries
+
+The dashboard must be Clerk-authenticated and fail closed. Tim's current Clerk
+pattern, documented in the Tim Continual Learning `clerk` and `admin-site`
+skills, is Clerk sign-in plus a server-side email allowlist such as
+`CLERK_ALLOWED_EMAILS`: resolve the verified Clerk email, normalize it
+case-insensitively, and reject signed-in users outside the allowlist with a
+server-side `403`. The dashboard should follow that pattern, keep
+`/api/health` public where applicable, protect `/api/auth/me` and remaining
+admin APIs, and provide a visible logout/switch-account path on forbidden or
+auth-adjacent pages.
+
+For this runtime dashboard, the allowed-user list is required authorization
+state: if no allowed dashboard users are configured, no one gets access to the
+dashboard, including signed-in Clerk users. This is stricter than any permissive
+dev default and matches the admin-site expectation that internal tools require a
+server-side allowlist. Store only environment variable names and non-secret
+metadata in repo/registry documentation; never record Clerk secret values.
+
+Dashboard admins should be able to assign capabilities to users in bundles,
+then inspect and adjust the individual grants created by each bundle. Bundles
+should be convenience templates, not opaque roles that bypass runtime
+capability checks or audit records.
 
 Telegram can also remain an admin control surface. The same admin operations
 should be runtime actions with capability checks whether invoked from Telegram,
@@ -428,11 +459,19 @@ Compression/context management should be explicit:
 - [ ] Add persisted summaries for Slack threads/channels and repeated topics.
 - [ ] Add context compression policies for long company runs.
 
-### Phase 5 — admin/dashboard and approval UX
+### Phase 5 — Clerk-authenticated admin dashboard and approval UX
 
-- [ ] Build users/actors view.
+- [ ] Build the admin/dashboard app as a Clerk-authenticated internal surface
+      with server-side allowed-user enforcement.
+- [ ] Require at least one configured allowed dashboard user; if the allowlist is
+      empty or missing, deny all dashboard access.
+- [ ] Build users/actors view, including allowed dashboard users and their
+      identity mappings.
 - [ ] Build Slack channel and Telegram chat mapping view.
-- [ ] Build capability grant/revocation UI.
+- [ ] Build capability bundle UI so admins can set common capability bundles on
+      users while preserving auditable individual grants.
+- [ ] Build capability grant/revocation UI for inspecting and editing individual
+      abilities created directly or by bundles.
 - [ ] Build audit viewer.
 - [ ] Build running jobs/subagents/Employees view with cancel/steer buttons.
 - [ ] Add AI-assisted capability assignment proposals with human confirmation.

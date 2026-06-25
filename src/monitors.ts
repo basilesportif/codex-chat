@@ -10,6 +10,7 @@ import { MonitorEvent, Route } from "./types.js";
 import { atomicWriteText, ensureDir, killProcessTree, makeId, nowIso, pathExists } from "./util.js";
 
 const effortSchema = z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]);
+const serviceTierSchema = z.enum(["standard", "fast"]);
 
 const patternSchema = z.object({
   id: z.string().min(1),
@@ -32,7 +33,8 @@ const patternSchema = z.object({
     profile: z.string().optional(),
     timeoutSec: z.number().int().positive().optional(),
     model: z.string().optional(),
-    effort: effortSchema.optional()
+    effort: effortSchema.optional(),
+    serviceTier: serviceTierSchema.optional()
   }).default({ type: "send_to_main" })
 });
 
@@ -70,7 +72,7 @@ export type MonitorsConfig = z.infer<typeof monitorsConfigSchema>;
 
 interface MonitorCallbacks {
   enqueueMain(text: string, metadata?: Record<string, unknown>): Promise<void>;
-  dispatchSubagent(input: { profile: string; prompt: string; route: Route; timeoutSec?: number; model?: string; effort?: string; ownerId?: string; ownerRequestId?: string }): Promise<void>;
+  dispatchSubagent(input: { profile: string; prompt: string; route: Route; timeoutSec?: number; model?: string; effort?: string; serviceTier?: "standard" | "fast"; ownerId?: string; ownerRequestId?: string }): Promise<void>;
   notifyAdmins(text: string): Promise<void>;
 }
 
@@ -237,7 +239,7 @@ export class MonitorManager {
       preActionOutput ? `Pre-action output:\n${preActionOutput}` : ""
     ].filter(Boolean).join("\n");
     if (pattern.action.type === "send_to_main") await this.callbacks.enqueueMain(prompt, { source: "monitor", monitorId: running.definition.id, patternId: pattern.id, contextPath });
-    if (pattern.action.type === "dispatch_subagent") await this.callbacks.dispatchSubagent({ profile: pattern.action.profile ?? "debugger", prompt, route: "return_to_main", timeoutSec: pattern.action.timeoutSec, model: pattern.action.model, effort: pattern.action.effort, ownerId: running.definition.id, ownerRequestId: event.id });
+    if (pattern.action.type === "dispatch_subagent") await this.callbacks.dispatchSubagent({ profile: pattern.action.profile ?? "debugger", prompt, route: "return_to_main", timeoutSec: pattern.action.timeoutSec, model: pattern.action.model, effort: pattern.action.effort, serviceTier: pattern.action.serviceTier, ownerId: running.definition.id, ownerRequestId: event.id });
     if (pattern.action.type === "restart_monitor") await this.restartMonitor(running);
   }
 

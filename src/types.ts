@@ -10,6 +10,7 @@ export type Route =
   | "silent";
 
 export type SubagentBackendKind = "codex_exec" | "codex_app_server";
+export type ServiceTier = "standard" | "fast";
 export type SubagentOwnerType = "main" | "loop" | "monitor" | "employee";
 export type SubagentResultTarget = "main" | "user" | "employee" | "admins" | "store_only" | "silent";
 
@@ -161,6 +162,7 @@ export interface SubagentJob {
   artifactDir: string;
   model?: string;
   effort?: string;
+  serviceTier?: ServiceTier;
   summary?: string;
   enqueuedAt?: string;
   startedAt?: string;

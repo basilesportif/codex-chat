@@ -15,6 +15,7 @@ const overrideEnvNames = [
   "CODEX_CHAT_CODEX_BINARY",
   "CODEX_CHAT_CODEX_MODEL",
   "CODEX_CHAT_CODEX_EFFORT",
+  "CODEX_CHAT_CODEX_SERVICE_TIER",
   "CODEX_CHAT_CODEX_SANDBOX",
   "CODEX_CHAT_CODEX_APPROVAL_POLICY",
   "CODEX_CHAT_SUBAGENTS_BACKEND",
@@ -74,6 +75,8 @@ userIds = [12345]
 
     expect(config.codex.model).toBe("gpt-test");
     expect(config.codex.sandbox).toBe("danger-full-access");
+    expect(config.codex.serviceTier).toBe("fast");
+    expect(config.subagents.defaultServiceTier).toBe("standard");
     expect(config.subagents.backend).toBe("codex_exec");
     expect(config.api.enabled).toBe(false);
     expect(config.ingest.audioMaxMb).toBe(100);
@@ -91,6 +94,7 @@ userIds = [12345]
 
   test("uses environment overrides after file values", async () => {
     process.env.CODEX_CHAT_CODEX_MODEL = "from-env";
+    process.env.CODEX_CHAT_CODEX_SERVICE_TIER = "standard";
     process.env.CUSTOM_TELEGRAM_TOKEN = "token-from-custom-env";
     process.env.TELEGRAM_BOT_TOKEN = "token-from-default-env";
     const path = await tempConfig(`
@@ -106,6 +110,7 @@ botTokenEnv = "CUSTOM_TELEGRAM_TOKEN"
     const config = await loadConfig(path);
 
     expect(config.codex.model).toBe("from-env");
+    expect(config.codex.serviceTier).toBe("standard");
     expect(config.subagents.backend).toBe("codex_exec");
     expect(config.telegramBotToken).toBe("token-from-custom-env");
   });

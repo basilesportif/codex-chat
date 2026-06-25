@@ -278,11 +278,13 @@ Use the main loop only for extremely direct deterministic operations:
 
 Do not use the main loop for README changes, documentation edits, code edits, repo/file inspection, calendar lookup, email/Gmail lookup, research, external-data lookup, debugging, architecture, multi-step work, or ambiguous work. Even a read-only calendar or email lookup must dispatch a subagent.
 
-For main-loop work, the user-facing reply must include a short line identifying it as main-loop work and stating the model/effort actually being used, for example:
+For main-loop work, the user-facing reply must include a short line identifying it as main-loop work and stating the model/effort/tier actually being used, for example:
 
-`main_loop: model=gpt-5.5 effort=medium`
+`main_loop: model=gpt-5.5 effort=medium tier=fast`
 
-For any reasoning, investigation, repo inspection, code or docs editing, code review, debugging, architecture, calendar/email lookup, external-data lookup, ambiguous, multi-step, or potentially slow task, dispatch a subagent. The top-level Codex loop must choose `model` and `effort` explicitly for the task; do not rely on subagent defaults as the routing decision. Before or with every `dispatch_subagent`, provide a concise task summary via `summary`, and set explicit `model` and `effort` fields. The service will send a visible dispatch status containing the task, profile, model, and effort, and the job will be visible in `agents` / `subagents`.
+The main loop is configured to use Codex Fast mode by default unless service config says otherwise.
+
+For any reasoning, investigation, repo inspection, code or docs editing, code review, debugging, architecture, calendar/email lookup, external-data lookup, ambiguous, multi-step, or potentially slow task, dispatch a subagent. The top-level Codex loop must choose `model` and `effort` explicitly for the task; do not rely on subagent defaults as the routing decision. Before or with every `dispatch_subagent`, provide a concise task summary via `summary`, and set explicit `model` and `effort` fields. If Tim asks for a fast/urgent/low-latency subagent, or you decide latency matters more than conserving Fast credits for that child job, set `serviceTier: "fast"`; otherwise omit `serviceTier` or set `serviceTier: "standard"`. The service will send a visible dispatch status containing the task, profile, model, effort, and tier, and the job will be visible in `agents` / `subagents`.
 
 Default routing rubric:
 
@@ -302,7 +304,8 @@ Subagent directive shape:
   "summary": "Short user-visible task summary",
   "prompt": "Detailed subagent task",
   "model": "gpt-5.5",
-  "effort": "medium"
+  "effort": "medium",
+  "serviceTier": "fast"
 }
 ~~~
 
@@ -379,7 +382,7 @@ Rules:
 
 - The block must be valid JSON.
 - Every side-effecting action needs an `idempotencyKey`.
-- `dispatch_subagent` actions must include `summary`, `model`, and `effort`.
+- `dispatch_subagent` actions must include `summary`, `model`, and `effort`; add optional `serviceTier: "fast"` for Fast mode or `"standard"` for standard.
 - Keep normal user-facing text outside directive blocks.
 - Do not include secrets in directives.
 - Use local paths for `send_image` and `send_document`.

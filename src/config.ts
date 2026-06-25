@@ -10,6 +10,7 @@ const sandboxSchema = z.enum(["read-only", "workspace-write", "danger-full-acces
 const approvalSchema = z.enum(["untrusted", "on-failure", "on-request", "never"]);
 const telegramUserIdSchema = z.union([z.number().int(), z.string().min(1)]);
 const subagentBackendSchema = z.enum(["codex_exec", "codex_app_server"]);
+const serviceTierSchema = z.enum(["standard", "fast"]);
 const employeeStartupSchema = z.enum(["on_demand", "always"]);
 const employeeIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$/, "Employee IDs may contain only letters, numbers, dot, underscore, and dash");
 
@@ -82,6 +83,7 @@ const configSchema = z.object({
     appServerPort: z.number().int().min(1).max(65535).default(49345),
     model: z.string().default("gpt-5.5"),
     effort: effortSchema.default("medium"),
+    serviceTier: serviceTierSchema.default("fast"),
     profile: z.string().default(""),
     sandbox: sandboxSchema.default("danger-full-access"),
     approvalPolicy: approvalSchema.default("never"),
@@ -126,6 +128,7 @@ const configSchema = z.object({
     maxConcurrent: z.number().int().positive().default(5),
     defaultModel: z.string().default(""),
     defaultEffort: effortSchema.default("medium"),
+    defaultServiceTier: serviceTierSchema.default("standard"),
     defaultTimeoutSec: z.number().int().positive().default(1800),
     maxTimeoutSec: z.number().int().positive().default(7200),
     maxPromptBytes: z.number().int().positive().default(262_144),
@@ -207,6 +210,7 @@ const defaultConfig = configSchema.parse({
     appServerPort: 49345,
     model: "gpt-5.5",
     effort: "medium",
+    serviceTier: "fast",
     profile: "",
     sandbox: "danger-full-access",
     approvalPolicy: "never",
@@ -247,6 +251,7 @@ const defaultConfig = configSchema.parse({
     maxConcurrent: 5,
     defaultModel: "",
     defaultEffort: "medium",
+    defaultServiceTier: "standard",
     defaultTimeoutSec: 1800,
     maxTimeoutSec: 7200,
     maxPromptBytes: 262_144,
@@ -414,6 +419,7 @@ function collectEnvOverrides(env: NodeJS.ProcessEnv = process.env): Record<strin
     { name: "CODEX_CHAT_CODEX_BINARY", path: ["codex", "binary"] },
     { name: "CODEX_CHAT_CODEX_MODEL", path: ["codex", "model"] },
     { name: "CODEX_CHAT_CODEX_EFFORT", path: ["codex", "effort"] },
+    { name: "CODEX_CHAT_CODEX_SERVICE_TIER", path: ["codex", "serviceTier"] },
     { name: "CODEX_CHAT_CODEX_SANDBOX", path: ["codex", "sandbox"] },
     { name: "CODEX_CHAT_CODEX_APPROVAL_POLICY", path: ["codex", "approvalPolicy"] },
     { name: "CODEX_CHAT_SUBAGENTS_BACKEND", path: ["subagents", "backend"] },

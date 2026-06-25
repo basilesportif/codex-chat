@@ -186,6 +186,7 @@ export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient 
     await this.assertAppServerListenAddressAvailable();
     const args = ["app-server", "--listen", listenUrl];
     for (const item of this.config.codex.extraConfig) args.push("-c", item);
+    if (this.config.codex.serviceTier === "fast") args.push("-c", "features.fast_mode=true");
     this.logger.info({ component: "codex", event: "spawn_app_server", args }, "starting codex app-server");
     const safeEnv = sanitizeChildProcessEnv(this.config);
     const child = spawn(this.config.codex.binary, args, {
@@ -466,6 +467,7 @@ export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient 
       cwd: this.config.service.workspace,
       approvalPolicy: this.config.codex.approvalPolicy,
       model: this.config.codex.model,
+      serviceTier: this.config.codex.serviceTier,
       effort: this.config.codex.effort
     };
   }
@@ -496,6 +498,7 @@ export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient 
     const hash = await this.behavior.hash();
     const response = await this.request<Record<string, unknown>>("thread/start", {
       model: this.config.codex.model,
+      serviceTier: this.config.codex.serviceTier,
       cwd: this.config.service.workspace,
       approvalPolicy: this.config.codex.approvalPolicy,
       sandbox: this.config.codex.sandbox,
@@ -515,6 +518,7 @@ export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient 
       sessionId: threadId,
       transport: "app-server",
       model: this.config.codex.model,
+      serviceTier: this.config.codex.serviceTier,
       effort: this.config.codex.effort,
       behaviorHash: hash
     });
@@ -538,6 +542,7 @@ export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient 
     await this.request("thread/resume", {
       threadId: sessionId,
       model: this.config.codex.model,
+      serviceTier: this.config.codex.serviceTier,
       cwd: this.config.service.workspace,
       approvalPolicy: this.config.codex.approvalPolicy,
       sandbox: this.config.codex.sandbox,
@@ -550,6 +555,7 @@ export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient 
       sessionId,
       transport: "app-server",
       model: this.config.codex.model,
+      serviceTier: this.config.codex.serviceTier,
       effort: this.config.codex.effort,
       behaviorHash: hash
     });

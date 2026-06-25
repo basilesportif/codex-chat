@@ -18,6 +18,8 @@ appServerHost = "127.0.0.1"
 appServerPort = 49345
 model = "gpt-5.5"
 effort = "medium"
+# Main-loop Codex service tier. "fast" enables Codex Fast mode for the main thread by default.
+serviceTier = "fast"
 profile = ""
 sandbox = "danger-full-access"
 approvalPolicy = "never"
@@ -67,6 +69,8 @@ backend = "codex_exec"
 maxConcurrent = 5
 defaultModel = ""
 defaultEffort = "medium"
+# Subagents default to standard unless a dispatch/loop/monitor requests serviceTier = "fast".
+defaultServiceTier = "standard"
 defaultTimeoutSec = 1800
 maxTimeoutSec = 7200
 maxPromptBytes = 262144

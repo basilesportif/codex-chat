@@ -17,7 +17,8 @@ describe("directive parsing", () => {
       "route": "return_to_main",
       "summary": "Inspect logs",
       "model": "gpt-5.5",
-      "effort": "high"
+      "effort": "high",
+      "serviceTier": "fast"
     }
   ]
 }
@@ -34,7 +35,18 @@ After`);
       expect(action.summary).toBe("Inspect logs");
       expect(action.model).toBe("gpt-5.5");
       expect(action.effort).toBe("high");
+      expect(action.serviceTier).toBe("fast");
     }
+  });
+
+
+  test("rejects invalid dispatch_subagent serviceTier", () => {
+    const parsed = parseDirectives(`\`\`\`codex-chat
+{"version":1,"actions":[{"type":"dispatch_subagent","idempotencyKey":"job-fast-bad","profile":"debugger","prompt":"Inspect","route":"return_to_main","summary":"Inspect","model":"gpt-5.5","effort":"medium","serviceTier":"priority"}]}
+\`\`\``);
+
+    expect(parsed.blocks).toHaveLength(0);
+    expect(parsed.errors).toHaveLength(1);
   });
 
   test("does not parse removed BEGIN CODEXCHAT marker", () => {

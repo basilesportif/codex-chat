@@ -5,7 +5,7 @@ import { AppConfig, resolveConfigPath } from "./config.js";
 import { BehaviorPack } from "./behavior.js";
 import { DirectiveAction } from "./directives.js";
 import { StateStore } from "./state.js";
-import { Route, SubagentBackendKind, SubagentJob, SubagentOwnerType, SubagentResultTarget } from "./types.js";
+import { Route, ServiceTier, SubagentBackendKind, SubagentJob, SubagentOwnerType, SubagentResultTarget } from "./types.js";
 import {
   ChildAgentBackend,
   ChildAgentFinish,
@@ -38,6 +38,7 @@ interface DispatchInput {
   timeoutSec?: number;
   model?: string;
   effort?: string;
+  serviceTier?: ServiceTier;
   summary?: string;
   images?: string[];
   originChatId?: number;
@@ -128,6 +129,7 @@ export interface ActiveSubagentJobSnapshot {
   originMessageId?: number;
   model?: string;
   effort?: string;
+  serviceTier?: ServiceTier;
   ownerType: SubagentOwnerType;
   ownerId?: string;
   ownerRequestId?: string;
@@ -193,6 +195,7 @@ export class SubagentManager {
       timeoutSec: action.timeoutSec,
       model: action.model,
       effort: action.effort,
+      serviceTier: action.serviceTier,
       summary: action.summary,
       images: action.images,
       originChatId: origin?.chatId,
@@ -219,6 +222,7 @@ export class SubagentManager {
     const model = this.resolveModel(input.model);
     const effort = this.resolveEffort(input.effort);
     const ownerType = this.normalizeOwnerType(input.ownerType);
+    const serviceTier = this.resolveServiceTier(input.serviceTier);
     const ownerId = input.ownerId ?? this.defaultOwnerId(ownerType);
     const resultTarget = input.resultTarget ?? this.resultTargetForRoute(input.route);
     const queuedJob: SubagentJob = {
@@ -235,6 +239,7 @@ export class SubagentManager {
       artifactDir,
       model,
       effort,
+      serviceTier,
       backend: this.effectiveBackend(),
       summary: input.summary,
       enqueuedAt: nowIso(),
@@ -576,6 +581,7 @@ export class SubagentManager {
     const model = this.resolveModel(input.model);
     const effort = this.resolveEffort(input.effort);
     const backendKind = this.backendForJob(id);
+    const serviceTier = this.resolveServiceTier(input.serviceTier ?? this.jobs.get(id)?.serviceTier);
     const ownerType = this.normalizeOwnerType(input.ownerType ?? this.jobs.get(id)?.ownerType);
     const ownerId = input.ownerId ?? this.jobs.get(id)?.ownerId ?? this.defaultOwnerId(ownerType);
     const resultTarget = input.resultTarget ?? this.jobs.get(id)?.resultTarget ?? this.resultTargetForRoute(input.route);
@@ -593,6 +599,7 @@ export class SubagentManager {
       artifactDir,
       model,
       effort,
+      serviceTier,
       backend: backendKind,
       summary: input.summary,
       enqueuedAt: nowIso(),
@@ -614,6 +621,7 @@ export class SubagentManager {
       lastMessagePath,
       model,
       effort,
+      serviceTier,
       backend: backendKind,
       summary: input.summary,
       originChatId: input.originChatId,
@@ -631,6 +639,7 @@ export class SubagentManager {
       appServerLogPath,
       model,
       effort,
+      serviceTier,
       images: input.images ?? [],
       onJobUpdated: (updatedJob) => this.state.saveJob(updatedJob)
     });
@@ -751,6 +760,7 @@ export class SubagentManager {
       originMessageId: job.originMessageId,
       model: job.model,
       effort: job.effort,
+      serviceTier: job.serviceTier,
       ownerType: this.jobOwnerType(job),
       ownerId: job.ownerId,
       ownerRequestId: job.ownerRequestId,
@@ -801,6 +811,10 @@ export class SubagentManager {
 
   resolveEffort(effort?: string): string {
     return effort || this.config.subagents.defaultEffort;
+  }
+
+  resolveServiceTier(serviceTier?: ServiceTier): ServiceTier {
+    return serviceTier ?? this.config.subagents.defaultServiceTier ?? "standard";
   }
 
   private configuredBackend(): SubagentBackendKind {

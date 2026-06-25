@@ -1163,7 +1163,7 @@ describe("service supervisor", () => {
     expect(sendText).toHaveBeenCalledTimes(1);
     expect(sendText).toHaveBeenCalledWith(
       253768951,
-      "Sub: Research routing\nresearcher · gpt-5.5 · high\n\nI'm dispatching a researcher to inspect the directive flow.",
+      "Sub: Research routing\nresearcher · gpt-5.5 · high · standard\n\nI'm dispatching a researcher to inspect the directive flow.",
       506
     );
 

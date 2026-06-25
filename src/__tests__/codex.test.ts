@@ -63,7 +63,8 @@ function testConfig(rootDir: string): AppConfig {
       turnTimeoutSec: 1,
       keepAliveSec: 60,
       extraConfig: [],
-      addDirs: []
+      addDirs: [],
+      serviceTier: "fast"
     },
     transcription: {
       apiKeyEnv: "CUSTOM_TRANSCRIPTION_API_KEY"
@@ -144,6 +145,8 @@ describe("codex clients", () => {
     await client.start();
 
     expect(spawn).toHaveBeenCalledOnce();
+    const args = spawn.mock.calls[0]?.[1] as string[];
+    expect(args).toContain("features.fast_mode=true");
     const options = spawn.mock.calls[0]?.[2] as { env?: NodeJS.ProcessEnv; detached?: boolean };
     expect(options.env).not.toHaveProperty("OPENAI_API_KEY");
     expect(options.env).not.toHaveProperty("CUSTOM_TRANSCRIPTION_API_KEY");
@@ -198,6 +201,8 @@ describe("codex clients", () => {
     const client = new AppServerCodexClient(testConfig("/tmp/codex-chat-test"), state as never, behavior as never, fakeLogger() as never);
 
     await client.start();
+    const mainStart = sent.find((message) => message.method === "thread/start" && message.params.serviceName === "codex-chat");
+    expect(mainStart?.params).toMatchObject({ serviceTier: "fast" });
     const result = await client.startEmployeeThread({
       id: "email-calendar",
       name: "Email/calendar",

@@ -67,7 +67,8 @@ function testConfig(rootDir: string): AppConfig {
       turnTimeoutSec: 1,
       keepAliveSec: 60,
       extraConfig: [],
-      addDirs: []
+      addDirs: [],
+      serviceTier: "fast"
     },
     subagents: {
       enabled: true,
@@ -75,6 +76,7 @@ function testConfig(rootDir: string): AppConfig {
       maxConcurrent: 1,
       defaultModel: "",
       defaultEffort: "medium",
+      defaultServiceTier: "standard",
       defaultTimeoutSec: 10,
       maxTimeoutSec: 10,
       maxPromptBytes: 262_144,
@@ -153,6 +155,7 @@ describe("app-server subagent backend", () => {
       appServerLogPath: join(root, "app-server.log"),
       model: "gpt-test",
       effort: "medium",
+      serviceTier: "fast",
       images: [],
       onJobUpdated: vi.fn().mockResolvedValue(undefined)
     });
@@ -160,8 +163,14 @@ describe("app-server subagent backend", () => {
     const threadStart = sent.find((message) => message.method === "thread/start");
     expect(threadStart?.params).toMatchObject({
       serviceName: "codex-chat-subagent",
+      serviceTier: "fast",
       ephemeral: true
     });
+    const turnStart = sent.find((message) => message.method === "turn/start");
+    expect(turnStart?.params).toMatchObject({ serviceTier: "fast" });
+    const args = spawn.mock.calls[0]?.[1] as string[];
+    expect(args).toContain("features.fast_mode=true");
+    expect(args).toContain('service_tier="fast"');
     expect(threadStart?.params).not.toHaveProperty("persistExtendedHistory");
     expect(sent.some((message) => message.method === "thread/resume")).toBe(false);
     expect(job.backendThreadId).toBe("subagent-thread");
@@ -230,6 +239,7 @@ describe("app-server subagent backend", () => {
       appServerLogPath: join(root, "app-server.log"),
       model: "gpt-test",
       effort: "medium",
+      serviceTier: "standard",
       images: [],
       onJobUpdated: vi.fn().mockResolvedValue(undefined)
     })).rejects.toThrow(/exited during startup/);
@@ -273,6 +283,7 @@ describe("codex exec subagent backend", () => {
       appServerLogPath: join(root, "app-server.log"),
       model: "gpt-test",
       effort: "medium",
+      serviceTier: "standard",
       images: [],
       onJobUpdated: vi.fn().mockResolvedValue(undefined)
     });
@@ -283,4 +294,50 @@ describe("codex exec subagent backend", () => {
     expect(args.indexOf("--skip-git-repo-check")).toBeLessThan(args.indexOf("--cd"));
     await backend.shutdown();
   });
+
+  test("adds Codex Fast config for fast codex_exec subagents", async () => {
+    vi.resetModules();
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-subagent-exec-"));
+    tempDirs.push(root);
+    const child = fakeChild() as ReturnType<typeof fakeChild> & {
+      stdin: { end: ReturnType<typeof vi.fn> };
+    };
+    child.stdin = { end: vi.fn() };
+    const spawn = vi.fn(() => child);
+    vi.doMock("node:child_process", async () => {
+      const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+      return { ...actual, spawn };
+    });
+    const { CodexExecChildAgentBackend } = await import("../subagent-backends.js");
+    const backend = new CodexExecChildAgentBackend(testConfig(root), fakeLogger() as never);
+    const job: SubagentJob = {
+      id: "job_execfast0000000000000000000000000",
+      profile: "implementer",
+      route: "return_to_main",
+      status: "running",
+      promptPath: join(root, "prompt.md"),
+      artifactDir: root,
+      serviceTier: "fast"
+    };
+
+    await backend.start({
+      job,
+      assembledPrompt: "do work",
+      lastMessagePath: join(root, "last-message.md"),
+      stdoutPath: join(root, "events.jsonl"),
+      stderrPath: join(root, "stderr.log"),
+      appServerLogPath: join(root, "app-server.log"),
+      model: "gpt-test",
+      effort: "medium",
+      serviceTier: "fast",
+      images: [],
+      onJobUpdated: vi.fn().mockResolvedValue(undefined)
+    });
+
+    const args = spawn.mock.calls[0]?.[1] as string[];
+    expect(args).toContain("features.fast_mode=true");
+    expect(args).toContain('service_tier="fast"');
+    await backend.shutdown();
+  });
+
 });

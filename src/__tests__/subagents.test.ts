@@ -50,7 +50,8 @@ function makeConfig(rootDir: string, maxConcurrent = 2): AppConfig {
       approvalPolicy: "never",
       profile: "",
       model: "gpt-test",
-      extraConfig: []
+      extraConfig: [],
+      serviceTier: "fast"
     },
     subagents: {
       enabled: true,
@@ -58,6 +59,7 @@ function makeConfig(rootDir: string, maxConcurrent = 2): AppConfig {
       maxConcurrent,
       defaultModel: "",
       defaultEffort: "medium",
+      defaultServiceTier: "standard",
       defaultTimeoutSec: 60,
       maxTimeoutSec: 60,
       maxPromptBytes: 1_000_000,
@@ -192,11 +194,11 @@ describe("subagents", () => {
       { onReturnToMain: vi.fn(), onSendToUser: vi.fn() }
     );
 
-    await manager.dispatch({ profile: "x", prompt: "a", route: "return_to_main", model: "gpt-5.5", effort: "xhigh", summary: "test task" });
+    await manager.dispatch({ profile: "x", prompt: "a", route: "return_to_main", model: "gpt-5.5", effort: "xhigh", serviceTier: "fast", summary: "test task" });
 
     const saved = state.saveJob.mock.calls[0]?.[0];
-    expect(saved).toMatchObject({ model: "gpt-5.5", effort: "xhigh", summary: "test task", status: "queued" });
-    expect(manager.listJobs()[0]).toMatchObject({ model: "gpt-5.5", effort: "xhigh", summary: "test task" });
+    expect(saved).toMatchObject({ model: "gpt-5.5", effort: "xhigh", serviceTier: "fast", summary: "test task", status: "queued" });
+    expect(manager.listJobs()[0]).toMatchObject({ model: "gpt-5.5", effort: "xhigh", serviceTier: "fast", summary: "test task" });
   });
 
   test("records owner and result metadata with compatible main defaults", async () => {
@@ -510,6 +512,7 @@ describe("subagents", () => {
       appServerLogPath: join(root, "app-server.log"),
       model: "gpt-test",
       effort: "medium",
+      serviceTier: "standard",
       images: [],
       onJobUpdated: vi.fn().mockResolvedValue(undefined)
     });
@@ -617,6 +620,7 @@ describe("subagents", () => {
       appServerLogPath: join(root, "app-server.log"),
       model: "gpt-test",
       effort: "medium",
+      serviceTier: "standard",
       images: [],
       onJobUpdated: vi.fn().mockResolvedValue(undefined)
     });

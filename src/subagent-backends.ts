@@ -6,7 +6,7 @@ import WebSocket from "ws";
 import type { Logger } from "pino";
 import { resolveConfigPath, type AppConfig } from "./config.js";
 import { sanitizeChildProcessEnv } from "./env.js";
-import type { SubagentBackendKind, SubagentJob } from "./types.js";
+import type { ServiceTier, SubagentBackendKind, SubagentJob } from "./types.js";
 import { ensureDir, killProcessTree, nowIso } from "./util.js";
 
 type JsonRpcMessage = Record<string, unknown> & {
@@ -32,6 +32,7 @@ export interface StartChildAgentInput {
   appServerLogPath: string;
   model: string;
   effort: string;
+  serviceTier: ServiceTier;
   images: string[];
   onJobUpdated(job: SubagentJob): Promise<void>;
 }
@@ -62,7 +63,7 @@ export class CodexExecChildAgentBackend implements ChildAgentBackend {
   ) {}
 
   async start(input: StartChildAgentInput): Promise<StartedChildAgent> {
-    const args = this.buildArgs(input.lastMessagePath, input.model, input.effort, input.images);
+    const args = this.buildArgs(input.lastMessagePath, input.model, input.effort, input.serviceTier, input.images);
     this.logger.info(
       { component: "subagents", event: "start", backend: this.kind, jobId: input.job.id, profile: input.job.profile, args },
       "starting subagent"
@@ -131,7 +132,7 @@ export class CodexExecChildAgentBackend implements ChildAgentBackend {
     for (const jobId of this.children.keys()) await this.kill(jobId, "SIGTERM");
   }
 
-  private buildArgs(lastMessagePath: string, model?: string, effort?: string, images: string[] = []): string[] {
+  private buildArgs(lastMessagePath: string, model?: string, effort?: string, serviceTier: ServiceTier = "standard", images: string[] = []): string[] {
     const args = [
       "exec",
       "--json",
@@ -150,6 +151,7 @@ export class CodexExecChildAgentBackend implements ChildAgentBackend {
       args.push("-c", item);
     }
     args.push("-c", `model_reasoning_effort="${effort}"`);
+    if (serviceTier === "fast") args.push("-c", "features.fast_mode=true", "-c", `service_tier="fast"`);
     if (model) args.push("--model", model);
     if (this.config.codex.profile) args.push("--profile", this.config.codex.profile);
     for (const image of images) args.push("--image", image);
@@ -233,6 +235,7 @@ class ChildAppServerSession {
     const listenUrl = `ws://127.0.0.1:${port}`;
     const args = ["app-server", "--listen", listenUrl];
     for (const item of this.config.codex.extraConfig ?? []) args.push("-c", item);
+    if (this.input.serviceTier === "fast") args.push("-c", "features.fast_mode=true", "-c", `service_tier="fast"`);
     this.logger.info(
       { component: "subagents", event: "start", backend: "codex_app_server", jobId: this.input.job.id, profile: this.input.job.profile, listenUrl, args },
       "starting app-server subagent"
@@ -364,6 +367,7 @@ class ChildAppServerSession {
   private async startThreadAndTurn(): Promise<void> {
     const threadResponse = await this.request<Record<string, unknown>>("thread/start", {
       model: this.input.model,
+      serviceTier: this.input.serviceTier,
       cwd: this.config.service.workspace,
       approvalPolicy: this.config.codex.approvalPolicy,
       sandbox: this.config.codex.sandbox,
@@ -386,6 +390,7 @@ class ChildAppServerSession {
       cwd: this.config.service.workspace,
       approvalPolicy: this.config.codex.approvalPolicy,
       model: this.input.model,
+      serviceTier: this.input.serviceTier,
       effort: this.input.effort
     });
     const turn = turnResponse.turn as Record<string, unknown> | undefined;

@@ -44,7 +44,7 @@ const dispatchSubagentAction = baseAction.extend({
   summary: z.string().min(1),
   model: z.string().min(1),
   effort: z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]),
-  serviceTier: serviceTierSchema.optional(),
+  serviceTier: serviceTierSchema,
   images: z.array(z.string()).optional()
 });
 

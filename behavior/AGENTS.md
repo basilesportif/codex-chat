@@ -160,6 +160,7 @@ Optional fields:
 - `timeoutSec` (number): per-run timeout. Defaults to `defaults.timeoutSec` (1800).
 - `model` (string): optional Codex model override for subagents spawned by this loop.
 - `effort` (`none` | `minimal` | `low` | `medium` | `high` | `xhigh`): optional Codex reasoning effort override for subagents spawned by this loop.
+- `serviceTier` (`standard` | `fast`): optional Codex service-tier override for subagents spawned by this loop.
 - `lock` (bool): if true, wrap the cron command with `flock -n` so a slow run never overlaps the next tick. Defaults to `defaults.lock` (true). Keep this true unless you have a reason.
 - `notifyOnFailure` (bool): if true, notify ops via Telegram when a run errors.
 - `durable` (bool): if true, when the service IPC socket is unreachable at fire time the run is spooled to `data/spool/loops/` and replayed on next service start. Use for important loops you don't want to lose.
@@ -263,7 +264,7 @@ Codex turn prompts may include an `Active subagent jobs` snapshot. Use it to han
 - Do not guess, and do not try to steer queued, cancelling, terminal, `codex_exec`, or `steerable=false` jobs.
 - For subagent status requests, ask which job if ambiguous, then tell Tim to use `agent status <ref>` / `subagent status <ref>` for a mechanical snapshot. Do not steer STATUS requests into child jobs as normal behavior.
 
-### Model/effort disclosure and routing
+### Model, effort, and service-tier disclosure/routing
 
 For every user-originated task, explicitly decide whether work stays in the main loop or is dispatched to a subagent.
 
@@ -280,11 +281,11 @@ Do not use the main loop for README changes, documentation edits, code edits, re
 
 For main-loop work, the user-facing reply must include a short line identifying it as main-loop work and stating the model/effort/tier actually being used, for example:
 
-`main_loop: model=gpt-5.5 effort=medium tier=standard`
+`main_loop: model=gpt-5.5 effort=medium tier=fast`
 
-The main loop and subagents default to standard/slow mode. Use Codex Fast mode only when Tim explicitly asks for Fast mode, a fast/urgent/low-latency run, or an equivalent explicit latency override.
+The main-loop service tier is config-driven. The current deployment default is Codex Fast mode, but Tim can change that later through config/workspace settings such as `[codex].serviceTier` or `CODEX_CHAT_CODEX_SERVICE_TIER`.
 
-For any reasoning, investigation, repo inspection, code or docs editing, code review, debugging, architecture, calendar/email lookup, external-data lookup, ambiguous, multi-step, or potentially slow task, dispatch a subagent. The top-level Codex loop must choose `model` and `effort` explicitly for the task; do not rely on subagent defaults as the routing decision. Before or with every `dispatch_subagent`, provide a concise task summary via `summary`, and set explicit `model` and `effort` fields. Omit `serviceTier` or set `serviceTier: "standard"` by default. Set `serviceTier: "fast"` only when Tim explicitly asks for Fast mode or an explicitly fast/urgent/low-latency subagent; do not choose Fast mode merely because the task is complex or potentially slow. The service will send a visible dispatch status containing the task, profile, model, effort, and tier, and the job will be visible in `agents` / `subagents`.
+For any reasoning, investigation, repo inspection, code or docs editing, code review, debugging, architecture, calendar/email lookup, external-data lookup, ambiguous, multi-step, or potentially slow task, dispatch a subagent. The top-level Codex loop must choose `model`, `effort`, and `serviceTier` explicitly for the task from the rubric below; do not rely on subagent defaults as the routing decision. Before or with every `dispatch_subagent`, provide a concise task summary via `summary`, and set explicit `model`, `effort`, and `serviceTier` fields. Use Codex Fast mode when Tim requests it or when the rubric says it is appropriate; use standard/slow mode when Tim requests it or when the rubric says the task should trade latency for maximum thoroughness. The service will send a visible dispatch status containing the task, profile, model, effort, and tier, and the job will be visible in `agents` / `subagents`.
 
 Default routing rubric:
 
@@ -292,6 +293,12 @@ Default routing rubric:
 - Coding, implementation, debugging, code review, architecture, cross-module work, deploy-sensitive work, or tasks with meaningful correctness risk: `model: "gpt-5.5"`, `effort: "high"`.
 - Very intensive research or especially risky, ambiguous, high-stakes, large-scope, multi-step, or production-sensitive tasks: `model: "gpt-5.5"`, `effort: "xhigh"`.
 - Simple deterministic main-loop work: use the current top-level model/effort and disclose it as `main_loop`.
+
+Service-tier rubric for subagents:
+
+- Use `serviceTier: "fast"` when Tim asks for Fast mode, quick/urgent/low-latency handling, or when the task is bounded and user-waiting, including routine repo/file inspection, docs lookup/editing, small-to-medium implementation, focused debugging, concise research, and stress-test fan-out.
+- Use `serviceTier: "standard"` when Tim asks for standard/slow/deep mode, or when the task is very intensive, high-stakes, production-sensitive, unusually ambiguous, broad in scope, or likely to benefit more from maximum thoroughness than lower latency.
+- If both fast and standard signals apply, follow Tim's explicit tier request first; otherwise choose the tier that best matches the task's risk and latency tradeoff, and include that exact `serviceTier` in the directive.
 
 Subagent directive shape:
 
@@ -305,7 +312,7 @@ Subagent directive shape:
   "prompt": "Detailed subagent task",
   "model": "gpt-5.5",
   "effort": "medium",
-  "serviceTier": "standard"
+  "serviceTier": "fast"
 }
 ~~~
 
@@ -382,7 +389,7 @@ Rules:
 
 - The block must be valid JSON.
 - Every side-effecting action needs an `idempotencyKey`.
-- `dispatch_subagent` actions must include `summary`, `model`, and `effort`; add optional `serviceTier: "fast"` only for explicit Fast-mode requests or `"standard"` for the default standard tier.
+- `dispatch_subagent` actions must include `summary`, `model`, `effort`, and `serviceTier`; choose `serviceTier` from the model/effort/tier rubric instead of relying on static defaults.
 - Keep normal user-facing text outside directive blocks.
 - Do not include secrets in directives.
 - Use local paths for `send_image` and `send_document`.
@@ -441,6 +448,7 @@ When the user sends a message like "stress test 5 subagents", "run stress test",
    - `prompt`: `"Read and summarize the file /home/tim/pkg/tim/codex-chat/src/<filename>.ts in 2-3 sentences."`
    - `model`: `"gpt-5.5"`
    - `effort`: `"medium"`
+   - `serviceTier`: `"fast"`
 4. After the dispatch directives, emit a `send_text` directive telling the user: `"Dispatched N subagents. Use 'agents' to monitor progress."`
 
 The fan-out goes through Codex — you decide how many and which files. Do NOT use `dispatch_subagent` on the same file twice in the same batch.
@@ -452,11 +460,11 @@ The fan-out goes through Codex — you decide how many and which files. Do NOT u
 {
   "version": 1,
   "actions": [
-    { "type": "dispatch_subagent", "idempotencyKey": "stress-1-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize service.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/service.ts in 2-3 sentences.", "model": "gpt-5.5", "effort": "medium" },
-    { "type": "dispatch_subagent", "idempotencyKey": "stress-2-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize codex.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/codex.ts in 2-3 sentences.", "model": "gpt-5.5", "effort": "medium" },
-    { "type": "dispatch_subagent", "idempotencyKey": "stress-3-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize directives.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/directives.ts in 2-3 sentences.", "model": "gpt-5.5", "effort": "medium" },
-    { "type": "dispatch_subagent", "idempotencyKey": "stress-4-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize telegram.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/telegram.ts in 2-3 sentences.", "model": "gpt-5.5", "effort": "medium" },
-    { "type": "dispatch_subagent", "idempotencyKey": "stress-5-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize subagents.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/subagents.ts in 2-3 sentences.", "model": "gpt-5.5", "effort": "medium" },
+    { "type": "dispatch_subagent", "idempotencyKey": "stress-1-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize service.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/service.ts in 2-3 sentences.", "model": "gpt-5.5", "effort": "medium", "serviceTier": "fast" },
+    { "type": "dispatch_subagent", "idempotencyKey": "stress-2-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize codex.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/codex.ts in 2-3 sentences.", "model": "gpt-5.5", "effort": "medium", "serviceTier": "fast" },
+    { "type": "dispatch_subagent", "idempotencyKey": "stress-3-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize directives.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/directives.ts in 2-3 sentences.", "model": "gpt-5.5", "effort": "medium", "serviceTier": "fast" },
+    { "type": "dispatch_subagent", "idempotencyKey": "stress-4-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize telegram.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/telegram.ts in 2-3 sentences.", "model": "gpt-5.5", "effort": "medium", "serviceTier": "fast" },
+    { "type": "dispatch_subagent", "idempotencyKey": "stress-5-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize subagents.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/subagents.ts in 2-3 sentences.", "model": "gpt-5.5", "effort": "medium", "serviceTier": "fast" },
     { "type": "send_text", "idempotencyKey": "stress-ack-<msgId>", "chatId": 253768951, "text": "Dispatched 5 subagents. Use 'agents' to monitor progress." }
   ]
 }

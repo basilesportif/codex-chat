@@ -83,7 +83,7 @@ END CODEXCHAT DIRECTIVE`;
     expect(parsed.cleanText).toBe("Visible");
   });
 
-  test.each(["summary", "model", "effort"])("dispatch_subagent requires %s", (field) => {
+  test.each(["summary", "model", "effort", "serviceTier"])("dispatch_subagent requires %s", (field) => {
     const action: Record<string, unknown> = {
       type: "dispatch_subagent",
       idempotencyKey: "job-missing-field",
@@ -92,7 +92,8 @@ END CODEXCHAT DIRECTIVE`;
       route: "return_to_main",
       summary: "Inspect logs",
       model: "gpt-5.5",
-      effort: "high"
+      effort: "high",
+      serviceTier: "standard"
     };
     delete action[field];
 

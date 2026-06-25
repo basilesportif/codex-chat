@@ -196,7 +196,7 @@ describe("HELP_TEXT", () => {
 
 
 describe("dispatch_subagent status", () => {
-  test("sends model and effort status before dispatch", async () => {
+  test("sends model, effort, and tier status before dispatch", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
     const service = new ServiceSupervisor(config, logger);
@@ -214,12 +214,13 @@ describe("dispatch_subagent status", () => {
         summary: "inspect routing",
         prompt: "Inspect routing behavior",
         model: "gpt-5.5",
-        effort: "high"
+        effort: "high",
+        serviceTier: "fast"
       },
       { source: "telegram", text: "x", attachments: [], receivedAt: new Date().toISOString(), chatId: 123, messageId: 456 }
     );
 
-    expect(sendText).toHaveBeenCalledWith(123, "Sub: inspect routing\nresearcher · gpt-5.5 · high · standard", 456);
+    expect(sendText).toHaveBeenCalledWith(123, "Sub: inspect routing\nresearcher · gpt-5.5 · high · fast", 456);
     expect(dispatchFromDirective).toHaveBeenCalled();
   });
 

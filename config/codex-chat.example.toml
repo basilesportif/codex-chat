@@ -18,8 +18,8 @@ appServerHost = "127.0.0.1"
 appServerPort = 49345
 model = "gpt-5.5"
 effort = "medium"
-# Main-loop Codex service tier. Default to standard; set "fast" only for an explicit Fast-mode deployment.
-serviceTier = "standard"
+# Main-loop Codex service tier. Current default is Fast; set "standard" here or via CODEX_CHAT_CODEX_SERVICE_TIER to opt back to standard/slow mode.
+serviceTier = "fast"
 profile = ""
 sandbox = "danger-full-access"
 approvalPolicy = "never"
@@ -69,7 +69,7 @@ backend = "codex_exec"
 maxConcurrent = 5
 defaultModel = ""
 defaultEffort = "medium"
-# Subagents default to standard unless a dispatch/loop/monitor requests serviceTier = "fast".
+# Subagents keep an independent fallback tier; behavior prompts should choose serviceTier per dispatch, while loops/monitors may still set serviceTier explicitly.
 defaultServiceTier = "standard"
 defaultTimeoutSec = 1800
 maxTimeoutSec = 7200

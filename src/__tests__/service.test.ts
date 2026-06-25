@@ -1126,7 +1126,7 @@ describe("service supervisor", () => {
       yield {
         type: "final",
         text: `\`\`\`codex-chat
-{"version":1,"actions":[{"type":"dispatch_subagent","idempotencyKey":"research-route-1","profile":"researcher","route":"return_to_main","summary":"Research routing","prompt":"Research routing behavior","model":"gpt-5.5","effort":"high"}]}
+{"version":1,"actions":[{"type":"dispatch_subagent","idempotencyKey":"research-route-1","profile":"researcher","route":"return_to_main","summary":"Research routing","prompt":"Research routing behavior","model":"gpt-5.5","effort":"high","serviceTier":"fast"}]}
 \`\`\``
       };
     });
@@ -1150,7 +1150,7 @@ describe("service supervisor", () => {
       yield {
         type: "final",
         text: `\`\`\`codex-chat
-{"version":1,"actions":[{"type":"dispatch_subagent","idempotencyKey":"research-route-merge-1","profile":"researcher","route":"return_to_main","summary":"Research routing","prompt":"Research routing behavior","model":"gpt-5.5","effort":"high"},{"type":"send_text","idempotencyKey":"research-route-merge-ack-1","text":"I'm dispatching a researcher to inspect the directive flow."}]}
+{"version":1,"actions":[{"type":"dispatch_subagent","idempotencyKey":"research-route-merge-1","profile":"researcher","route":"return_to_main","summary":"Research routing","prompt":"Research routing behavior","model":"gpt-5.5","effort":"high","serviceTier":"fast"},{"type":"send_text","idempotencyKey":"research-route-merge-ack-1","text":"I'm dispatching a researcher to inspect the directive flow."}]}
 \`\`\``
       };
     });
@@ -1163,7 +1163,7 @@ describe("service supervisor", () => {
     expect(sendText).toHaveBeenCalledTimes(1);
     expect(sendText).toHaveBeenCalledWith(
       253768951,
-      "Sub: Research routing\nresearcher · gpt-5.5 · high · standard\n\nI'm dispatching a researcher to inspect the directive flow.",
+      "Sub: Research routing\nresearcher · gpt-5.5 · high · fast\n\nI'm dispatching a researcher to inspect the directive flow.",
       506
     );
 

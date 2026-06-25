@@ -73,15 +73,15 @@ afterEach(async () => {
 });
 
 describe("Phase 0 Telegram baseline", () => {
-  test("documents standard tier as default and keeps Fast mode explicit", async () => {
+  test("documents Fast as the current main-loop default while subagent tier stays prompt-routed", async () => {
     const config = await tempConfig();
     const behavior = await readFile(join(process.cwd(), "behavior", "AGENTS.md"), "utf8");
 
-    expect(config.codex.serviceTier).toBe("standard");
+    expect(config.codex.serviceTier).toBe("fast");
     expect(config.subagents.defaultServiceTier).toBe("standard");
-    expect(behavior).toContain("default to standard/slow mode");
-    expect(behavior).toContain("Fast mode only when Tim explicitly asks");
-    expect(behavior).not.toContain("Codex Fast mode by default");
+    expect(behavior).toContain("current deployment default is Codex Fast mode");
+    expect(behavior).toContain("choose `model`, `effort`, and `serviceTier` explicitly");
+    expect(behavior).toContain("Use `serviceTier: \"fast\"` when Tim asks for Fast mode");
   });
 
   test("formats Telegram event metadata and inert reply context before user content", async () => {

@@ -49,7 +49,7 @@ Based on the current repo/system state:
 - [x] Slack adapter exists (`src/slack.ts` and related runtime/API tests).
 - [x] Installable Slack app surface exists under `slack-app/` with manifest,
       install metadata template, adapter config/env examples, validation, and
-      an operator runbook in `slack-app/README.md`.
+      a canonical operator runbook in `slack-app/SLACK.md`.
 - [x] Capability-aware runtime abstractions are implemented in `codex-chat`.
 - [ ] Durable company-mode capability state exists outside long-term JSON files.
 - [ ] Admin dashboard exists for users, channel mappings, capabilities, audits,

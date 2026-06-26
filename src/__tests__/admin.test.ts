@@ -108,11 +108,11 @@ port = 0
 [admin]
 enabled = true
 envFile = "${envFile ?? join(root, "env")}"
-publicBaseUrl = "https://brain.decisiveoutcomes.com"
+publicBaseUrl = "https://brain.decisive-outcomes.com"
 `,
   );
   process.env.CODEX_CHAT_ADMIN_PUBLIC_BASE_URL =
-    "https://brain.decisiveoutcomes.com";
+    "https://brain.decisive-outcomes.com";
   delete process.env.CLERK_SIGN_IN_URL;
   process.env.CLERK_PUBLISHABLE_KEY =
     "pk_test_ZmFrZS5jbGVyay5hY2NvdW50cy5kZXYk";
@@ -325,14 +325,14 @@ describe("admin routes", () => {
     });
     expect(noAuth.status).toBe(302);
     expect(noAuth.headers.get("location")).toMatch(
-      /^https:\/\/brain\.decisiveoutcomes\.com\/admin\/codex-chat\/auth\/sign-in\?/,
+      /^https:\/\/brain\.decisive-outcomes\.com\/admin\/codex-chat\/auth\/sign-in\?/,
     );
     expect(noAuth.headers.get("location")).toContain(
-      "redirect_url=https%3A%2F%2Fbrain.decisiveoutcomes.com%2Fadmin%2Fcodex-chat",
+      "redirect_url=https%3A%2F%2Fbrain.decisive-outcomes.com%2Fadmin%2Fcodex-chat",
     );
 
     const signIn = await fetch(
-      `${baseUrl}/admin/codex-chat/auth/sign-in?redirect_url=${encodeURIComponent("https://brain.decisiveoutcomes.com/admin/codex-chat")}`,
+      `${baseUrl}/admin/codex-chat/auth/sign-in?redirect_url=${encodeURIComponent("https://brain.decisive-outcomes.com/admin/codex-chat")}`,
     );
     expect(signIn.status).toBe(200);
     const signInHtml = await signIn.text();
@@ -349,7 +349,7 @@ describe("admin routes", () => {
   test("admin route can be configured as /admin without exposing codex-chat path", async () => {
     process.env.CODEX_CHAT_ADMIN_ROUTE_PATH = "/admin";
     process.env.CODEX_CHAT_ADMIN_PUBLIC_BASE_URL =
-      "https://brain.decisiveoutcomes.com";
+      "https://brain.decisive-outcomes.com";
     const { baseUrl } = await apiHarness(undefined, {
       adminAuthDeps: {
         verifyTokenImpl: vi.fn(async () => ({ sub: "user_123" }) as never),
@@ -365,10 +365,10 @@ describe("admin routes", () => {
     const noAuth = await fetch(`${baseUrl}/admin`, { redirect: "manual" });
     expect(noAuth.status).toBe(302);
     expect(noAuth.headers.get("location")).toMatch(
-      /^https:\/\/brain\.decisiveoutcomes\.com\/admin\/auth\/sign-in\?/,
+      /^https:\/\/brain\.decisive-outcomes\.com\/admin\/auth\/sign-in\?/,
     );
     expect(noAuth.headers.get("location")).toContain(
-      "redirect_url=https%3A%2F%2Fbrain.decisiveoutcomes.com%2Fadmin",
+      "redirect_url=https%3A%2F%2Fbrain.decisive-outcomes.com%2Fadmin",
     );
 
     const slash = await fetch(`${baseUrl}/admin/`, { redirect: "manual" });

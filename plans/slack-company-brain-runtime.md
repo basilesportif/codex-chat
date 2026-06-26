@@ -394,7 +394,7 @@ query support.
 ## Admin and dashboard
 
 Current implementation note: the service now includes an initial
-`/admin` page in the codex-chat API process. In the current deployment it is exposed at `https://brain.decisiveoutcomes.com/admin` via `CODEX_CHAT_ADMIN_PUBLIC_BASE_URL`, while Slack Events remain on `https://me.galebach.com/api/slack/events`. It is Clerk-gated with
+`/admin` page in the codex-chat API process. In the current deployment it is exposed at `https://brain.decisive-outcomes.com/admin` via `CODEX_CHAT_ADMIN_PUBLIC_BASE_URL`, while Slack Events remain on `https://me.galebach.com/api/slack/events`. It is Clerk-gated with
 server-side email allowlist checks, fails closed when Clerk keys or allowed
 emails are absent, writes only the Slack/bootstrap env vars needed for the
 current HTTP Events API adapter, and renders/validates the Slack manifest. This

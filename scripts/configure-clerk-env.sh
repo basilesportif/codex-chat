@@ -9,7 +9,7 @@ set -Eeuo pipefail
 
 ENV_FILE="${CODEX_CHAT_ENV_FILE:-$HOME/.config/codex-chat/env}"
 SERVICE_NAME="${CODEX_CHAT_SERVICE_NAME:-codex-chat.service}"
-DEFAULT_ADMIN_PUBLIC_BASE_URL="https://brain.decisiveoutcomes.com"
+DEFAULT_ADMIN_PUBLIC_BASE_URL="https://brain.decisive-outcomes.com"
 DEFAULT_ADMIN_ROUTE_PATH="/admin"
 DEFAULT_SIGN_IN_PATH="/admin/auth/sign-in"
 ALLOWED_EMAILS="timgalebachukraine@gmail.com,tim.galebach@gmail.com"

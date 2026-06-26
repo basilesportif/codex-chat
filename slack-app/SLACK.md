@@ -194,7 +194,7 @@ Events API URL.
 The codex-chat service now serves an initial Clerk-protected admin page at:
 
 ```text
-https://brain.decisiveoutcomes.com/admin
+https://brain.decisive-outcomes.com/admin
 ```
 
 This is only the Slack bootstrap/config surface. It can write the Slack env vars
@@ -206,9 +206,9 @@ Required admin/auth env names:
 - `CODEX_CHAT_ADMIN_ENABLED=true`
 - `CLERK_PUBLISHABLE_KEY`
 - `CLERK_SECRET_KEY`
-- `CODEX_CHAT_ADMIN_PUBLIC_BASE_URL=https://brain.decisiveoutcomes.com`
+- `CODEX_CHAT_ADMIN_PUBLIC_BASE_URL=https://brain.decisive-outcomes.com`
 - `CODEX_CHAT_ADMIN_ROUTE_PATH=/admin`
-- `CLERK_SIGN_IN_URL=https://brain.decisiveoutcomes.com/admin/auth/sign-in`
+- `CLERK_SIGN_IN_URL=https://brain.decisive-outcomes.com/admin/auth/sign-in`
 - `CLERK_ALLOWED_EMAILS=timgalebachukraine@gmail.com,tim.galebach@gmail.com`
 
 If Clerk keys or allowed emails are missing/empty, admin access fails closed.
@@ -223,7 +223,7 @@ Required Slack env names for the current HTTP Events API adapter:
 - `CODEX_CHAT_SLACK_EVENTS_PATH=/api/slack/events`
 - `CODEX_CHAT_API_ENABLED=true`
 - `CODEX_CHAT_BASE_URL=https://me.galebach.com`
-- `CODEX_CHAT_ADMIN_PUBLIC_BASE_URL=https://brain.decisiveoutcomes.com`
+- `CODEX_CHAT_ADMIN_PUBLIC_BASE_URL=https://brain.decisive-outcomes.com`
 
 After the code is deployed, you can use the admin page to add/replace Slack
 secrets. To bootstrap Clerk env from a shell, prefer the checked-in helper, which
@@ -237,16 +237,16 @@ ssh -t codex-chat 'cd ~/pkg/tim/codex-chat && git pull --ff-only origin main && 
 Use the defaults unless intentionally testing another host:
 
 ```text
-CODEX_CHAT_ADMIN_PUBLIC_BASE_URL=https://brain.decisiveoutcomes.com
+CODEX_CHAT_ADMIN_PUBLIC_BASE_URL=https://brain.decisive-outcomes.com
 CODEX_CHAT_ADMIN_ROUTE_PATH=/admin
-CLERK_SIGN_IN_URL=https://brain.decisiveoutcomes.com/admin/auth/sign-in
+CLERK_SIGN_IN_URL=https://brain.decisive-outcomes.com/admin/auth/sign-in
 CLERK_ALLOWED_EMAILS=timgalebachukraine@gmail.com,tim.galebach@gmail.com
 ```
 
 Do not use a Clerk-hosted `*.accounts.dev` value for `CLERK_SIGN_IN_URL` here.
 The admin flow is app-hosted, like the working `me.galebach.com/private/pages`
 flow: unauthenticated `/admin` navigations redirect to
-`/admin/auth/sign-in?redirect_url=https://brain.decisiveoutcomes.com/admin`, and
+`/admin/auth/sign-in?redirect_url=https://brain.decisive-outcomes.com/admin`, and
 Clerk JS is mounted with force/fallback redirects back to the admin page.
 
 To bootstrap Slack secrets without using the UI, merge the same keys plus
@@ -266,7 +266,7 @@ The Events API URL must terminate HTTPS and reverse-proxy to the codex-chat API
 listener. The default app/runtime assumption is:
 
 - Slack public URL: `https://me.galebach.com/api/slack/events`
-- admin public URL: `https://brain.decisiveoutcomes.com/admin`
+- admin public URL: `https://brain.decisive-outcomes.com/admin`
 - codex-chat API path: `/api/slack/events` for Slack and `/admin` plus `/admin/auth/sign-in` and `/api/admin/codex-chat/*` for admin
 - local service listener: `127.0.0.1:49346` when using the example TOML
 - Caddy/nginx/proxy preserves the path and forwards Slack's signed HTTP request

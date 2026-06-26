@@ -79,9 +79,9 @@ serviceName = "codex-chat.service"
 # Public origin for this admin page. Leave empty to derive from the request
 # Host header, or set CODEX_CHAT_ADMIN_PUBLIC_BASE_URL in the runtime env.
 # Current Brain deployment uses:
-#   CODEX_CHAT_ADMIN_PUBLIC_BASE_URL=https://brain.decisiveoutcomes.com
+#   CODEX_CHAT_ADMIN_PUBLIC_BASE_URL=https://brain.decisive-outcomes.com
 #   CODEX_CHAT_ADMIN_ROUTE_PATH=/admin
-#   CLERK_SIGN_IN_URL=https://brain.decisiveoutcomes.com/admin/auth/sign-in
+#   CLERK_SIGN_IN_URL=https://brain.decisive-outcomes.com/admin/auth/sign-in
 publicBaseUrl = ""
 clerkPublishableKeyEnv = "CLERK_PUBLISHABLE_KEY"
 clerkSecretKeyEnv = "CLERK_SECRET_KEY"

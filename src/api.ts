@@ -7,8 +7,17 @@ import type { StateStore } from "./state.js";
 import type { Transcriber } from "./transcription.js";
 import { AudioIngestionError, AudioIngestionService, sanitizeAudioIngestMetadata, type AudioIngestionResponse } from "./audio-ingest.js";
 import { authenticateIngestRequest, type IngestApiKey } from "./ingest-auth.js";
+import {
+  normalizeSlackEventCallback,
+  verifySlackRequestSignature,
+  type SlackEventEnvelope
+} from "./slack.js";
+import type { UserEvent } from "./types.js";
 
 const MULTIPART_OVERHEAD_BYTES = 1024 * 1024;
+const SLACK_EVENT_MAX_BYTES = 1024 * 1024;
+const SLACK_IDEMPOTENCY_TTL_MS = 24 * 60 * 60_000;
+const MAX_SEEN_SLACK_EVENTS = 5_000;
 
 export interface AudioIngestionCompletedEvent {
   keyIdentity: string;
@@ -17,6 +26,7 @@ export interface AudioIngestionCompletedEvent {
 
 export interface ApiGatewayHooks {
   onAudioIngestionCompleted?: (event: AudioIngestionCompletedEvent) => Promise<void>;
+  onSlackUserEvent?: (event: UserEvent) => Promise<void>;
 }
 
 interface MultipartFilePart {
@@ -39,6 +49,7 @@ export function isLoopbackApiHost(host: string): boolean {
 export class ApiGateway {
   private server?: Server;
   private readonly audioIngestion: AudioIngestionService;
+  private readonly seenSlackEventIds = new Map<string, number>();
 
   constructor(
     private readonly config: AppConfig,
@@ -58,7 +69,10 @@ export class ApiGateway {
     if (!isLoopbackApiHost(this.config.api.host) && !this.config.api.allowNonLocalhost) {
       throw new Error(`Refusing to bind codex-chat API to non-loopback host ${this.config.api.host}. Set api.allowNonLocalhost=true only behind private networking and server-to-server auth.`);
     }
-    if (this.config.ingest.apiKeys.length === 0) {
+    if (this.config.slack.enabled && !this.config.slackSigningSecret) {
+      throw new Error(`${this.config.slack.signingSecretEnv} is required when slack.enabled=true`);
+    }
+    if (!this.config.slack.enabled && this.config.ingest.apiKeys.length === 0) {
       throw new Error(`${this.config.ingest.apiKeysEnv} is required when api.enabled=true`);
     }
     this.server = createServer((request, response) => {
@@ -92,11 +106,66 @@ export class ApiGateway {
 
   private async handleRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? this.config.api.host}`);
+    if (this.config.slack.enabled && request.method === "POST" && url.pathname === this.config.slack.eventsPath) {
+      await this.handleSlackEvents(request, response);
+      return;
+    }
     if (request.method === "POST" && url.pathname === "/api/ingest/audio") {
       await this.handleAudioIngest(request, response);
       return;
     }
     this.sendJson(response, 404, { error: "not_found" });
+  }
+
+  private async handleSlackEvents(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const body = await readBody(request, SLACK_EVENT_MAX_BYTES);
+    const verification = verifySlackRequestSignature({
+      signingSecret: this.config.slackSigningSecret,
+      body,
+      timestampHeader: firstHeaderValue(request.headers["x-slack-request-timestamp"]),
+      signatureHeader: firstHeaderValue(request.headers["x-slack-signature"])
+    });
+    if (!verification.ok) {
+      const statusCode = verification.reason === "missing_secret" ? 503 : 401;
+      this.logger.warn({ component: "slack", event: "signature_rejected", reason: verification.reason }, "Slack request signature rejected");
+      this.sendJson(response, statusCode, { error: verification.reason });
+      return;
+    }
+
+    let envelope: SlackEventEnvelope;
+    try {
+      envelope = JSON.parse(body.toString("utf8")) as SlackEventEnvelope;
+    } catch {
+      this.sendJson(response, 400, { error: "invalid_json" });
+      return;
+    }
+
+    if (envelope.type === "url_verification" && typeof envelope.challenge === "string") {
+      this.sendJson(response, 200, { challenge: envelope.challenge });
+      return;
+    }
+    if (envelope.type !== "event_callback") {
+      this.sendJson(response, 200, { ok: true, ignored: true });
+      return;
+    }
+
+    const normalized = normalizeSlackEventCallback(envelope);
+    if (normalized.eventId && this.hasSeenSlackEvent(normalized.eventId)) {
+      this.sendJson(response, 200, { ok: true, duplicate: true });
+      return;
+    }
+    if (normalized.status === "ignored") {
+      if (normalized.eventId) this.rememberSlackEvent(normalized.eventId);
+      this.logger.debug({ component: "slack", event: "event_ignored", reason: normalized.reason, eventId: normalized.eventId }, "Slack event ignored");
+      this.sendJson(response, 200, { ok: true, ignored: true, reason: normalized.reason });
+      return;
+    }
+
+    this.rememberSlackEvent(normalized.eventId);
+    this.sendJson(response, 200, { ok: true });
+    void this.hooks.onSlackUserEvent?.(normalized.event).catch((error) => {
+      this.logger.error({ component: "slack", event: "enqueue_failed", eventId: normalized.eventId, error }, "Slack event acknowledged but enqueue failed");
+    });
   }
 
   private async handleAudioIngest(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -202,6 +271,28 @@ export class ApiGateway {
     response.statusCode = statusCode;
     response.setHeader("content-type", "application/json; charset=utf-8");
     response.end(`${JSON.stringify(value)}\n`);
+  }
+
+  private hasSeenSlackEvent(eventId: string): boolean {
+    this.pruneSeenSlackEvents();
+    return this.seenSlackEventIds.has(eventId);
+  }
+
+  private rememberSlackEvent(eventId: string): void {
+    this.pruneSeenSlackEvents();
+    this.seenSlackEventIds.set(eventId, Date.now());
+    while (this.seenSlackEventIds.size > MAX_SEEN_SLACK_EVENTS) {
+      const oldest = this.seenSlackEventIds.keys().next().value as string | undefined;
+      if (!oldest) break;
+      this.seenSlackEventIds.delete(oldest);
+    }
+  }
+
+  private pruneSeenSlackEvents(): void {
+    const cutoff = Date.now() - SLACK_IDEMPOTENCY_TTL_MS;
+    for (const [eventId, seenAt] of this.seenSlackEventIds) {
+      if (seenAt < cutoff) this.seenSlackEventIds.delete(eventId);
+    }
   }
 }
 

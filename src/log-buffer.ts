@@ -26,12 +26,16 @@ const SECRET_PATTERNS: Array<{ regex: RegExp; replacement: string }> = [
   { regex: /gh[pousr]_[A-Za-z0-9]{20,}/g, replacement: "[REDACTED:github]" },
   // Telegram bot tokens (NNNNN:AAAA...)
   { regex: /\b\d{6,}:[A-Za-z0-9_-]{20,}\b/g, replacement: "[REDACTED:telegram]" },
+  // Slack bot/app/user tokens
+  { regex: /\bxox[abprs]-[A-Za-z0-9-]{20,}\b/g, replacement: "[REDACTED:slack]" },
+  { regex: /\bxapp-[A-Za-z0-9-]{20,}\b/g, replacement: "[REDACTED:slack]" },
   // AWS access keys
   { regex: /AKIA[0-9A-Z]{16}/g, replacement: "[REDACTED:aws]" },
   // Generic bearer-token-ish strings in headers / json
   { regex: /(authorization\s*[:=]\s*"?(?:bearer\s+)?)[A-Za-z0-9._-]{20,}/gi, replacement: "$1[REDACTED]" },
   { regex: /(api[_-]?key\s*[:=]\s*"?)[A-Za-z0-9._-]{20,}/gi, replacement: "$1[REDACTED]" },
-  { regex: /(CODEXCHAT_INGEST_API_KEYS\s*=\s*)[^\s]+/g, replacement: "$1[REDACTED]" }
+  { regex: /(CODEXCHAT_INGEST_API_KEYS\s*=\s*)[^\s]+/g, replacement: "$1[REDACTED]" },
+  { regex: /(SLACK_(?:SIGNING_SECRET|BOT_TOKEN|APP_TOKEN)\s*=\s*)[^\s]+/g, replacement: "$1[REDACTED]" }
 ];
 
 export function scrubSecrets(line: string): string {

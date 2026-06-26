@@ -46,9 +46,19 @@ userIds = []
 chatIds = []
 adminUserIds = []
 
+[slack]
+# Slack foundation adapter. Secrets are read from env vars below; do not put
+# Slack token or signing-secret values in TOML.
+enabled = false
+eventsPath = "/api/slack/events"
+signingSecretEnv = "SLACK_SIGNING_SECRET"
+botTokenEnv = "SLACK_BOT_TOKEN"
+appTokenEnv = "SLACK_APP_TOKEN"
+
 [api]
-# HTTP API for server-to-server integrations such as audio ingestion.
-# This also auto-enables when CODEXCHAT_INGEST_API_KEYS is set.
+# HTTP API for server-to-server integrations such as audio ingestion and Slack
+# Events API. This also auto-enables when CODEXCHAT_INGEST_API_KEYS is set or
+# slack.enabled=true.
 enabled = false
 host = "127.0.0.1"
 port = 49346

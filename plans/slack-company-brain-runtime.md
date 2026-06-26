@@ -331,6 +331,16 @@ audit, and executes through the adapter.
 
 ## Capability assignment model
 
+Real capability enforcement, capability bundles, dashboard/admin grant flows,
+and temporary approval UX should not be implemented from this plan text alone.
+Before that work starts, schedule a dedicated requirements brainstorming and
+planning session to decide the exact capability vocabulary, resource selectors,
+bundle semantics, grant lifecycle, admin affordances, audit queries, migration
+path, and fail-closed behavior across Telegram, Slack, dashboard, and future
+surfaces. Slack foundation work can introduce narrow source-conversation grants
+as adapter metadata, but those compatibility grants are not a substitute for
+the full enforcement/bundles/admin design.
+
 Capability state should support:
 
 - actor grants: stable actor-level permissions
@@ -494,17 +504,11 @@ Compression/context management should be explicit:
 - [x] Add capability-check helper APIs with permissive personal/admin grants for
       existing Telegram flows.
 
-### Phase 2 — capability enforcement and audit spine
+### Phase 2 — Slack adapter foundation
 
-- [ ] Define canonical capability IDs/descriptions.
-- [ ] Enforce checks at every runtime-owned tool call and output send.
-- [ ] Add audit records for grants, checks, tool calls, outputs, and denials.
-- [ ] Add temporary capability flow for chat/channel-scoped approvals.
-- [ ] Replace long-term JSON capability state with a real durable store plan and
-      migration path.
-- [ ] Ensure subagents receive narrowed run context, not tokens or broad grants.
-
-### Phase 3 — Slack adapter MVP
+This phase is the Slack foundation/adapter slice only. It intentionally stops
+short of broad Slack history/search tools, full capability enforcement,
+capability bundles, or admin/dashboard flows.
 
 - [ ] Add Slack app config and secret metadata checks without exposing token
       values.
@@ -512,14 +516,44 @@ Compression/context management should be explicit:
 - [ ] Normalize app mentions and DMs into shared runtime events.
 - [ ] Create/resume thread-scoped sessions for channel app mentions and
       conversation-scoped sessions for DMs/MPIM/private groups.
-- [ ] Resolve Slack user/channel metadata as adapter metadata.
-- [ ] Implement Slack renderer for source-thread replies and final answers.
-- [ ] Implement progress message updates from `ProgressEvent`s.
-- [ ] Add Slack read tools for source context and selected channel reads.
-- [ ] Add Slack write tools for source replies and explicit target posts.
+- [ ] Resolve Slack user/channel metadata as adapter metadata when available;
+      do not treat cached display snapshots as authorization truth.
+- [ ] Implement Slack renderer support for source-thread/source-conversation
+      text replies and final answers through `OutputTarget`.
 - [ ] Add tests with fixture events and no live network calls by default.
 
-### Phase 4 — cross-surface company brain operations
+### Phase 3 — capability requirements, enforcement, and audit spine
+
+Do not start full capability enforcement, capability bundles, temporary approval
+flows, or admin grant management directly from the rough capability lists in
+this document. First run a dedicated brainstorming/planning session to capture
+all requirements and produce the canonical capability vocabulary, resource
+selector model, grant lifecycle, migration plan, audit schema, denial behavior,
+and admin UX. Only then implement this phase.
+
+- [ ] Define canonical capability IDs/descriptions.
+- [ ] Define bundle semantics for common trust levels while preserving
+      individual auditable grants.
+- [ ] Enforce checks at every runtime-owned tool call and output send.
+- [ ] Add audit records for grants, checks, tool calls, outputs, and denials.
+- [ ] Add temporary capability flow for chat/channel-scoped approvals.
+- [ ] Replace long-term JSON capability state with a real durable store plan and
+      migration path.
+- [ ] Ensure subagents receive narrowed run context, not tokens or broad grants.
+
+### Phase 4 — Slack adapter depth and runtime-owned Slack tools
+
+- [ ] Implement progress message updates from `ProgressEvent`s.
+- [ ] Add selected interactive button clicks from progress/admin messages.
+- [ ] Resolve Slack user/channel metadata through bounded adapter calls with
+      cached display snapshots.
+- [ ] Add Slack read tools for source context and selected channel reads.
+- [ ] Add Slack write tools for source replies and explicit target posts.
+- [ ] Add artifact upload/link support where output grants allow it.
+- [ ] Keep Slack read/write tools runtime-owned and capability-checked; never
+      pass raw Slack tokens to the main Codex process or subagents.
+
+### Phase 5 — cross-surface company brain operations
 
 - [ ] Allow Telegram-originated company-brain reads/searches over Slack when
       capability grants allow it.
@@ -531,7 +565,7 @@ Compression/context management should be explicit:
 - [ ] Add persisted summaries for Slack threads/channels and repeated topics.
 - [ ] Add context compression policies for long company runs.
 
-### Phase 5 — Clerk-authenticated admin dashboard and approval UX
+### Phase 6 — Clerk-authenticated admin dashboard and approval UX
 
 - [ ] Build the admin/dashboard app as a Clerk-authenticated internal surface
       with server-side allowed-user enforcement.
@@ -551,7 +585,7 @@ Compression/context management should be explicit:
 - [ ] Mirror sensitive admin operations through Telegram admin commands where
       useful.
 
-### Phase 6 — central server and scale-out subagents
+### Phase 7 — central server and scale-out subagents
 
 - [ ] Centralize event ingestion, queueing, progress fanout, audits, and indexes.
 - [ ] Add durable session registry with hibernation, scheduler wakeups, max

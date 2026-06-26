@@ -15,6 +15,9 @@ export async function installUserService(config: AppConfig, enableNow = false): 
   if (!(await pathExists(envPath))) {
     await writeFile(envPath, [
       `${config.telegram.botTokenEnv}=${process.env[config.telegram.botTokenEnv] ?? ""}`,
+      `${config.slack.signingSecretEnv}=${process.env[config.slack.signingSecretEnv] ?? ""}`,
+      `${config.slack.botTokenEnv}=${process.env[config.slack.botTokenEnv] ?? ""}`,
+      `${config.slack.appTokenEnv}=${process.env[config.slack.appTokenEnv] ?? ""}`,
       `${config.transcription.apiKeyEnv}=${process.env[config.transcription.apiKeyEnv] ?? ""}`,
       `${config.ingest.apiKeysEnv}=${process.env[config.ingest.apiKeysEnv] ?? ""}`,
       `CODEXCHAT_AUDIO_INGEST_MAX_MB=${process.env.CODEXCHAT_AUDIO_INGEST_MAX_MB ?? String(config.ingest.audioMaxMb)}`,
@@ -55,7 +58,7 @@ WantedBy=default.target
   return unitPath;
 }
 
-export async function uninstallUserService(config?: Pick<AppConfig, "transcription">): Promise<void> {
+export async function uninstallUserService(config?: Pick<AppConfig, "transcription"> & Partial<Pick<AppConfig, "ingest" | "slack">>): Promise<void> {
   await runSystemctl(["--user", "disable", "--now", "codex-chat.service"], config).catch(() => undefined);
   const unitPath = join(homedir(), ".config/systemd/user/codex-chat.service");
   await rm(unitPath, { force: true });
@@ -63,7 +66,7 @@ export async function uninstallUserService(config?: Pick<AppConfig, "transcripti
 }
 
 
-function runSystemctl(args: string[], config?: Pick<AppConfig, "transcription">): Promise<void> {
+function runSystemctl(args: string[], config?: Pick<AppConfig, "transcription"> & Partial<Pick<AppConfig, "ingest" | "slack">>): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn("systemctl", args, { env: sanitizeChildProcessEnv(config), stdio: "ignore" });
     child.on("exit", (code) => code === 0 ? resolve() : reject(new Error(`systemctl exited with ${code}`)));

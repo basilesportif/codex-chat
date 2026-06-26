@@ -74,6 +74,9 @@ program.command("health")
       codex: codexVersion.trim(),
       behaviorOk,
       telegramConfigured: Boolean(config.telegramBotToken),
+      slackEnabled: config.slack.enabled,
+      slackSigningSecretConfigured: Boolean(config.slackSigningSecret),
+      slackBotTokenConfigured: Boolean(config.slackBotToken),
       openaiConfigured: Boolean(config.openaiApiKey),
       stateDir: resolveConfigPath(config, config.service.stateDir)
     };

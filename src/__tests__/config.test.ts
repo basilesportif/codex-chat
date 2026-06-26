@@ -24,6 +24,8 @@ const overrideEnvNames = [
   "CODEX_CHAT_API_PORT",
   "CODEX_CHAT_API_ALLOW_NON_LOCALHOST",
   "CODEX_CHAT_TELEGRAM_MODE",
+  "CODEX_CHAT_SLACK_ENABLED",
+  "CODEX_CHAT_SLACK_EVENTS_PATH",
   "CODEX_CHAT_LOOPS_PATH",
   "CODEX_CHAT_MONITORS_PATH",
   "CODEX_CHAT_TRANSCRIPTION_ENABLED",
@@ -34,7 +36,10 @@ const overrideEnvNames = [
   "CODEXCHAT_AUDIO_INGEST_MAX_MB",
   "TELEGRAM_ALLOWED_USER_IDS",
   "TELEGRAM_ADMIN_USER_IDS",
-  "CUSTOM_TELEGRAM_TOKEN"
+  "CUSTOM_TELEGRAM_TOKEN",
+  "CUSTOM_SLACK_SIGNING_SECRET",
+  "CUSTOM_SLACK_BOT_TOKEN",
+  "CUSTOM_SLACK_APP_TOKEN"
 ];
 
 async function tempConfig(contents: string): Promise<string> {
@@ -79,6 +84,8 @@ userIds = [12345]
     expect(config.subagents.defaultServiceTier).toBe("standard");
     expect(config.subagents.backend).toBe("codex_exec");
     expect(config.api.enabled).toBe(false);
+    expect(config.slack.enabled).toBe(false);
+    expect(config.slack.eventsPath).toBe("/api/slack/events");
     expect(config.ingest.audioMaxMb).toBe(100);
     expect(config.transcription.model).toBe("gpt-4o-transcribe");
     expect(config.transcription.diarizeModel).toBe("gpt-4o-transcribe-diarize");
@@ -95,8 +102,12 @@ userIds = [12345]
   test("uses environment overrides after file values", async () => {
     process.env.CODEX_CHAT_CODEX_MODEL = "from-env";
     process.env.CODEX_CHAT_CODEX_SERVICE_TIER = "standard";
+    process.env.CODEX_CHAT_SLACK_ENABLED = "true";
+    process.env.CODEX_CHAT_SLACK_EVENTS_PATH = "/api/custom-slack/events";
     process.env.CUSTOM_TELEGRAM_TOKEN = "token-from-custom-env";
     process.env.TELEGRAM_BOT_TOKEN = "token-from-default-env";
+    process.env.CUSTOM_SLACK_SIGNING_SECRET = "slack-signing-secret";
+    process.env.CUSTOM_SLACK_BOT_TOKEN = "xoxb-test-token";
     const path = await tempConfig(`
 version = 1
 
@@ -105,6 +116,10 @@ model = "from-file"
 
 [telegram]
 botTokenEnv = "CUSTOM_TELEGRAM_TOKEN"
+
+[slack]
+signingSecretEnv = "CUSTOM_SLACK_SIGNING_SECRET"
+botTokenEnv = "CUSTOM_SLACK_BOT_TOKEN"
 `);
 
     const config = await loadConfig(path);
@@ -113,6 +128,11 @@ botTokenEnv = "CUSTOM_TELEGRAM_TOKEN"
     expect(config.codex.serviceTier).toBe("standard");
     expect(config.subagents.backend).toBe("codex_exec");
     expect(config.telegramBotToken).toBe("token-from-custom-env");
+    expect(config.slack.enabled).toBe(true);
+    expect(config.slack.eventsPath).toBe("/api/custom-slack/events");
+    expect(config.api.enabled).toBe(true);
+    expect(config.slackSigningSecret).toBe("slack-signing-secret");
+    expect(config.slackBotToken).toBe("xoxb-test-token");
   });
 
   test("allows transcription model env overrides", async () => {

@@ -10,17 +10,23 @@ export const ALWAYS_STRIPPED_CHILD_ENV = ["OPENAI_API_KEY"] as const;
  * read the configured transcription key, but Codex, loops, monitors, deploys,
  * and other subprocesses run without them by default.
  */
-export function childSecretEnvNames(config?: Pick<AppConfig, "transcription"> & Partial<Pick<AppConfig, "ingest">>): string[] {
+export function childSecretEnvNames(config?: Pick<AppConfig, "transcription"> & Partial<Pick<AppConfig, "ingest" | "slack">>): string[] {
   const names = new Set<string>(ALWAYS_STRIPPED_CHILD_ENV);
   const transcriptionKeyEnv = config?.transcription?.apiKeyEnv?.trim();
   if (transcriptionKeyEnv) names.add(transcriptionKeyEnv);
   const ingestKeysEnv = config?.ingest?.apiKeysEnv?.trim();
   if (ingestKeysEnv) names.add(ingestKeysEnv);
+  const slackSigningSecretEnv = config?.slack?.signingSecretEnv?.trim();
+  if (slackSigningSecretEnv) names.add(slackSigningSecretEnv);
+  const slackBotTokenEnv = config?.slack?.botTokenEnv?.trim();
+  if (slackBotTokenEnv) names.add(slackBotTokenEnv);
+  const slackAppTokenEnv = config?.slack?.appTokenEnv?.trim();
+  if (slackAppTokenEnv) names.add(slackAppTokenEnv);
   return [...names];
 }
 
 export function sanitizeChildProcessEnv(
-  config?: Pick<AppConfig, "transcription"> & Partial<Pick<AppConfig, "ingest">>,
+  config?: Pick<AppConfig, "transcription"> & Partial<Pick<AppConfig, "ingest" | "slack">>,
   baseEnv: ChildEnvSource = process.env,
   overrides?: ChildEnvSource
 ): NodeJS.ProcessEnv {

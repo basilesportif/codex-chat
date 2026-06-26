@@ -43,6 +43,7 @@ import {
 } from "./subagents.js";
 import { DisabledTranscriber, OpenAITranscriber, Transcriber, type TranscriptionMode, type TranscriptionSpeakerSegment } from "./transcription.js";
 import { sanitizeChildProcessEnv } from "./env.js";
+import { SlackGateway } from "./slack.js";
 import { isTelegramAdmin, TelegramGateway } from "./telegram.js";
 import { CodexClient, StoredAction, SubagentBackendKind, SubagentJob, SubagentOwnerType, SubagentResultTarget, UserEvent } from "./types.js";
 import { makeId, nowIso } from "./util.js";
@@ -237,6 +238,7 @@ export class ServiceSupervisor {
   readonly behavior: BehaviorPack;
   readonly files: FileStore;
   readonly telegram: TelegramGateway;
+  readonly slack: SlackGateway;
   readonly codex: CodexClient;
   readonly loops: LoopManager;
   readonly monitors: MonitorManager;
@@ -269,7 +271,8 @@ export class ServiceSupervisor {
     this.files = new FileStore(config, this.state);
     const transcriber = this.createTranscriber();
     this.api = new ApiGateway(config, this.state, this.files, transcriber, logger, {
-      onAudioIngestionCompleted: (event) => this.enqueueAudioIngestionForCodex(event)
+      onAudioIngestionCompleted: (event) => this.enqueueAudioIngestionForCodex(event),
+      onSlackUserEvent: (event) => this.enqueueUserEvent(event)
     });
     if (config.codex.transport !== "app-server") {
       throw new Error(DISABLED_EXEC_RESUME_MESSAGE);
@@ -334,6 +337,7 @@ export class ServiceSupervisor {
       onCancelCommand: async (_chatId, jobId) => this.cancelJob(jobId),
       onHealthCommand: async () => this.healthText()
     });
+    this.slack = new SlackGateway(config, logger);
     this.loops = new LoopManager(config, this.state, logger, {
       enqueueMain: (text, metadata) => this.enqueueSynthetic(text, metadata),
       sendAdmins: (text) => this.telegram.notifyOps(text),
@@ -800,6 +804,9 @@ export class ServiceSupervisor {
       workspace: this.config.service.workspace,
       codex,
       telegramConfigured: Boolean(this.config.telegramBotToken),
+      slackEnabled: this.config.slack.enabled,
+      slackSigningSecretConfigured: Boolean(this.config.slackSigningSecret),
+      slackBotTokenConfigured: Boolean(this.config.slackBotToken),
       openaiConfigured: Boolean(this.config.openaiApiKey),
       stateDir: this.state.root,
       employees: {
@@ -818,6 +825,9 @@ export class ServiceSupervisor {
       `ok: ${health.ok}`,
       `codex: ${(health.codex as { transport?: string; ok?: boolean }).transport} (${(health.codex as { ok?: boolean }).ok ? "ok" : "degraded"})`,
       `telegramConfigured: ${health.telegramConfigured}`,
+      `slackEnabled: ${health.slackEnabled}`,
+      `slackSigningSecretConfigured: ${health.slackSigningSecretConfigured}`,
+      `slackBotTokenConfigured: ${health.slackBotTokenConfigured}`,
       `openaiConfigured: ${health.openaiConfigured}`
     ].join("\n");
   }
@@ -1204,11 +1214,11 @@ export class ServiceSupervisor {
         this.logger.error({ component: "codex", event: "turn_unavailable", turnId, error }, "Codex turn failed");
         const closed = await closeTurn({ id: turnId, status: "error", input: event, errorMessage: error instanceof Error ? error.message : String(error), completedAt: nowIso() });
         if (!closed) return;
-        if (event.chatId) {
+        if (this.canSendTextToOutputTarget(event.outputTarget)) {
           try {
             await this.sendTextToOutputTarget(event.outputTarget, this.codexUnavailableMessage(error));
           } catch (sendError) {
-            this.logger.error({ component: "service", event: "codex_unavailable_reply_failed", sendError }, "Failed to send Codex unavailable reply to Telegram");
+            this.logger.error({ component: "service", event: "codex_unavailable_reply_failed", sendError }, "Failed to send Codex unavailable reply to output target");
           }
         }
         return;
@@ -1218,14 +1228,14 @@ export class ServiceSupervisor {
         await this.resetMainCodexSessionAfterTerminalError(errorMessage, errorRaw);
         const closed = await closeTurn({ id: turnId, status: "error", input: event, errorMessage, completedAt: nowIso() });
         if (!closed) return;
-        if (event.chatId) {
+        if (this.canSendTextToOutputTarget(event.outputTarget)) {
           await this.sendTextToOutputTarget(event.outputTarget, `Codex encountered an error: ${brief}. Please try again.`);
         }
         return;
       }
       if (this.isStaleTurnToken(turnToken)) return;
       const parsed = parseDirectives(output);
-      if (parsed.cleanText && event.chatId) {
+      if (parsed.cleanText && this.canSendTextToOutputTarget(event.outputTarget)) {
         await this.sendTextToOutputTarget(event.outputTarget, parsed.cleanText);
         userFacingDelivered = true;
       }
@@ -1367,6 +1377,8 @@ export class ServiceSupervisor {
       subagentResult: result,
       originChatId: job.originChatId,
       originMessageId: job.originMessageId,
+      originTarget: job.originTarget,
+      defaultOutputTarget: job.defaultOutputTarget,
       conversationSessionId: job.conversationSessionId,
       correlationId: job.correlationId
     });
@@ -1499,18 +1511,22 @@ export class ServiceSupervisor {
     try {
       const defaultChatId = origin.chatId;
       if (action.type === "send_text") {
-        const chatId = action.chatId ?? this.requireChat(defaultChatId);
-        await this.sendTextToOutputTarget(
-          telegramOutputTarget({
-            base: chatId === origin.chatId ? origin.outputTarget : undefined,
-            chatId,
-            messageId: this.directiveReplyToMessageId(chatId, action.replyToMessageId, origin),
-            routingPolicy: action.chatId === undefined ? "source_reply" : "explicit_target"
-          }),
-          action.text,
-          action.format,
-          true
-        );
+        if (action.chatId === undefined && origin.outputTarget?.surfaceKind === "slack") {
+          await this.sendTextToOutputTarget(origin.outputTarget, action.text, action.format, true);
+        } else {
+          const chatId = action.chatId ?? this.requireChat(defaultChatId);
+          await this.sendTextToOutputTarget(
+            telegramOutputTarget({
+              base: chatId === origin.chatId ? origin.outputTarget : undefined,
+              chatId,
+              messageId: this.directiveReplyToMessageId(chatId, action.replyToMessageId, origin),
+              routingPolicy: action.chatId === undefined ? "source_reply" : "explicit_target"
+            }),
+            action.text,
+            action.format,
+            true
+          );
+        }
       }
       if (action.type === "send_image") {
         const chatId = action.chatId ?? this.requireChat(defaultChatId);
@@ -1537,7 +1553,7 @@ export class ServiceSupervisor {
         );
       }
       if (action.type === "dispatch_subagent") {
-        if (origin.chatId) {
+        if (this.canSendTextToOutputTarget(origin.outputTarget)) {
           await this.sendTextToOutputTarget(origin.outputTarget, options.dispatchStatusText ?? this.formatDispatchSummary(action));
         }
         await this.subagents.dispatchFromDirective(action, {
@@ -1683,7 +1699,7 @@ export class ServiceSupervisor {
 
   private runTurn(event: UserEvent): void {
     if (this.turnRunning) {
-      void this.queueEvent(event.chatId ? String(event.chatId) : "system", event);
+      void this.queueEvent(this.queueKeyForEvent(event), event);
       return;
     }
     this.turnRunning = true;
@@ -1722,11 +1738,11 @@ export class ServiceSupervisor {
       await this.removePersistedQueuedEvent(event);
       const brief = error instanceof Error ? error.message.split("\n")[0].slice(0, 100) : String(error).slice(0, 100);
       this.logger.error({ component: "service", event: "turn_error", error }, "Turn processing failed");
-      if (event.chatId) {
+      if (this.canSendTextToOutputTarget(event.outputTarget)) {
         try {
           await this.sendTextToOutputTarget(event.outputTarget, `Codex encountered an error: ${brief}. Please try again.`);
         } catch (sendError) {
-          this.logger.error({ component: "service", event: "error_reply_failed", sendError }, "Failed to send error reply to Telegram");
+          this.logger.error({ component: "service", event: "error_reply_failed", sendError }, "Failed to send error reply to output target");
         }
       }
     }
@@ -1846,15 +1862,20 @@ export class ServiceSupervisor {
   private async dropQueuedEvent(queued: QueuedEvent): Promise<void> {
     if (queued.persistedId) await rm(this.state.path(`queued_turns/${queued.persistedId}.json`), { force: true }).catch(() => undefined);
     else await this.removePersistedQueuedEvent(queued.event);
-    this.logger.warn({ component: "service", event: "queue_overflow_drop", chatId: queued.event.chatId, messageId: queued.event.messageId }, "Dropped queued message due to queue overflow");
-    if (!queued.event.chatId) return;
+    this.logger.warn({
+      component: "service",
+      event: "queue_overflow_drop",
+      chatId: queued.event.chatId,
+      messageId: queued.event.messageId,
+      outputTarget: queued.event.outputTarget?.id
+    }, "Dropped queued message due to queue overflow");
+    const outputTarget = queued.event.outputTarget
+      ?? (queued.event.chatId !== undefined ? telegramOutputTarget({ chatId: queued.event.chatId, messageId: queued.event.messageId }) : undefined);
+    if (!this.canSendTextToOutputTarget(outputTarget)) return;
     try {
-      await this.sendTextToOutputTarget(
-        queued.event.outputTarget ?? telegramOutputTarget({ chatId: queued.event.chatId, messageId: queued.event.messageId }),
-        QUEUE_OVERFLOW_MESSAGE
-      );
+      await this.sendTextToOutputTarget(outputTarget, QUEUE_OVERFLOW_MESSAGE);
     } catch (error) {
-      this.logger.error({ component: "service", event: "queue_overflow_notice_failed", chatId: queued.event.chatId, error }, "Failed to notify user about queue overflow");
+      this.logger.error({ component: "service", event: "queue_overflow_notice_failed", chatId: queued.event.chatId, outputTarget: queued.event.outputTarget?.id, error }, "Failed to notify user about queue overflow");
     }
   }
 
@@ -2000,12 +2021,13 @@ export class ServiceSupervisor {
     this.turnStartedAt = undefined;
     this.activeTurnEvent = undefined;
     await this.markActiveTurnAborted(event);
-    if (event?.chatId) {
+    const abortNoticeTarget = event?.outputTarget;
+    if (this.canSendTextToOutputTarget(abortNoticeTarget)) {
       try {
-        await this.sendTextToOutputTarget(event.outputTarget, TURN_ABORTED_MESSAGE);
+        await this.sendTextToOutputTarget(abortNoticeTarget, TURN_ABORTED_MESSAGE);
       } catch (sendError) {
         this.logger.error(
-          { component: "service", event: "turn_abort_notice_failed", chatId: event.chatId, sendError },
+          { component: "service", event: "turn_abort_notice_failed", chatId: event?.chatId, outputTarget: event?.outputTarget?.id, sendError },
           "Failed to notify user about forced turn abort"
         );
       }
@@ -2074,6 +2096,12 @@ export class ServiceSupervisor {
       event.chatId ? `telegram chat_id: ${event.chatId}` : "",
       event.userId ? `telegram user_id: ${event.userId}` : "",
       event.messageId ? `telegram message_id: ${event.messageId}` : "",
+      event.source === "slack" && typeof event.metadata?.slackTeamId === "string" ? `slack team_id: ${event.metadata.slackTeamId}` : "",
+      event.source === "slack" && typeof event.metadata?.slackChannelId === "string" ? `slack channel_id: ${event.metadata.slackChannelId}` : "",
+      event.source === "slack" && typeof event.metadata?.slackChannelType === "string" ? `slack channel_type: ${event.metadata.slackChannelType}` : "",
+      event.source === "slack" && typeof event.metadata?.slackUserId === "string" ? `slack user_id: ${event.metadata.slackUserId}` : "",
+      event.source === "slack" && typeof event.metadata?.slackThreadTs === "string" ? `slack thread_ts: ${event.metadata.slackThreadTs}` : "",
+      event.source === "slack" && typeof event.metadata?.slackMessageTs === "string" ? `slack message_ts: ${event.metadata.slackMessageTs}` : "",
       `received_at: ${event.receivedAt}`
     ].filter(Boolean).join("\n");
     const attachments = event.attachments.length > 0
@@ -2185,7 +2213,15 @@ export class ServiceSupervisor {
     return chatId;
   }
 
+  private canSendTextToOutputTarget(target: UserEvent["outputTarget"]): boolean {
+    return target?.surfaceKind === "telegram" || target?.surfaceKind === "slack";
+  }
+
   private async sendTextToOutputTarget(target: UserEvent["outputTarget"], text: string, format?: "text" | "markdown" | "markdownv2", preserveFormatArgument = false): Promise<void> {
+    if (target?.surfaceKind === "slack") {
+      await this.slack.sendText(target, text);
+      return;
+    }
     const chatId = telegramTargetChatId(target);
     if (chatId === undefined) throw new Error(`Unsupported or missing text output target: ${target?.surfaceKind ?? "none"}`);
     const messageId = telegramTargetMessageId(target);

@@ -223,7 +223,7 @@ export interface TelegramReplyContext {
 }
 
 export interface UserEvent {
-  source: "telegram" | "loop" | "monitor" | "subagent" | "audio_ingest" | "system";
+  source: "telegram" | "slack" | "loop" | "monitor" | "subagent" | "audio_ingest" | "system";
   chatId?: number;
   userId?: number;
   username?: string;

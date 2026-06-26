@@ -111,6 +111,19 @@ const configSchema = z.object({
       adminUserIds: z.array(telegramUserIdSchema).default([])
     }).default({ userIds: [], chatIds: [], adminUserIds: [] })
   }),
+  slack: z.object({
+    enabled: z.boolean().default(false),
+    eventsPath: z.string().regex(/^\/[A-Za-z0-9/_-]*$/, "Slack events path must be an absolute URL path").default("/api/slack/events"),
+    signingSecretEnv: z.string().default("SLACK_SIGNING_SECRET"),
+    botTokenEnv: z.string().default("SLACK_BOT_TOKEN"),
+    appTokenEnv: z.string().default("SLACK_APP_TOKEN")
+  }).default({
+    enabled: false,
+    eventsPath: "/api/slack/events",
+    signingSecretEnv: "SLACK_SIGNING_SECRET",
+    botTokenEnv: "SLACK_BOT_TOKEN",
+    appTokenEnv: "SLACK_APP_TOKEN"
+  }),
   api: z.object({
     enabled: z.boolean().default(false),
     host: z.string().default("127.0.0.1"),
@@ -189,6 +202,9 @@ export type AppConfig = z.infer<typeof configSchema> & {
   configPath: string;
   rootDir: string;
   telegramBotToken?: string;
+  slackSigningSecret?: string;
+  slackBotToken?: string;
+  slackAppToken?: string;
   openaiApiKey?: string;
 };
 export type EmployeeDefinitionConfig = z.infer<typeof employeeDefinitionSchema>;
@@ -233,6 +249,13 @@ const defaultConfig = configSchema.parse({
     sendProgressUpdates: true,
     opsChatId: 0,
     allowlist: { userIds: [], chatIds: [], adminUserIds: [] }
+  },
+  slack: {
+    enabled: false,
+    eventsPath: "/api/slack/events",
+    signingSecretEnv: "SLACK_SIGNING_SECRET",
+    botTokenEnv: "SLACK_BOT_TOKEN",
+    appTokenEnv: "SLACK_APP_TOKEN"
   },
   api: {
     enabled: false,
@@ -428,6 +451,8 @@ function collectEnvOverrides(env: NodeJS.ProcessEnv = process.env): Record<strin
     { name: "CODEX_CHAT_API_PORT", path: ["api", "port"], parse: parseNumberEnv },
     { name: "CODEX_CHAT_API_ALLOW_NON_LOCALHOST", path: ["api", "allowNonLocalhost"], parse: parseBooleanEnv },
     { name: "CODEX_CHAT_TELEGRAM_MODE", path: ["telegram", "mode"] },
+    { name: "CODEX_CHAT_SLACK_ENABLED", path: ["slack", "enabled"], parse: parseBooleanEnv },
+    { name: "CODEX_CHAT_SLACK_EVENTS_PATH", path: ["slack", "eventsPath"] },
     { name: "CODEX_CHAT_LOOPS_PATH", path: ["loops", "path"] },
     { name: "CODEX_CHAT_MONITORS_PATH", path: ["monitors", "path"] },
     { name: "CODEX_CHAT_TRANSCRIPTION_ENABLED", path: ["transcription", "enabled"], parse: parseBooleanEnv },
@@ -463,11 +488,26 @@ export async function loadConfig(configPath = "config/codex-chat.toml"): Promise
   };
   const rootDir = resolve(dirname(absoluteConfigPath), "..");
   const telegramBotToken = process.env[telegram.botTokenEnv];
+  const slackSigningSecret = process.env[config.slack.signingSecretEnv];
+  const slackBotToken = process.env[config.slack.botTokenEnv];
+  const slackAppToken = process.env[config.slack.appTokenEnv];
   const openaiApiKey = process.env[config.transcription.apiKeyEnv];
   const ingestApiKeys = parseIngestApiKeys(process.env[config.ingest.apiKeysEnv]);
-  const api = { ...config.api, enabled: config.api.enabled || ingestApiKeys.length > 0 };
+  const api = { ...config.api, enabled: config.api.enabled || ingestApiKeys.length > 0 || config.slack.enabled };
   const ingest = { ...config.ingest, apiKeys: ingestApiKeys };
-  return { ...config, api, ingest, telegram, configPath: absoluteConfigPath, rootDir, telegramBotToken, openaiApiKey };
+  return {
+    ...config,
+    api,
+    ingest,
+    telegram,
+    configPath: absoluteConfigPath,
+    rootDir,
+    telegramBotToken,
+    slackSigningSecret,
+    slackBotToken,
+    slackAppToken,
+    openaiApiKey
+  };
 }
 
 export function resolveConfigPath(config: AppConfig, candidate: string): string {

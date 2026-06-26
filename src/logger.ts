@@ -13,9 +13,15 @@ export function createLogger(level: string, redactSecrets = true): Logger {
             "apiKey",
             "ingestApiKey",
             "ingestKey",
+            "slackSigningSecret",
+            "slackBotToken",
+            "slackAppToken",
             "*.TELEGRAM_BOT_TOKEN",
             "*.OPENAI_API_KEY",
-            "*.CODEXCHAT_INGEST_API_KEYS"
+            "*.CODEXCHAT_INGEST_API_KEYS",
+            "*.SLACK_SIGNING_SECRET",
+            "*.SLACK_BOT_TOKEN",
+            "*.SLACK_APP_TOKEN"
           ],
           censor: "[REDACTED]"
         }

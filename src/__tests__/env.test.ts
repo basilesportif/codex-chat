@@ -2,11 +2,16 @@ import { describe, expect, test } from "vitest";
 import type { AppConfig } from "../config.js";
 import { childSecretEnvNames, sanitizeChildProcessEnv } from "../env.js";
 
-function config(apiKeyEnv = "TRANSCRIPTION_API_KEY", ingestKeysEnv?: string): Pick<AppConfig, "transcription"> & Partial<Pick<AppConfig, "ingest">> {
+function config(apiKeyEnv = "TRANSCRIPTION_API_KEY", ingestKeysEnv?: string): Pick<AppConfig, "transcription"> & Partial<Pick<AppConfig, "ingest" | "slack">> {
   return {
     transcription: { apiKeyEnv },
-    ingest: ingestKeysEnv ? { apiKeysEnv: ingestKeysEnv } : undefined
-  } as Pick<AppConfig, "transcription"> & Partial<Pick<AppConfig, "ingest">>;
+    ingest: ingestKeysEnv ? { apiKeysEnv: ingestKeysEnv } : undefined,
+    slack: {
+      signingSecretEnv: "SLACK_SIGNING_SECRET",
+      botTokenEnv: "SLACK_BOT_TOKEN",
+      appTokenEnv: "SLACK_APP_TOKEN"
+    }
+  } as Pick<AppConfig, "transcription"> & Partial<Pick<AppConfig, "ingest" | "slack">>;
 }
 
 describe("child process environment sanitizer", () => {
@@ -39,8 +44,19 @@ describe("child process environment sanitizer", () => {
   });
 
   test("reports the literal and configured secret env names", () => {
-    expect(new Set(childSecretEnvNames(config("CUSTOM_TRANSCRIPTION_KEY")))).toEqual(new Set(["OPENAI_API_KEY", "CUSTOM_TRANSCRIPTION_KEY"]));
-    expect(childSecretEnvNames(config("OPENAI_API_KEY"))).toEqual(["OPENAI_API_KEY"]);
+    expect(new Set(childSecretEnvNames(config("CUSTOM_TRANSCRIPTION_KEY")))).toEqual(new Set([
+      "OPENAI_API_KEY",
+      "CUSTOM_TRANSCRIPTION_KEY",
+      "SLACK_SIGNING_SECRET",
+      "SLACK_BOT_TOKEN",
+      "SLACK_APP_TOKEN"
+    ]));
+    expect(new Set(childSecretEnvNames(config("OPENAI_API_KEY")))).toEqual(new Set([
+      "OPENAI_API_KEY",
+      "SLACK_SIGNING_SECRET",
+      "SLACK_BOT_TOKEN",
+      "SLACK_APP_TOKEN"
+    ]));
   });
 
   test("strips configured ingest API key env", () => {
@@ -50,6 +66,23 @@ describe("child process environment sanitizer", () => {
     );
 
     expect(sanitized).not.toHaveProperty("CODEXCHAT_INGEST_API_KEYS");
+    expect(sanitized.OTHER_VAR).toBe("keep");
+  });
+
+  test("strips configured Slack secrets", () => {
+    const sanitized = sanitizeChildProcessEnv(
+      config("CUSTOM_TRANSCRIPTION_KEY", "CODEXCHAT_INGEST_API_KEYS"),
+      {
+        SLACK_SIGNING_SECRET: "signing-secret",
+        SLACK_BOT_TOKEN: "xoxb-secret",
+        SLACK_APP_TOKEN: "xapp-secret",
+        OTHER_VAR: "keep"
+      }
+    );
+
+    expect(sanitized).not.toHaveProperty("SLACK_SIGNING_SECRET");
+    expect(sanitized).not.toHaveProperty("SLACK_BOT_TOKEN");
+    expect(sanitized).not.toHaveProperty("SLACK_APP_TOKEN");
     expect(sanitized.OTHER_VAR).toBe("keep");
   });
 });

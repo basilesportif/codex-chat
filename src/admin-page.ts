@@ -13,10 +13,92 @@ function jsString(value: string | undefined): string {
   return JSON.stringify(value ?? "");
 }
 
+function safeJsonForHtml(value: unknown): string {
+  return JSON.stringify(value).replaceAll("<", "\\u003c");
+}
+
+function deriveClerkFrontendApi(publishableKey: string): string {
+  const parts = String(publishableKey || "").split("_");
+  if (parts.length < 3) return "";
+  try {
+    return Buffer.from(parts[2] ?? "", "base64")
+      .toString("utf8")
+      .slice(0, -1);
+  } catch {
+    return "";
+  }
+}
+
+export function renderAdminSignInPage(
+  config: AppConfig,
+  redirectUrl: string,
+): string {
+  const publishableKey = config.clerkPublishableKey ?? "";
+  const frontendApi = deriveClerkFrontendApi(publishableKey);
+  const clerkBase = frontendApi ? `https://${frontendApi}` : "";
+  const payload = safeJsonForHtml({ publishableKey, redirectUrl });
+  const signInScripts = clerkBase
+    ? `<script defer crossorigin="anonymous" src="${htmlEscape(clerkBase)}/npm/@clerk/ui@1/dist/ui.browser.js" type="text/javascript"></script>\n  <script defer crossorigin="anonymous" data-clerk-publishable-key="${htmlEscape(publishableKey)}" src="${htmlEscape(clerkBase)}/npm/@clerk/clerk-js@6/dist/clerk.browser.js" type="text/javascript"></script>`
+    : "";
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sign in · codex-chat admin</title>
+  <style>
+    :root { color-scheme: dark; --bg:#020617; --panel:#0f172a; --muted:#94a3b8; --text:#e5e7eb; --line:#334155; --accent:#38bdf8; --danger:#f87171; }
+    body { margin:0; min-height:100vh; display:grid; place-items:center; background: radial-gradient(circle at top, rgba(56,189,248,.16), transparent 32rem), var(--bg); color:var(--text); font:15px/1.5 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    main { width:min(100% - 32px, 540px); border:1px solid var(--line); border-radius:24px; background:rgba(15,23,42,.86); padding:24px; box-shadow:0 24px 80px rgb(0 0 0 / .38); }
+    h1 { margin:0 0 8px; font-size:22px; } p { margin:0 0 18px; color:var(--muted); }
+    #sign-in { min-height:360px; display:grid; place-items:center; }
+    .error { color:#fecaca; background:rgba(127,29,29,.35); border:1px solid rgba(248,113,113,.35); border-radius:12px; padding:12px; }
+    a { color:var(--accent); }
+  </style>
+  ${signInScripts}
+</head>
+<body>
+  <main>
+    <h1>Sign in to codex-chat admin</h1>
+    <p>Continue with Clerk, then return to the admin page.</p>
+    <div id="sign-in">Loading sign-in…</div>
+  </main>
+  <script type="application/json" id="admin-sign-in-config">${payload}</script>
+  <script>
+    window.addEventListener('load', async function () {
+      const root = document.getElementById('sign-in');
+      const config = JSON.parse(document.getElementById('admin-sign-in-config').textContent);
+      if (!config.publishableKey || !window.Clerk) {
+        root.innerHTML = '<div class="error">Clerk is not configured for this admin page.</div>';
+        return;
+      }
+      try {
+        await window.Clerk.load({ ui: { ClerkUI: window.__internal_ClerkUICtor } });
+        if (window.Clerk.user) {
+          window.location.assign(config.redirectUrl);
+          return;
+        }
+        root.textContent = '';
+        window.Clerk.mountSignIn(root, {
+          forceRedirectUrl: config.redirectUrl,
+          fallbackRedirectUrl: config.redirectUrl,
+          signUpForceRedirectUrl: config.redirectUrl,
+          signUpFallbackRedirectUrl: config.redirectUrl
+        });
+      } catch (error) {
+        root.innerHTML = '<div class="error">Sign-in failed to load. Please refresh and try again.</div>';
+      }
+    });
+  </script>
+</body>
+</html>`;
+}
+
 export function renderAdminPage(config: AppConfig): string {
   const publishableKey = config.clerkPublishableKey ?? "";
   const signInUrl = config.clerkSignInUrl ?? "";
-  const publicBaseUrl = config.slack.publicBaseUrl || config.admin.publicBaseUrl || "";
+  const publicBaseUrl =
+    config.slack.publicBaseUrl || config.admin.publicBaseUrl || "";
   const eventsPath = config.slack.eventsPath;
   return `<!doctype html>
 <html lang="en">

@@ -31,7 +31,7 @@ runtime events through surface-specific adapters.
 - Keep the company brain state and retrieval layer ready for a central server
   with many subagents, persisted summaries, indexes, and context compression.
 - Move near-term admin/control-plane functions into Brain rather than expanding
-  the bootstrap `/admin/codex-chat/` page beyond Slack setup/diagnostics.
+  the bootstrap `/admin` page beyond Slack setup/diagnostics.
 
 ## Current state to preserve
 
@@ -57,7 +57,7 @@ Based on the current repo/system state:
       a canonical operator runbook in `slack-app/SLACK.md`.
 - [x] Capability-aware runtime abstractions are implemented in `codex-chat`.
 - [x] Initial Clerk-protected codex-chat admin config page exists inside the
-      codex-chat service at `/admin/codex-chat/` for Slack env bootstrap and
+      codex-chat service at `/admin` for Slack env bootstrap and
       manifest rendering/copy/download/validation. This is a bootstrap/temporary
       surface, not the long-term admin/control plane.
 - [ ] Durable company-mode capability state exists outside long-term JSON files.
@@ -394,7 +394,7 @@ query support.
 ## Admin and dashboard
 
 Current implementation note: the service now includes an initial
-`/admin/codex-chat/` page in the codex-chat API process. In the current deployment it is exposed at `https://brain.decisive-outcomes.com/admin/codex-chat/` via `CODEX_CHAT_ADMIN_PUBLIC_BASE_URL`, while Slack Events remain on `https://me.galebach.com/api/slack/events`. It is Clerk-gated with
+`/admin` page in the codex-chat API process. In the current deployment it is exposed at `https://brain.decisiveoutcomes.com/admin` via `CODEX_CHAT_ADMIN_PUBLIC_BASE_URL`, while Slack Events remain on `https://me.galebach.com/api/slack/events`. It is Clerk-gated with
 server-side email allowlist checks, fails closed when Clerk keys or allowed
 emails are absent, writes only the Slack/bootstrap env vars needed for the
 current HTTP Events API adapter, and renders/validates the Slack manifest. This
@@ -599,7 +599,7 @@ execution.
 - [ ] Expose the `codex-chat`-owned Slack manifest contract in a stable
       no-secrets way so Brain can render, validate, copy/download, and use it
       without forking adapter semantics.
-- [ ] Keep the current `/admin/codex-chat/` page bootstrap/temporary for Slack
+- [ ] Keep the current `/admin` page bootstrap/temporary for Slack
       setup or runtime-local diagnostics only; do not expand it into the
       durable admin/control plane.
 

@@ -1,25 +1,46 @@
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { authorizeAdminRequest, parseAdminAllowedEmails } from "../admin-auth.js";
+import {
+  authorizeAdminRequest,
+  parseAdminAllowedEmails,
+} from "../admin-auth.js";
 import { ApiGateway, type ApiGatewayHooks } from "../api.js";
 import { loadConfig, type AppConfig } from "../config.js";
 import { mergeEnvFileText, writeMergedEnvFile } from "../env-file.js";
 import { FileStore } from "../file-store.js";
 import { createLogger } from "../logger.js";
 import { StateStore } from "../state.js";
-import type { Transcriber, TranscribeInput, TranscriptionResult } from "../transcription.js";
+import type {
+  Transcriber,
+  TranscribeInput,
+  TranscriptionResult,
+} from "../transcription.js";
 
 const tempDirs: string[] = [];
 const gateways: ApiGateway[] = [];
 const originalEnv = { ...process.env };
 
 class StubTranscriber implements Transcriber {
-  readonly transcribe = vi.fn(async (_input: TranscribeInput): Promise<TranscriptionResult> => ({ text: "", mode: _input.mode ?? "regular" }));
+  readonly transcribe = vi.fn(
+    async (_input: TranscribeInput): Promise<TranscriptionResult> => ({
+      text: "",
+      mode: _input.mode ?? "regular",
+    }),
+  );
 }
 
-function fakeRequest(token?: string): { headers: Record<string, string | undefined> } {
+function fakeRequest(token?: string): {
+  headers: Record<string, string | undefined>;
+} {
   return { headers: token ? { authorization: `Bearer ${token}` } : {} };
 }
 
@@ -28,17 +49,28 @@ async function tempRoot(prefix = "codex-chat-admin-"): Promise<string> {
   tempDirs.push(root);
   await mkdir(join(root, "config"), { recursive: true });
   await writeFile(join(root, "AGENTS.md"), "test behavior\n");
-  await writeFile(join(root, "loops.json"), JSON.stringify({ version: 1, defaults: {}, loops: [] }));
-  await writeFile(join(root, "monitors.json"), JSON.stringify({ version: 1, monitors: [] }));
+  await writeFile(
+    join(root, "loops.json"),
+    JSON.stringify({ version: 1, defaults: {}, loops: [] }),
+  );
+  await writeFile(
+    join(root, "monitors.json"),
+    JSON.stringify({ version: 1, monitors: [] }),
+  );
   await mkdir(join(root, "slack-app"), { recursive: true });
-  await writeFile(join(root, "slack-app", "manifest.json"), await readFile(join(process.cwd(), "slack-app", "manifest.json"), "utf8"));
+  await writeFile(
+    join(root, "slack-app", "manifest.json"),
+    await readFile(join(process.cwd(), "slack-app", "manifest.json"), "utf8"),
+  );
   return root;
 }
 
 async function adminConfig(envFile?: string): Promise<AppConfig> {
   const root = await tempRoot();
   const configPath = join(root, "config", "codex-chat.toml");
-  await writeFile(configPath, `
+  await writeFile(
+    configPath,
+    `
 version = 1
 
 [service]
@@ -76,22 +108,38 @@ port = 0
 [admin]
 enabled = true
 envFile = "${envFile ?? join(root, "env")}"
-publicBaseUrl = "https://brain.decisive-outcomes.com"
-`);
-  process.env.CLERK_PUBLISHABLE_KEY = "pk_test_ZmFrZS5jbGVyay5hY2NvdW50cy5kZXYk";
+publicBaseUrl = "https://brain.decisiveoutcomes.com"
+`,
+  );
+  process.env.CODEX_CHAT_ADMIN_PUBLIC_BASE_URL =
+    "https://brain.decisiveoutcomes.com";
+  delete process.env.CLERK_SIGN_IN_URL;
+  process.env.CLERK_PUBLISHABLE_KEY =
+    "pk_test_ZmFrZS5jbGVyay5hY2NvdW50cy5kZXYk";
   process.env.CLERK_SECRET_KEY = "sk_test_secret";
-  process.env.CLERK_ALLOWED_EMAILS = "timgalebachukraine@gmail.com,tim.galebach@gmail.com";
+  process.env.CLERK_ALLOWED_EMAILS =
+    "timgalebachukraine@gmail.com,tim.galebach@gmail.com";
   return loadConfig(configPath);
 }
 
-async function apiHarness(envFile?: string, hooks: ApiGatewayHooks = {}): Promise<{ config: AppConfig; baseUrl: string }> {
+async function apiHarness(
+  envFile?: string,
+  hooks: ApiGatewayHooks = {},
+): Promise<{ config: AppConfig; baseUrl: string }> {
   const config = await adminConfig(envFile);
   const logger = createLogger("silent");
   const state = new StateStore(config);
   await state.init();
   const files = new FileStore(config, state);
   await files.init();
-  const gateway = new ApiGateway(config, state, files, new StubTranscriber(), logger, hooks);
+  const gateway = new ApiGateway(
+    config,
+    state,
+    files,
+    new StubTranscriber(),
+    logger,
+    hooks,
+  );
   await gateway.start();
   gateways.push(gateway);
   const port = gateway.address()?.port;
@@ -99,8 +147,15 @@ async function apiHarness(envFile?: string, hooks: ApiGatewayHooks = {}): Promis
   return { config, baseUrl: `http://127.0.0.1:${port}` };
 }
 
-async function authFetch(baseUrl: string, path: string, init: RequestInit = {}): Promise<Response> {
-  return fetch(`${baseUrl}${path}`, { ...init, headers: { ...(init.headers ?? {}), authorization: "Bearer test-token" } });
+async function authFetch(
+  baseUrl: string,
+  path: string,
+  init: RequestInit = {},
+): Promise<Response> {
+  return fetch(`${baseUrl}${path}`, {
+    ...init,
+    headers: { ...(init.headers ?? {}), authorization: "Bearer test-token" },
+  });
 }
 
 beforeEach(() => {
@@ -111,65 +166,124 @@ afterEach(async () => {
   await Promise.all(gateways.splice(0).map((gateway) => gateway.stop()));
   process.env = { ...originalEnv };
   vi.restoreAllMocks();
-  await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  await Promise.all(
+    tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })),
+  );
 });
 
 describe("admin auth", () => {
   test("parses allowlist case-insensitively", () => {
-    expect(parseAdminAllowedEmails(" Tim.Galebach@Gmail.com,\ntimgalebachukraine@gmail.com ")).toEqual(new Set([
-      "tim.galebach@gmail.com",
-      "timgalebachukraine@gmail.com"
-    ]));
+    expect(
+      parseAdminAllowedEmails(
+        " Tim.Galebach@Gmail.com,\ntimgalebachukraine@gmail.com ",
+      ),
+    ).toEqual(
+      new Set(["tim.galebach@gmail.com", "timgalebachukraine@gmail.com"]),
+    );
   });
 
   test("fails closed when Clerk keys or allowed emails are missing", async () => {
-    await expect(authorizeAdminRequest(fakeRequest("token") as never, { clerkSecretKey: "sk", clerkPublishableKey: "pk", clerkAllowedEmails: "" })).resolves.toMatchObject({ ok: false, statusCode: 403, error: "admin_allowlist_empty" });
-    await expect(authorizeAdminRequest(fakeRequest("token") as never, { clerkSecretKey: "sk", clerkPublishableKey: "", clerkAllowedEmails: "tim.galebach@gmail.com" })).resolves.toMatchObject({ ok: false, statusCode: 503, error: "admin_auth_not_configured" });
+    await expect(
+      authorizeAdminRequest(fakeRequest("token") as never, {
+        clerkSecretKey: "sk",
+        clerkPublishableKey: "pk",
+        clerkAllowedEmails: "",
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      statusCode: 403,
+      error: "admin_allowlist_empty",
+    });
+    await expect(
+      authorizeAdminRequest(fakeRequest("token") as never, {
+        clerkSecretKey: "sk",
+        clerkPublishableKey: "",
+        clerkAllowedEmails: "tim.galebach@gmail.com",
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      statusCode: 503,
+      error: "admin_auth_not_configured",
+    });
   });
 
   test("allows only configured Clerk user emails", async () => {
     const verifyTokenImpl = vi.fn(async () => ({ sub: "user_123" }) as never);
     const getUser = vi.fn(async () => ({
       primaryEmailAddressId: "email_1",
-      emailAddresses: [{ id: "email_1", emailAddress: "Tim.Galebach@Gmail.com" }]
+      emailAddresses: [
+        { id: "email_1", emailAddress: "Tim.Galebach@Gmail.com" },
+      ],
     }));
 
-    await expect(authorizeAdminRequest(fakeRequest("token") as never, {
-      clerkSecretKey: "sk",
-      clerkPublishableKey: "pk",
-      clerkAllowedEmails: "tim.galebach@gmail.com"
-    }, { verifyTokenImpl, getUser })).resolves.toMatchObject({ ok: true, admin: { email: "tim.galebach@gmail.com" } });
+    await expect(
+      authorizeAdminRequest(
+        fakeRequest("token") as never,
+        {
+          clerkSecretKey: "sk",
+          clerkPublishableKey: "pk",
+          clerkAllowedEmails: "tim.galebach@gmail.com",
+        },
+        { verifyTokenImpl, getUser },
+      ),
+    ).resolves.toMatchObject({
+      ok: true,
+      admin: { email: "tim.galebach@gmail.com" },
+    });
 
-    await expect(authorizeAdminRequest(fakeRequest("token") as never, {
-      clerkSecretKey: "sk",
-      clerkPublishableKey: "pk",
-      clerkAllowedEmails: "someone@example.com"
-    }, { verifyTokenImpl, getUser })).resolves.toMatchObject({ ok: false, statusCode: 403, error: "forbidden" });
+    await expect(
+      authorizeAdminRequest(
+        fakeRequest("token") as never,
+        {
+          clerkSecretKey: "sk",
+          clerkPublishableKey: "pk",
+          clerkAllowedEmails: "someone@example.com",
+        },
+        { verifyTokenImpl, getUser },
+      ),
+    ).resolves.toMatchObject({
+      ok: false,
+      statusCode: 403,
+      error: "forbidden",
+    });
   });
 
   test("accepts Clerk __session cookie for server-rendered admin page auth", async () => {
     const verifyTokenImpl = vi.fn(async () => ({ sub: "user_123" }) as never);
     const getUser = vi.fn(async () => ({
       primaryEmailAddressId: "email_1",
-      emailAddresses: [{ id: "email_1", emailAddress: "tim.galebach@gmail.com" }]
+      emailAddresses: [
+        { id: "email_1", emailAddress: "tim.galebach@gmail.com" },
+      ],
     }));
 
-    await expect(authorizeAdminRequest({ headers: { cookie: "__session=cookie-token" } } as never, {
-      clerkSecretKey: "sk",
-      clerkPublishableKey: "pk",
-      clerkAllowedEmails: "tim.galebach@gmail.com"
-    }, { verifyTokenImpl, getUser })).resolves.toMatchObject({ ok: true });
-    expect(verifyTokenImpl).toHaveBeenCalledWith("cookie-token", { secretKey: "sk" });
+    await expect(
+      authorizeAdminRequest(
+        { headers: { cookie: "__session=cookie-token" } } as never,
+        {
+          clerkSecretKey: "sk",
+          clerkPublishableKey: "pk",
+          clerkAllowedEmails: "tim.galebach@gmail.com",
+        },
+        { verifyTokenImpl, getUser },
+      ),
+    ).resolves.toMatchObject({ ok: true });
+    expect(verifyTokenImpl).toHaveBeenCalledWith("cookie-token", {
+      secretKey: "sk",
+    });
   });
 });
 
 describe("admin env file management", () => {
   test("merges env vars while preserving unrelated lines", () => {
-    const merged = mergeEnvFileText("# keep\nFOO=bar\nSLACK_BOT_TOKEN=old\nexport CODEX_CHAT_SLACK_ENABLED=false\n", {
-      SLACK_BOT_TOKEN: "xoxb-new value",
-      CODEX_CHAT_SLACK_ENABLED: "true",
-      SLACK_SIGNING_SECRET: "it's secret"
-    });
+    const merged = mergeEnvFileText(
+      "# keep\nFOO=bar\nSLACK_BOT_TOKEN=old\nexport CODEX_CHAT_SLACK_ENABLED=false\n",
+      {
+        SLACK_BOT_TOKEN: "xoxb-new value",
+        CODEX_CHAT_SLACK_ENABLED: "true",
+        SLACK_SIGNING_SECRET: "it's secret",
+      },
+    );
 
     expect(merged).toContain("# keep\nFOO=bar\n");
     expect(merged).toContain("SLACK_BOT_TOKEN='xoxb-new value'");
@@ -180,10 +294,15 @@ describe("admin env file management", () => {
   test("writes env file with chmod 600", async () => {
     const root = await tempRoot();
     const envFile = join(root, "nested", "env");
-    await writeMergedEnvFile(envFile, { SLACK_BOT_TOKEN: "xoxb-test", CODEX_CHAT_SLACK_ENABLED: "true" });
+    await writeMergedEnvFile(envFile, {
+      SLACK_BOT_TOKEN: "xoxb-test",
+      CODEX_CHAT_SLACK_ENABLED: "true",
+    });
     const mode = (await stat(envFile)).mode & 0o777;
     expect(mode).toBe(0o600);
-    expect(await readFile(envFile, "utf8")).toContain("SLACK_BOT_TOKEN='xoxb-test'");
+    expect(await readFile(envFile, "utf8")).toContain(
+      "SLACK_BOT_TOKEN='xoxb-test'",
+    );
   });
 });
 
@@ -194,16 +313,72 @@ describe("admin routes", () => {
         verifyTokenImpl: vi.fn(async () => ({ sub: "user_123" }) as never),
         getUser: vi.fn(async () => ({
           primaryEmailAddressId: "email_1",
-          emailAddresses: [{ id: "email_1", emailAddress: "tim.galebach@gmail.com" }]
-        }))
-      }
+          emailAddresses: [
+            { id: "email_1", emailAddress: "tim.galebach@gmail.com" },
+          ],
+        })),
+      },
     });
 
-    const noAuth = await fetch(`${baseUrl}/admin/codex-chat/`);
-    expect(noAuth.status).toBe(401);
-    const authed = await fetch(`${baseUrl}/admin/codex-chat/`, { headers: { cookie: "__session=test-token" } });
+    const noAuth = await fetch(`${baseUrl}/admin/codex-chat/`, {
+      redirect: "manual",
+    });
+    expect(noAuth.status).toBe(302);
+    expect(noAuth.headers.get("location")).toMatch(
+      /^https:\/\/brain\.decisiveoutcomes\.com\/admin\/codex-chat\/auth\/sign-in\?/,
+    );
+    expect(noAuth.headers.get("location")).toContain(
+      "redirect_url=https%3A%2F%2Fbrain.decisiveoutcomes.com%2Fadmin%2Fcodex-chat",
+    );
+
+    const signIn = await fetch(
+      `${baseUrl}/admin/codex-chat/auth/sign-in?redirect_url=${encodeURIComponent("https://brain.decisiveoutcomes.com/admin/codex-chat")}`,
+    );
+    expect(signIn.status).toBe(200);
+    const signInHtml = await signIn.text();
+    expect(signInHtml).toContain("Sign in to codex-chat admin");
+    expect(signInHtml).toContain("forceRedirectUrl");
+
+    const authed = await fetch(`${baseUrl}/admin/codex-chat/`, {
+      headers: { cookie: "__session=test-token" },
+    });
     expect(authed.status).toBe(200);
     expect(await authed.text()).toContain("codex-chat admin");
+  });
+
+  test("admin route can be configured as /admin without exposing codex-chat path", async () => {
+    process.env.CODEX_CHAT_ADMIN_ROUTE_PATH = "/admin";
+    process.env.CODEX_CHAT_ADMIN_PUBLIC_BASE_URL =
+      "https://brain.decisiveoutcomes.com";
+    const { baseUrl } = await apiHarness(undefined, {
+      adminAuthDeps: {
+        verifyTokenImpl: vi.fn(async () => ({ sub: "user_123" }) as never),
+        getUser: vi.fn(async () => ({
+          primaryEmailAddressId: "email_1",
+          emailAddresses: [
+            { id: "email_1", emailAddress: "tim.galebach@gmail.com" },
+          ],
+        })),
+      },
+    });
+
+    const noAuth = await fetch(`${baseUrl}/admin`, { redirect: "manual" });
+    expect(noAuth.status).toBe(302);
+    expect(noAuth.headers.get("location")).toMatch(
+      /^https:\/\/brain\.decisiveoutcomes\.com\/admin\/auth\/sign-in\?/,
+    );
+    expect(noAuth.headers.get("location")).toContain(
+      "redirect_url=https%3A%2F%2Fbrain.decisiveoutcomes.com%2Fadmin",
+    );
+
+    const slash = await fetch(`${baseUrl}/admin/`, { redirect: "manual" });
+    expect(slash.status).toBe(308);
+    expect(slash.headers.get("location")).toBe("/admin");
+
+    const authed = await fetch(`${baseUrl}/admin`, {
+      headers: { cookie: "__session=test-token" },
+    });
+    expect(authed.status).toBe(200);
   });
 
   test("render manifest route requires auth and returns validated manifest", async () => {
@@ -212,16 +387,24 @@ describe("admin routes", () => {
         verifyTokenImpl: vi.fn(async () => ({ sub: "user_123" }) as never),
         getUser: vi.fn(async () => ({
           primaryEmailAddressId: "email_1",
-          emailAddresses: [{ id: "email_1", emailAddress: "tim.galebach@gmail.com" }]
-        }))
-      }
+          emailAddresses: [
+            { id: "email_1", emailAddress: "tim.galebach@gmail.com" },
+          ],
+        })),
+      },
     });
     const noAuth = await fetch(`${baseUrl}/api/admin/codex-chat/manifest`);
     expect(noAuth.status).toBe(401);
 
-    const response = await authFetch(baseUrl, "/api/admin/codex-chat/manifest?baseUrl=https%3A%2F%2Fme.galebach.com&eventsPath=%2Fapi%2Fslack%2Fevents");
+    const response = await authFetch(
+      baseUrl,
+      "/api/admin/codex-chat/manifest?baseUrl=https%3A%2F%2Fme.galebach.com&eventsPath=%2Fapi%2Fslack%2Fevents",
+    );
     expect(response.status).toBe(200);
-    const payload = await response.json() as { validation: { ok: boolean }; requestUrl: string };
+    const payload = (await response.json()) as {
+      validation: { ok: boolean };
+      requestUrl: string;
+    };
     expect(payload.validation.ok).toBe(true);
     expect(payload.requestUrl).toBe("https://me.galebach.com/api/slack/events");
   });
@@ -234,25 +417,42 @@ describe("admin routes", () => {
         verifyTokenImpl: vi.fn(async () => ({ sub: "user_123" }) as never),
         getUser: vi.fn(async () => ({
           primaryEmailAddressId: "email_1",
-          emailAddresses: [{ id: "email_1", emailAddress: "tim.galebach@gmail.com" }]
-        }))
-      }
+          emailAddresses: [
+            { id: "email_1", emailAddress: "tim.galebach@gmail.com" },
+          ],
+        })),
+      },
     });
 
     // Monkey-patch the route auth by using the exported auth tests separately; here verify that unauthenticated API fails closed.
-    const response = await fetch(`${baseUrl}/api/admin/codex-chat/slack-config`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ signingSecret: "secret", botToken: "xoxb-secret" })
-    });
+    const response = await fetch(
+      `${baseUrl}/api/admin/codex-chat/slack-config`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          signingSecret: "secret",
+          botToken: "xoxb-secret",
+        }),
+      },
+    );
     expect(response.status).toBe(401);
 
-    const authed = await authFetch(baseUrl, "/api/admin/codex-chat/slack-config", {
-      method: "POST",
-      body: JSON.stringify({ signingSecret: "secret-value", botToken: "xoxb-secret-value", baseUrl: "https://me.galebach.com", eventsPath: "/api/slack/events" })
-    });
+    const authed = await authFetch(
+      baseUrl,
+      "/api/admin/codex-chat/slack-config",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          signingSecret: "secret-value",
+          botToken: "xoxb-secret-value",
+          baseUrl: "https://me.galebach.com",
+          eventsPath: "/api/slack/events",
+        }),
+      },
+    );
     expect(authed.status).toBe(200);
-    const payload = await authed.json() as { message: string };
+    const payload = (await authed.json()) as { message: string };
     expect(JSON.stringify(payload)).not.toContain("secret-value");
     const written = await readFile(envFile, "utf8");
     expect(written).toContain("SLACK_SIGNING_SECRET='secret-value'");

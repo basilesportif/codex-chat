@@ -49,7 +49,7 @@ const overrideEnvNames = [
   "CLERK_PUBLISHABLE_KEY",
   "CLERK_SECRET_KEY",
   "CLERK_SIGN_IN_URL",
-  "CLERK_ALLOWED_EMAILS"
+  "CLERK_ALLOWED_EMAILS",
 ];
 
 async function tempConfig(contents: string): Promise<string> {
@@ -68,7 +68,9 @@ beforeEach(() => {
 
 afterEach(async () => {
   process.env = { ...originalEnv };
-  await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  await Promise.all(
+    tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })),
+  );
 });
 
 describe("config loading", () => {
@@ -121,7 +123,8 @@ userIds = [12345]
     process.env.CUSTOM_SLACK_SIGNING_SECRET = "slack-signing-secret";
     process.env.CUSTOM_SLACK_BOT_TOKEN = "xoxb-test-token";
     process.env.CODEX_CHAT_ADMIN_ENABLED = "true";
-    process.env.CODEX_CHAT_ADMIN_PUBLIC_BASE_URL = "https://brain.decisive-outcomes.com";
+    process.env.CODEX_CHAT_ADMIN_PUBLIC_BASE_URL =
+      "https://brain.decisiveoutcomes.com";
     process.env.CODEX_CHAT_BASE_URL = "https://me.galebach.com";
     process.env.CLERK_PUBLISHABLE_KEY = "pk_test_example";
     process.env.CLERK_SECRET_KEY = "sk_test_example";
@@ -151,7 +154,9 @@ botTokenEnv = "CUSTOM_SLACK_BOT_TOKEN"
     expect(config.slack.eventsPath).toBe("/api/custom-slack/events");
     expect(config.api.enabled).toBe(true);
     expect(config.admin.enabled).toBe(true);
-    expect(config.admin.publicBaseUrl).toBe("https://brain.decisive-outcomes.com");
+    expect(config.admin.publicBaseUrl).toBe(
+      "https://brain.decisiveoutcomes.com",
+    );
     expect(config.slack.publicBaseUrl).toBe("https://me.galebach.com");
     expect(config.slackSigningSecret).toBe("slack-signing-secret");
     expect(config.slackBotToken).toBe("xoxb-test-token");
@@ -163,13 +168,16 @@ botTokenEnv = "CUSTOM_SLACK_BOT_TOKEN"
 
   test("allows transcription model env overrides", async () => {
     process.env.CODEX_CHAT_TRANSCRIPTION_MODEL = "gpt-4o-transcribe-custom";
-    process.env.CODEX_CHAT_TRANSCRIPTION_DIARIZE_MODEL = "gpt-4o-transcribe-diarize-custom";
+    process.env.CODEX_CHAT_TRANSCRIPTION_DIARIZE_MODEL =
+      "gpt-4o-transcribe-diarize-custom";
     const path = await tempConfig("version = 1\n");
 
     const config = await loadConfig(path);
 
     expect(config.transcription.model).toBe("gpt-4o-transcribe-custom");
-    expect(config.transcription.diarizeModel).toBe("gpt-4o-transcribe-diarize-custom");
+    expect(config.transcription.diarizeModel).toBe(
+      "gpt-4o-transcribe-diarize-custom",
+    );
   });
 
   test("allows app-server subagent backend opt-in from config and env", async () => {
@@ -197,9 +205,10 @@ backend = "codex_exec"
     expect(config.ingest.audioMaxMb).toBe(42);
     expect(config.ingest.apiKeys).toHaveLength(2);
     expect(config.ingest.apiKeys[0]).toMatchObject({ identity: "iphone" });
-    expect(config.ingest.apiKeys.map((key) => key.hash)).not.toContain("first-secret");
+    expect(config.ingest.apiKeys.map((key) => key.hash)).not.toContain(
+      "first-secret",
+    );
   });
-
 
   test("parses dynamic Employee config tables into definitions", async () => {
     const path = await tempConfig(`
@@ -280,7 +289,12 @@ adminUserIds = [999]
 
     const config = await loadConfig(path);
 
-    expect(config.telegram.allowlist.userIds).toEqual([111, 222, 333, "external-user"]);
+    expect(config.telegram.allowlist.userIds).toEqual([
+      111,
+      222,
+      333,
+      "external-user",
+    ]);
     expect(config.telegram.allowlist.adminUserIds).toEqual([999, 444, 555]);
   });
 
@@ -294,7 +308,11 @@ adminUserIds = [999]
     const loops = await loadLoopsConfig(config);
     const monitors = await loadMonitorsConfig(config);
 
-    expect(result).toEqual({ configCreated: true, loopsCreated: true, monitorsCreated: true });
+    expect(result).toEqual({
+      configCreated: true,
+      loopsCreated: true,
+      monitorsCreated: true,
+    });
     expect(config.telegram.allowlist.userIds).toEqual([]);
     expect(config.telegram.opsChatId).toBe(0);
     expect(loops.loops).toEqual([]);
@@ -307,20 +325,44 @@ adminUserIds = [999]
     const configDir = join(root, "config");
     await mkdir(configDir, { recursive: true });
     const configPath = join(configDir, "codex-chat.toml");
-    await writeFile(configPath, `
+    await writeFile(
+      configPath,
+      `
 version = 1
 
 [telegram]
 opsChatId = 123
-`);
-    await writeFile(join(configDir, "loops.json"), JSON.stringify({ version: 1, loops: [{ id: "local", enabled: true, schedule: "0 * * * *", type: "prompt", prompt: "Keep me" }] }));
-    await writeFile(join(configDir, "monitors.json"), JSON.stringify({ version: 1, monitors: [] }));
+`,
+    );
+    await writeFile(
+      join(configDir, "loops.json"),
+      JSON.stringify({
+        version: 1,
+        loops: [
+          {
+            id: "local",
+            enabled: true,
+            schedule: "0 * * * *",
+            type: "prompt",
+            prompt: "Keep me",
+          },
+        ],
+      }),
+    );
+    await writeFile(
+      join(configDir, "monitors.json"),
+      JSON.stringify({ version: 1, monitors: [] }),
+    );
 
     const result = await writeDefaultConfigFilesIfMissing(configPath);
     const config = await loadConfig(configPath);
     const loops = await loadLoopsConfig(config);
 
-    expect(result).toEqual({ configCreated: false, loopsCreated: false, monitorsCreated: false });
+    expect(result).toEqual({
+      configCreated: false,
+      loopsCreated: false,
+      monitorsCreated: false,
+    });
     expect(config.telegram.opsChatId).toBe(123);
     expect(loops.loops[0]?.id).toBe("local");
   });

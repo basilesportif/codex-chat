@@ -9,7 +9,9 @@ set -Eeuo pipefail
 
 ENV_FILE="${CODEX_CHAT_ENV_FILE:-$HOME/.config/codex-chat/env}"
 SERVICE_NAME="${CODEX_CHAT_SERVICE_NAME:-codex-chat.service}"
-DEFAULT_SIGN_IN_URL="/admin/codex-chat/"
+DEFAULT_ADMIN_PUBLIC_BASE_URL="https://brain.decisiveoutcomes.com"
+DEFAULT_ADMIN_ROUTE_PATH="/admin"
+DEFAULT_SIGN_IN_PATH="/admin/auth/sign-in"
 ALLOWED_EMAILS="timgalebachukraine@gmail.com,tim.galebach@gmail.com"
 
 DROP_KEYS=(
@@ -17,6 +19,8 @@ DROP_KEYS=(
   CLERK_SECRET_KEY
   CLERK_SIGN_IN_URL
   CODEX_CHAT_ADMIN_ENABLED
+  CODEX_CHAT_ADMIN_PUBLIC_BASE_URL
+  CODEX_CHAT_ADMIN_ROUTE_PATH
   CLERK_ALLOWED_EMAILS
 )
 
@@ -73,7 +77,9 @@ write_env_line() {
 write_env_file() {
   local publishable_key="$1"
   local secret_key="$2"
-  local sign_in_url="$3"
+  local admin_public_base_url="$3"
+  local admin_route_path="$4"
+  local sign_in_url="$5"
   local env_dir tmp
   env_dir="$(dirname "$ENV_FILE")"
   mkdir -p "$env_dir"
@@ -102,6 +108,8 @@ write_env_file() {
     echo
     echo "# Clerk admin auth for codex-chat"
     write_env_line "CODEX_CHAT_ADMIN_ENABLED" "true"
+    write_env_line "CODEX_CHAT_ADMIN_PUBLIC_BASE_URL" "$admin_public_base_url"
+    write_env_line "CODEX_CHAT_ADMIN_ROUTE_PATH" "$admin_route_path"
     write_env_line "CLERK_PUBLISHABLE_KEY" "$publishable_key"
     write_env_line "CLERK_SECRET_KEY" "$secret_key"
     write_env_line "CLERK_SIGN_IN_URL" "$sign_in_url"
@@ -127,19 +135,33 @@ main() {
   require_tty
   echo "This updates $ENV_FILE, preserves unrelated lines, and restarts $SERVICE_NAME."
 
-  local publishable_key secret_key sign_in_url
+  local publishable_key secret_key admin_public_base_url admin_route_path sign_in_url default_sign_in_path default_sign_in_url
   publishable_key="$(read_required "CLERK_PUBLISHABLE_KEY")"
   secret_key="$(read_required_secret "CLERK_SECRET_KEY")"
-  read -r -p "CLERK_SIGN_IN_URL [$DEFAULT_SIGN_IN_URL]: " sign_in_url
+  read -r -p "CODEX_CHAT_ADMIN_PUBLIC_BASE_URL [$DEFAULT_ADMIN_PUBLIC_BASE_URL]: " admin_public_base_url
+  admin_public_base_url="${admin_public_base_url%$'\r'}"
+  admin_public_base_url="${admin_public_base_url:-$DEFAULT_ADMIN_PUBLIC_BASE_URL}"
+  read -r -p "CODEX_CHAT_ADMIN_ROUTE_PATH [$DEFAULT_ADMIN_ROUTE_PATH]: " admin_route_path
+  admin_route_path="${admin_route_path%$'\r'}"
+  admin_route_path="${admin_route_path:-$DEFAULT_ADMIN_ROUTE_PATH}"
+  default_sign_in_path="${admin_route_path%/}/auth/sign-in"
+  default_sign_in_url="${admin_public_base_url%/}$default_sign_in_path"
+  read -r -p "CLERK_SIGN_IN_URL [$default_sign_in_url]: " sign_in_url
   sign_in_url="${sign_in_url%$'\r'}"
-  sign_in_url="${sign_in_url:-$DEFAULT_SIGN_IN_URL}"
+  sign_in_url="${sign_in_url:-$default_sign_in_url}"
 
   validate_env_value "CLERK_PUBLISHABLE_KEY" "$publishable_key"
   validate_env_value "CLERK_SECRET_KEY" "$secret_key"
+  validate_env_value "CODEX_CHAT_ADMIN_PUBLIC_BASE_URL" "$admin_public_base_url"
+  validate_env_value "CODEX_CHAT_ADMIN_ROUTE_PATH" "$admin_route_path"
   validate_env_value "CLERK_SIGN_IN_URL" "$sign_in_url"
   validate_env_value "CLERK_ALLOWED_EMAILS" "$ALLOWED_EMAILS"
 
-  write_env_file "$publishable_key" "$secret_key" "$sign_in_url"
+  [[ "$admin_public_base_url" == http://* || "$admin_public_base_url" == https://* ]] || fail "CODEX_CHAT_ADMIN_PUBLIC_BASE_URL must be an absolute URL"
+  [[ "$admin_route_path" == /* ]] || fail "CODEX_CHAT_ADMIN_ROUTE_PATH must start with /"
+  [[ "$sign_in_url" == http://* || "$sign_in_url" == https://* || "$sign_in_url" == /* ]] || fail "CLERK_SIGN_IN_URL must be absolute or root-relative"
+
+  write_env_file "$publishable_key" "$secret_key" "$admin_public_base_url" "$admin_route_path" "$sign_in_url"
   echo "Updated $ENV_FILE with Clerk admin settings."
   restart_service
 }

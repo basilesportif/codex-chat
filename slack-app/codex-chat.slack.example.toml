@@ -1,0 +1,16 @@
+# Merge this with config/codex-chat.toml, or copy the [slack] values into your
+# deployment config. Secrets stay in environment variables, not TOML.
+
+[slack]
+enabled = true
+eventsPath = "/api/slack/events"
+signingSecretEnv = "SLACK_SIGNING_SECRET"
+botTokenEnv = "SLACK_BOT_TOKEN"
+appTokenEnv = "SLACK_APP_TOKEN"
+
+[api]
+# Slack Events API delivery requires an HTTP listener reachable at the manifest
+# request_url. loadConfig also enables the API automatically when slack.enabled=true.
+enabled = true
+host = "127.0.0.1"
+port = 49346

@@ -46,7 +46,9 @@ Based on the current repo/system state:
 - [x] Existing Brain/company-runtime planning notes exist in the broader local
       system, including Brain monorepo/runtime parity plans that already frame
       Telegram as an adapter over a channel-neutral runtime.
-- [ ] Slack adapter exists.
+- [x] Slack adapter exists (`src/slack.ts` and related runtime/API tests).
+- [x] Installable Slack app surface exists under `slack-app/` with manifest,
+      install metadata template, adapter config/env examples, and validation.
 - [x] Capability-aware runtime abstractions are implemented in `codex-chat`.
 - [ ] Durable company-mode capability state exists outside long-term JSON files.
 - [ ] Admin dashboard exists for users, channel mappings, capabilities, audits,
@@ -508,19 +510,29 @@ Compression/context management should be explicit:
 
 This phase is the Slack foundation/adapter slice only. It intentionally stops
 short of broad Slack history/search tools, full capability enforcement,
-capability bundles, or admin/dashboard flows.
+capability bundles, or admin/dashboard flows. The installable app surface lives
+in `slack-app/`; it owns the Slack manifest, scopes/events, non-secret install
+metadata template, and deployment/env notes that feed the `src/slack.ts`
+adapter.
 
-- [ ] Add Slack app config and secret metadata checks without exposing token
+- [x] Add Slack app config and secret metadata checks without exposing token
       values.
-- [ ] Implement Events API verification, idempotency, fast ack, and queueing.
-- [ ] Normalize app mentions and DMs into shared runtime events.
-- [ ] Create/resume thread-scoped sessions for channel app mentions and
+- [x] Add installable Slack app surface (`slack-app/`) with manifest, required
+      scopes/events, config/env examples, install metadata template, and local
+      validation.
+- [x] Implement Events API verification, idempotency, fast ack, and queueing.
+- [x] Normalize app mentions and DMs into shared runtime events.
+- [x] Create/resume thread-scoped sessions for channel app mentions and
       conversation-scoped sessions for DMs/MPIM/private groups.
-- [ ] Resolve Slack user/channel metadata as adapter metadata when available;
-      do not treat cached display snapshots as authorization truth.
-- [ ] Implement Slack renderer support for source-thread/source-conversation
+- [x] Resolve Slack user/channel metadata as adapter metadata when available
+      from Events API payloads; do not treat cached display snapshots as
+      authorization truth.
+- [x] Implement Slack renderer support for source-thread/source-conversation
       text replies and final answers through `OutputTarget`.
-- [ ] Add tests with fixture events and no live network calls by default.
+- [x] Add tests with fixture events and no live network calls by default.
+- [ ] Install the real Slack app in a workspace, point Events API at the
+      deployed codex-chat URL, and run live app-mention/DM/private-channel
+      canaries before declaring Phase 2 operationally complete.
 
 ### Phase 3 — capability requirements, enforcement, and audit spine
 

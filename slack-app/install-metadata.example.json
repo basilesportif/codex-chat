@@ -1,0 +1,84 @@
+{
+  "schema": "codex-chat/slack-install-metadata/v1",
+  "workspace": {
+    "team_id": "T0123456789",
+    "team_name": "Example Workspace",
+    "enterprise_id": null,
+    "enterprise_name": null
+  },
+  "app": {
+    "app_id": "A0123456789",
+    "client_id": "1234567890.1234567890",
+    "manifest_source": "slack-app/manifest.json",
+    "events_request_path": "/api/slack/events"
+  },
+  "bot_install": {
+    "bot_user_id": "U0123456789",
+    "bot_id": "B0123456789",
+    "bot_token_env": "SLACK_BOT_TOKEN",
+    "signing_secret_env": "SLACK_SIGNING_SECRET",
+    "app_token_env": "SLACK_APP_TOKEN",
+    "installed_by_user_id": "UINSTALLER",
+    "installed_at": "2026-06-26T00:00:00.000Z"
+  },
+  "scopes": {
+    "bot": [
+      "app_mentions:read",
+      "chat:write",
+      "groups:history",
+      "groups:read",
+      "im:history",
+      "im:read",
+      "mpim:history",
+      "mpim:read"
+    ]
+  },
+  "events": {
+    "request_url": "https://YOUR-CODEX-CHAT-HOST.example.com/api/slack/events",
+    "bot_events": [
+      "app_mention",
+      "message.groups",
+      "message.im",
+      "message.mpim"
+    ]
+  },
+  "default_channel_mappings": [
+    {
+      "channel_id": "C0123456789",
+      "channel_name": "company-brain",
+      "channel_type": "channel",
+      "purpose": "Optional allowlisted rollout/testing channel"
+    }
+  ],
+  "metadata_delivered_to_codex_chat": {
+    "event_envelope": [
+      "team_id",
+      "enterprise_id",
+      "api_app_id",
+      "event_id",
+      "event_time",
+      "authorizations[].user_id"
+    ],
+    "message_event": [
+      "type",
+      "channel",
+      "channel_type",
+      "user",
+      "text",
+      "ts",
+      "thread_ts",
+      "event_ts"
+    ],
+    "normalized_runtime_fields": [
+      "ActorContext.surfaceKind=slack",
+      "ActorContext.teamId",
+      "ActorContext.surfaceUserId",
+      "OutputTarget.teamId",
+      "OutputTarget.channelId",
+      "OutputTarget.threadId",
+      "ConversationKey",
+      "CapabilityGrant.resourceSelectors",
+      "metadata.slackEventId"
+    ]
+  }
+}

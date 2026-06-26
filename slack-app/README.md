@@ -21,6 +21,9 @@ real signing secrets and tokens in the service environment.
   enablement.
 - `scripts/render-manifest.mjs` — dependency-free renderer for producing a
   deploy-ready manifest from `manifest.json` without Slack secrets.
+- `scripts/render-remote-manifest.sh` — remote-host wrapper that pulls, renders,
+  validates, and prints only manifest JSON to stdout unless a server-side output
+  path is requested.
 - `scripts/validate-manifest.mjs` — dependency-free validation for this app
   surface's manifest and metadata template.
 
@@ -51,7 +54,8 @@ source-conversation grants, and audit/correlation IDs.
 ## Install/update the Slack app
 
 Use this runbook for both first install and manifest updates. It keeps secrets
-out of git and leaves a rendered, workspace-specific manifest in `/tmp`.
+out of git and renders a workspace-specific manifest to a local file or optional
+server-side temp path.
 
 ### 0. Set deployment variables
 
@@ -99,38 +103,32 @@ match the service path (`/api/slack/events` by default).
 
 ### 1. Render and validate the Slack manifest
 
-From your local machine, use this copy/paste command to pull the latest repo on
-the deployment host, render the manifest with the default Events API URL
-`https://me.galebach.com/api/slack/events`, and save it locally. Press Enter at
-the prompt to write into your current local directory, or type a destination
-directory such as `~/Downloads` or `../ops`; `~` and relative paths are handled
-by the local shell wrapper.
+From your local machine, this short command asks the remote `codex-chat` host
+to pull the latest checkout, render the manifest with the default Events API URL
+`https://me.galebach.com/api/slack/events`, validate it, and print only JSON to
+stdout. Redirect it wherever you want the local copy to land:
 
 ```bash
-ssh codex-chat-assistant-1 'set -euo pipefail; cd ~/pkg/tim/codex-chat; git pull --ff-only origin main >&2; node slack-app/scripts/render-manifest.mjs --output /tmp/codex-chat.slack.manifest.json; node slack-app/scripts/validate-manifest.mjs /tmp/codex-chat.slack.manifest.json >&2; cat /tmp/codex-chat.slack.manifest.json' | bash -c 'set -euo pipefail
-tmp=$(mktemp "${TMPDIR:-/tmp}/codex-chat.slack.manifest.XXXXXX")
-trap '\''rm -f "$tmp"'\'' EXIT
-cat > "$tmp"
-python3 -m json.tool "$tmp" >/dev/null
-read -erp "Destination directory [$(pwd)]: " dest </dev/tty || dest=.
-dest=${dest:-.}
-case "$dest" in
-  "~") dest="$HOME" ;;
-  "~/"*) dest="$HOME/${dest#~/}" ;;
-esac
-mkdir -p "$dest"
-out="$dest/codex-chat.slack.manifest.json"
-mv "$tmp" "$out"
-trap - EXIT
-printf "Wrote Slack manifest to %s\n" "$out"
-'
+ssh codex-chat 'cd ~/pkg/tim/codex-chat && slack-app/scripts/render-remote-manifest.sh' > ./codex-chat.slack.manifest.json
 ```
 
-For a non-interactive write to your current local directory, redirect stdout
-directly instead:
+If you want to choose the local destination directory interactively, paste this
+small wrapper. Press Enter for the current directory, or type `~/Downloads`,
+`../ops`, or another local path; `~` and relative paths are handled locally:
 
 ```bash
-ssh codex-chat-assistant-1 'set -euo pipefail; cd ~/pkg/tim/codex-chat; git pull --ff-only origin main >&2; node slack-app/scripts/render-manifest.mjs --output /tmp/codex-chat.slack.manifest.json; node slack-app/scripts/validate-manifest.mjs /tmp/codex-chat.slack.manifest.json >&2; cat /tmp/codex-chat.slack.manifest.json' > ./codex-chat.slack.manifest.json
+read -erp "Destination directory [$(pwd)]: " dest || dest=.
+dest=${dest:-.}
+case "$dest" in "~") dest="$HOME" ;; "~/"*) dest="$HOME/${dest#~/}" ;; esac
+mkdir -p "$dest"
+ssh codex-chat 'cd ~/pkg/tim/codex-chat && slack-app/scripts/render-remote-manifest.sh' > "$dest/codex-chat.slack.manifest.json"
+printf "Wrote Slack manifest to %s\n" "$dest/codex-chat.slack.manifest.json"
+```
+
+The remote helper also supports server-side temp/output files when needed:
+
+```bash
+ssh codex-chat 'cd ~/pkg/tim/codex-chat && slack-app/scripts/render-remote-manifest.sh --output /tmp/codex-chat.slack.manifest.json'
 ```
 
 To render from an already-local checkout, run the script directly. It writes to
@@ -146,56 +144,62 @@ node slack-app/scripts/validate-manifest.mjs ./codex-chat.slack.manifest.json
 Keep `slack-app/manifest.json` committed with the placeholder URL. Use the
 rendered `codex-chat.slack.manifest.json` in Slack.
 
-### 2. Create or update the Slack app
+### 2. Create/review/install the Slack app
 
 In Slack's app admin UI:
 
-1. Go to <https://api.slack.com/apps>.
-2. For a new install, choose **Create New App** -> **From an app manifest**.
-3. For an existing app, open the app -> **App Manifest**.
-4. Paste the contents of `/tmp/codex-chat.slack.manifest.json`.
-5. Save the manifest. For a first install, Slack URL verification can fail
-   until the app signing secret is on the deployment server; collect secrets,
-   restart codex-chat, then retry/save the Event Subscriptions page after
-   Step 5.
+1. Go to <https://api.slack.com/apps> (**Your Apps**).
+2. Click **Create an App**.
+3. Choose **From an app manifest**.
+4. Pick the **Decisive Outcomes** workspace.
+5. Choose **JSON** if Slack asks for the manifest format.
+6. Paste or import the rendered `codex-chat.slack.manifest.json` from Step 1.
+7. Click through **Create** / **Review** and fix any manifest errors.
+8. Click **Install to Workspace** (or reinstall/review scopes for an existing
+   app) and approve the requested bot scopes.
+9. Copy these values for Step 4, but do not paste them into git, logs, or chat
+   transcripts:
+   - **Basic Information** -> **Signing Secret** -> `SLACK_SIGNING_SECRET`
+   - **OAuth & Permissions** -> **Bot User OAuth Token** -> `SLACK_BOT_TOKEN`
+     (`xoxb-...`)
+
+For an existing app, open the app from **Your Apps**, choose **App Manifest**,
+paste/import the newly rendered manifest JSON, save it, then reinstall if Slack
+reports new scopes.
 
 If Slack still cannot verify the URL after restart, check that codex-chat is
 deployed, the API listener is reachable through HTTPS, and the manifest URL
 exactly matches the configured path.
 
-### 3. Install to the workspace and collect secrets
+### 3. Capture non-secret install metadata
 
-Install or reinstall the app to the target workspace after saving the manifest.
-Collect these values from Slack app admin pages, but do not paste them into git,
-logs, or chat transcripts:
-
-- **Basic Information** -> **Signing Secret** -> `SLACK_SIGNING_SECRET`
-- **OAuth & Permissions** -> **Bot User OAuth Token** -> `SLACK_BOT_TOKEN`
-  (`xoxb-...`)
-
-Also capture non-secret IDs for operations by copying
+After install, capture non-secret IDs for operations by copying
 `slack-app/install-metadata.example.json` to a private ops location and filling
 in the workspace/team/app/bot IDs, installer, rollout channels, scopes, and
 Events API URL.
 
 ### 4. Write codex-chat env/config on the deployment server
 
-The Slack adapter can be enabled entirely from the deployment environment. This
-command prompts for secrets interactively on the target server, preserves other
-env-file lines, and writes only placeholders/config values into shell history:
+The Slack adapter can be enabled entirely from the deployment environment. From
+your local machine, paste this single command. It runs the secret prompts on the
+target host, preserves unmanaged env-file lines, writes the non-secret Slack
+adapter settings, sets safe file permissions, and restarts `codex-chat`; it does
+not require a local repo pull just to inject secrets.
 
 ```bash
-ssh "$DEPLOY_HOST" 'set -euo pipefail
-ENV_FILE="${CODEX_CHAT_ENV_FILE:-$HOME/.config/codex-chat/env}"
+ssh codex-chat 'set -euo pipefail
+ENV_FILE="$HOME/.config/codex-chat/env"
+SERVICE_NAME="codex-chat.service"
+umask 077
 mkdir -p "$(dirname "$ENV_FILE")"
 touch "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 
-read -rsp "Slack signing secret: " SLACK_SIGNING_SECRET; echo >&2
-read -rsp "Slack bot token (xoxb-...): " SLACK_BOT_TOKEN; echo >&2
+read -rsp "SLACK_SIGNING_SECRET: " SLACK_SIGNING_SECRET; printf "\n" >&2
+read -rsp "SLACK_BOT_TOKEN: " SLACK_BOT_TOKEN; printf "\n" >&2
 export SLACK_SIGNING_SECRET SLACK_BOT_TOKEN
 
-python3 - "$ENV_FILE" <<'\''PY_ENV'\''
+python3 - "$ENV_FILE" <<'"'"'PY_ENV'"'"'
 import os
 import shlex
 import sys
@@ -212,7 +216,8 @@ existing = path.read_text().splitlines() if path.exists() else []
 seen = set()
 lines = []
 for line in existing:
-    key = line.split("=", 1)[0].strip() if "=" in line and not line.lstrip().startswith("#") else None
+    stripped = line.lstrip()
+    key = line.split("=", 1)[0].strip() if "=" in line and not stripped.startswith("#") else None
     if key in updates:
         lines.append(f"{key}={shlex.quote(updates[key])}")
         seen.add(key)
@@ -224,8 +229,10 @@ for key, value in updates.items():
 path.write_text("\n".join(lines).rstrip() + "\n")
 PY_ENV
 
-printf "wrote Slack env keys to %s\n" "$ENV_FILE"
-grep -E "^(SLACK_|CODEX_CHAT_SLACK_)" "$ENV_FILE" | sed -E "s/=(.*)$/=[REDACTED]/"
+chmod 600 "$ENV_FILE"
+systemctl --user restart "$SERVICE_NAME"
+systemctl --user is-active "$SERVICE_NAME" >/dev/null
+printf "Slack env keys updated in %s; %s restarted. Secret values were not printed.\n" "$ENV_FILE" "$SERVICE_NAME"
 '
 ```
 
@@ -234,23 +241,18 @@ fragment from `slack-app/codex-chat.slack.example.toml` into the deployed
 `config/codex-chat.toml`. Keep `SLACK_SIGNING_SECRET` and `SLACK_BOT_TOKEN` in
 the environment file, not TOML.
 
-### 5. Restart and verify health/logs
+### 5. Verify health/logs
 
-Pull the current code if needed, restart codex-chat, inspect health/logs, then
-return to Slack **Event Subscriptions** and retry/save until the request URL is
-verified:
+After the secret-injection command restarts `codex-chat`, inspect health/logs,
+then return to Slack **Event Subscriptions** and retry/save until the request
+URL is verified:
 
 ```bash
-ssh "$DEPLOY_HOST" 'set -euo pipefail
-cd ~/pkg/tim/codex-chat
-git pull --ff-only origin main
-pnpm install --frozen-lockfile
-pnpm run build
-(systemctl --user restart codex-chat.service || sudo systemctl restart codex-chat.service)
+ssh codex-chat 'set -euo pipefail
 sleep 3
-(codex-chat health --json || bun dist/main.js health || true)
-(systemctl --user status codex-chat.service --no-pager || systemctl status codex-chat.service --no-pager || true)
-(journalctl --user -u codex-chat.service -n 120 --no-pager || journalctl -u codex-chat.service -n 120 --no-pager || true) \
+(codex-chat health --json || (cd ~/pkg/tim/codex-chat && bun dist/main.js health) || true)
+systemctl --user status codex-chat.service --no-pager || true
+journalctl --user -u codex-chat.service -n 120 --no-pager \
   | sed -E "s/(SLACK_(SIGNING_SECRET|BOT_TOKEN|APP_TOKEN)=)[^[:space:]]+/\1[REDACTED]/g"
 '
 ```

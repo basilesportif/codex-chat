@@ -25,6 +25,13 @@ const REMOTE_REPO_AUTHORITY_RULES = [
   "- For env files, credentials, and other likely secrets, verify only metadata such as existence, permissions, owner, size, line/key counts, git ignore status, and git tracking state. Do not print or inspect secret values."
 ].join("\n");
 
+const SELF_RESTART_SAFETY_RULES = [
+  "Self-restart safety:",
+  "- You are running as a child of the codex-chat service. Do not restart, stop, or redeploy codex-chat.service from inside a subagent turn; that kills the parent service and closes this child websocket before your final answer can be delivered.",
+  "- If codex-chat itself must be restarted or redeployed, finish code/test/commit/push work first and return the exact restart/deploy command for the main service or user to run after your final answer.",
+  "- Avoid commands such as `systemctl --user restart codex-chat.service`, `systemctl --user stop codex-chat.service`, or deploy scripts that restart this service unless the task explicitly accepts losing the subagent result."
+].join("\n");
+
 interface DispatchInput {
   id?: string;
   profile: string;
@@ -543,8 +550,46 @@ export class SubagentManager {
   }
 
   async shutdown(): Promise<void> {
-    await Promise.all([...this.running.keys()].map((id) => this.requestCancel(id, { reason: "shutdown" })));
+    this.prepareForServiceShutdown("shutdown");
+    await Promise.all([...this.running.entries()].map(async ([id, running]) => {
+      await running.backend.interrupt(id, "shutdown").catch((error) => {
+        this.logger.warn({ component: "subagents", event: "interrupt_failed", jobId: id, backend: running.backend.kind, error }, "subagent interrupt failed during shutdown; falling back to terminate");
+        return running.backend.kill(id, "SIGTERM");
+      });
+    }));
     await Promise.all(Object.values(this.backends).map((backend) => backend.shutdown().catch(() => undefined)));
+  }
+
+  prepareForServiceShutdown(reason = "shutdown"): void {
+    const at = nowIso();
+    for (const input of this.queue) {
+      const job = input.id ? this.jobs.get(input.id) : undefined;
+      if (!job || job.status !== "queued") continue;
+      job.status = "cancelled";
+      job.cancelRequestedAt = at;
+      job.cancelReason = reason;
+      job.completedAt = at;
+      void this.state.saveJob(job);
+    }
+    this.queue = [];
+
+    for (const [jobId, running] of this.running) {
+      clearTimeout(running.timeout);
+      if (running.killTimer) clearTimeout(running.killTimer);
+      const job = running.job;
+      if (job.status === "running") {
+        job.status = "cancelling";
+        job.cancelRequestedAt = at;
+        job.cancelReason = reason;
+        job.interruptRequestedAt = at;
+        job.termSentAt = at;
+        void this.state.saveJob(job);
+      }
+      this.logger.warn(
+        { component: "subagents", event: "service_shutdown_prepare", jobId, backend: running.backend.kind, reason },
+        "marking running subagent as cancelling before service shutdown"
+      );
+    }
   }
 
   private async drain(): Promise<void> {
@@ -583,6 +628,8 @@ export class SubagentManager {
       profileContents.trim(),
       "",
       REMOTE_REPO_AUTHORITY_RULES,
+      "",
+      SELF_RESTART_SAFETY_RULES,
       "",
       "Task:",
       input.prompt,

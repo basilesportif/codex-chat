@@ -319,6 +319,7 @@ describe("admin routes", () => {
     }
   });
   test("admin page route is server-authenticated", async () => {
+    process.env.CODEX_CHAT_ADMIN_ROUTE_PATH = "/admin/codex-chat/";
     const { baseUrl } = await apiHarness(undefined, {
       adminAuthDeps: {
         verifyTokenImpl: vi.fn(async () => ({ sub: "user_123" }) as never),

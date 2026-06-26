@@ -423,6 +423,7 @@ export class ServiceSupervisor {
     if (this.injectInterval) clearInterval(this.injectInterval);
     if (this.stopping) return;
     this.stopping = true;
+    this.subagents.prepareForServiceShutdown("shutdown");
     await this.telegram.notifyOps("codex-chat shutting down").catch(() => undefined);
     await this.ipc.stop().catch(() => undefined);
     await this.api.stop().catch(() => undefined);

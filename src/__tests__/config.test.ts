@@ -91,7 +91,7 @@ userIds = [12345]
     expect(config.codex.model).toBe("gpt-test");
     expect(config.codex.sandbox).toBe("danger-full-access");
     expect(config.codex.serviceTier).toBe("fast");
-    expect(config.subagents.defaultServiceTier).toBe("standard");
+    expect(config.subagents.defaultServiceTier).toBe("fast");
     expect(config.subagents.backend).toBe("codex_exec");
     expect(config.api.enabled).toBe(false);
     expect(config.admin.enabled).toBe(false);

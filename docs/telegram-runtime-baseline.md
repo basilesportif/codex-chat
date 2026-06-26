@@ -38,4 +38,4 @@ Current and added tests protecting this baseline include:
 - `src/__tests__/service.test.ts`: queue/restart/timeout notices, inert reply-context prompt rendering, active subagent and Employee prompt snapshots, directive reply defaults, subagent return/failure routing, diarized-vs-regular audio routing.
 - `src/__tests__/introspect.test.ts`: service-level command parsing and Telegram command interception for help, agents/subagents, kill, steer, status, and backend rollback.
 - `src/__tests__/directives.test.ts`: directive schemas including Telegram-oriented send/react fields and `serviceTier` preservation.
-- `src/__tests__/telegram-baseline.test.ts`: Phase 0 smoke assertions tying the documented baseline to current prompt formatting, command bypass, Fast main-loop default, and prompt-routed subagent tier guidance.
+- `src/__tests__/telegram-baseline.test.ts`: Phase 0 smoke assertions tying the documented baseline to current prompt formatting, command bypass, Fast main-loop and subagent defaults, including the narrow standard-mode exception.

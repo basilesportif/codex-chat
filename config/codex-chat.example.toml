@@ -94,8 +94,8 @@ backend = "codex_exec"
 maxConcurrent = 5
 defaultModel = ""
 defaultEffort = "medium"
-# Subagents keep an independent fallback tier; behavior prompts should choose serviceTier per dispatch, while loops/monitors may still set serviceTier explicitly.
-defaultServiceTier = "standard"
+# Subagents default to Fast mode; set "standard" only for an explicit standard/slow-mode override. Behavior prompts should still include serviceTier per dispatch.
+defaultServiceTier = "fast"
 defaultTimeoutSec = 1800
 maxTimeoutSec = 7200
 maxPromptBytes = 262144

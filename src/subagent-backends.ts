@@ -132,7 +132,7 @@ export class CodexExecChildAgentBackend implements ChildAgentBackend {
     for (const jobId of this.children.keys()) await this.kill(jobId, "SIGTERM");
   }
 
-  private buildArgs(lastMessagePath: string, model?: string, effort?: string, serviceTier: ServiceTier = "standard", images: string[] = []): string[] {
+  private buildArgs(lastMessagePath: string, model?: string, effort?: string, serviceTier: ServiceTier = "fast", images: string[] = []): string[] {
     const args = [
       "exec",
       "--json",

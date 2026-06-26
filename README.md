@@ -302,7 +302,7 @@ existing scripts, and trivial local lookups that require no interpretation.
 README edits, documentation edits, code changes, repo inspection, calendar or
 email lookup, research, debugging, architecture, multi-step work, ambiguous
 work, and external-data lookup must dispatch a subagent with explicit
-`summary`, `model`, and `effort`.
+`summary`, `model`, `effort`, and `serviceTier`. Fast is the default tier unless Tim explicitly asks for standard/slow/deep mode or config overrides it.
 
 The service does not enforce this policy by keyword-blocking final main-loop
 replies. The main Codex loop must choose the route up front, then either reply

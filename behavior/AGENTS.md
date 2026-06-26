@@ -283,9 +283,9 @@ For main-loop work, the user-facing reply must include a short line identifying 
 
 `main_loop: model=gpt-5.5 effort=medium tier=fast`
 
-The main-loop service tier is config-driven. The current deployment default is Codex Fast mode, but Tim can change that later through config/workspace settings such as `[codex].serviceTier` or `CODEX_CHAT_CODEX_SERVICE_TIER`.
+The main-loop service tier is config-driven. The current deployment default is Codex Fast mode. Disclose `tier=fast` unless the active config/workspace settings such as `[codex].serviceTier` or `CODEX_CHAT_CODEX_SERVICE_TIER` explicitly override it.
 
-For any reasoning, investigation, repo inspection, code or docs editing, code review, debugging, architecture, calendar/email lookup, external-data lookup, ambiguous, multi-step, or potentially slow task, dispatch a subagent. The top-level Codex loop must choose `model`, `effort`, and `serviceTier` explicitly for the task from the rubric below; do not rely on subagent defaults as the routing decision. Before or with every `dispatch_subagent`, provide a concise task summary via `summary`, and set explicit `model`, `effort`, and `serviceTier` fields. Use Codex Fast mode when Tim requests it or when the rubric says it is appropriate; use standard/slow mode when Tim requests it or when the rubric says the task should trade latency for maximum thoroughness. The service will send a visible dispatch status containing the task, profile, model, effort, and tier, and the job will be visible in `agents` / `subagents`.
+For any reasoning, investigation, repo inspection, code or docs editing, code review, debugging, architecture, calendar/email lookup, external-data lookup, ambiguous, multi-step, or potentially slow task, dispatch a subagent. The top-level Codex loop must choose `model`, `effort`, and `serviceTier` explicitly for the task from the rubric below; do not rely on subagent defaults as the routing decision. Before or with every `dispatch_subagent`, provide a concise task summary via `summary`, and set explicit `model`, `effort`, and `serviceTier` fields. Default subagent dispatches to `serviceTier: "fast"`; use `serviceTier: "standard"` only when Tim explicitly requests standard/slow/deep mode or when an explicit config/workspace override requires it. The service will send a visible dispatch status containing the task, profile, model, effort, and tier, and the job will be visible in `agents` / `subagents`.
 
 Default routing rubric:
 
@@ -296,9 +296,9 @@ Default routing rubric:
 
 Service-tier rubric for subagents:
 
-- Use `serviceTier: "fast"` when Tim asks for Fast mode, quick/urgent/low-latency handling, or when the task is bounded and user-waiting, including routine repo/file inspection, docs lookup/editing, small-to-medium implementation, focused debugging, concise research, and stress-test fan-out.
-- Use `serviceTier: "standard"` when Tim asks for standard/slow/deep mode, or when the task is very intensive, high-stakes, production-sensitive, unusually ambiguous, broad in scope, or likely to benefit more from maximum thoroughness than lower latency.
-- If both fast and standard signals apply, follow Tim's explicit tier request first; otherwise choose the tier that best matches the task's risk and latency tradeoff, and include that exact `serviceTier` in the directive.
+- Default to `serviceTier: "fast"` for subagents, including bounded/user-waiting work, routine repo/file inspection, docs lookup/editing, small-to-medium implementation, focused debugging, concise research, and stress-test fan-out.
+- Use `serviceTier: "standard"` only when Tim explicitly asks for standard/slow/deep mode, or when an explicit config/workspace override requires standard. Do not infer standard merely because a task is important, high effort, or production-sensitive; raise `effort` to `high`/`xhigh` while keeping Fast unless Tim requests otherwise.
+- If both fast and standard signals apply, follow Tim's explicit tier request first; otherwise keep Fast and include the exact `serviceTier` in the directive.
 
 Subagent directive shape:
 
@@ -389,7 +389,7 @@ Rules:
 
 - The block must be valid JSON.
 - Every side-effecting action needs an `idempotencyKey`.
-- `dispatch_subagent` actions must include `summary`, `model`, `effort`, and `serviceTier`; choose `serviceTier` from the model/effort/tier rubric instead of relying on static defaults.
+- `dispatch_subagent` actions must include `summary`, `model`, `effort`, and `serviceTier`; use `serviceTier: "fast"` by default and reserve `"standard"` for Tim's explicit standard/slow/deep request or an explicit config/workspace override.
 - Keep normal user-facing text outside directive blocks.
 - Do not include secrets in directives.
 - Use local paths for `send_image` and `send_document`.

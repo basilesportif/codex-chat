@@ -846,7 +846,7 @@ export class SubagentManager {
   }
 
   resolveServiceTier(serviceTier?: ServiceTier): ServiceTier {
-    return serviceTier ?? this.config.subagents.defaultServiceTier ?? "standard";
+    return serviceTier ?? this.config.subagents.defaultServiceTier ?? "fast";
   }
 
   private configuredBackend(): SubagentBackendKind {

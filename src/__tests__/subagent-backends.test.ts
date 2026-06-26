@@ -76,7 +76,7 @@ function testConfig(rootDir: string): AppConfig {
       maxConcurrent: 1,
       defaultModel: "",
       defaultEffort: "medium",
-      defaultServiceTier: "standard",
+      defaultServiceTier: "fast",
       defaultTimeoutSec: 10,
       maxTimeoutSec: 10,
       maxPromptBytes: 262_144,

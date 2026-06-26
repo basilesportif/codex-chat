@@ -59,7 +59,7 @@ function makeConfig(rootDir: string, maxConcurrent = 2): AppConfig {
       maxConcurrent,
       defaultModel: "",
       defaultEffort: "medium",
-      defaultServiceTier: "standard",
+      defaultServiceTier: "fast",
       defaultTimeoutSec: 60,
       maxTimeoutSec: 60,
       maxPromptBytes: 1_000_000,

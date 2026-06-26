@@ -544,6 +544,58 @@ all requirements and produce the canonical capability vocabulary, resource
 selector model, grant lifecycle, migration plan, audit schema, denial behavior,
 and admin UX. Only then implement this phase.
 
+Tim's Phase 3 capability-system decisions to carry into that planning session:
+
+1. Capabilities are positive grants only. Do not introduce an explicit deny or
+   block model in the first version; absence of a matching grant means the
+   runtime fails closed.
+2. Granting is inherent to possession for now: an actor, chat, channel, system
+   process, or bundle holder that has a capability may grant that same
+   capability to others, with audit records. Revisit narrower delegation rules
+   only after the first model is operational.
+3. Project/resource-level granularity is sufficient initially. Every resource
+   or data action in the assistant workspace, and in future durable databases,
+   should map to required capabilities at that resource/action level.
+4. Chat- or channel-granted capabilities may be permanent. Expiration should be
+   supported for temporary or time-boxed grants, but it is not mandatory for all
+   chat/channel grants.
+5. Admin actors receive capability CRUD capabilities automatically.
+6. Start with a Tim admin super-bundle, but implement it as an ordinary bundle
+   made up of explicit per-resource capabilities, not as a magical bypass.
+7. Capability bundles should support bulk grants for normal users while still
+   expanding into individual auditable capabilities.
+8. Keep Phase 2 incomplete until the real Slack app is installed and live
+   app-mention/DM/private-channel canaries pass.
+
+Preliminary model sketch for planning only, not enforcement implementation:
+
+```ts
+type CapabilityGrant = {
+  id: string;
+  capabilityId: string; // e.g. "workspace.resource.read", "capability.grant"
+  subject: { kind: "actor" | "chat" | "channel" | "bundle" | "system"; id: string };
+  resource: { kind: "project" | "repo" | "slackChannel" | "telegramChat" | "database" | "artifact"; id: string };
+  actions: Array<"read" | "search" | "write" | "post" | "dispatch" | "grant" | "revoke" | "audit">;
+  source: { kind: "admin" | "bundle" | "chatApproval" | "migration" | "system"; id: string };
+  grantedBy: string;
+  expiresAt?: string;
+  createdAt: string;
+};
+
+type CapabilityBundle = {
+  id: string;
+  name: string;
+  description: string;
+  grants: Array<Omit<CapabilityGrant, "id" | "subject" | "createdAt">>;
+};
+```
+
+The runtime should evaluate requested data/tool/output operations by deriving a
+required `{resource, action}` pair and matching it against positive grants from
+the actor, current chat/channel, applicable bundles, and system/admin bootstrap
+state. Future deny semantics, if ever needed, should be a deliberate later
+extension rather than a hidden behavior in the first implementation.
+
 - [ ] Define canonical capability IDs/descriptions.
 - [ ] Define bundle semantics for common trust levels while preserving
       individual auditable grants.

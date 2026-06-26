@@ -51,6 +51,8 @@ adminUserIds = []
 # Slack token or signing-secret values in TOML.
 enabled = false
 eventsPath = "/api/slack/events"
+# Public origin used when rendering Slack Events API URLs.
+publicBaseUrl = "https://me.galebach.com"
 signingSecretEnv = "SLACK_SIGNING_SECRET"
 botTokenEnv = "SLACK_BOT_TOKEN"
 appTokenEnv = "SLACK_APP_TOKEN"
@@ -74,7 +76,9 @@ enabled = false
 routePath = "/admin/codex-chat/"
 envFile = "~/.config/codex-chat/env"
 serviceName = "codex-chat.service"
-publicBaseUrl = "https://me.galebach.com"
+# Public origin for this admin page. Leave empty to derive from the request
+# Host header, or set CODEX_CHAT_ADMIN_PUBLIC_BASE_URL in the runtime env.
+publicBaseUrl = ""
 clerkPublishableKeyEnv = "CLERK_PUBLISHABLE_KEY"
 clerkSecretKeyEnv = "CLERK_SECRET_KEY"
 clerkSignInUrlEnv = "CLERK_SIGN_IN_URL"

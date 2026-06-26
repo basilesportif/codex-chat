@@ -121,6 +121,7 @@ userIds = [12345]
     process.env.CUSTOM_SLACK_SIGNING_SECRET = "slack-signing-secret";
     process.env.CUSTOM_SLACK_BOT_TOKEN = "xoxb-test-token";
     process.env.CODEX_CHAT_ADMIN_ENABLED = "true";
+    process.env.CODEX_CHAT_ADMIN_PUBLIC_BASE_URL = "https://brain.decisive-outcomes.com";
     process.env.CODEX_CHAT_BASE_URL = "https://me.galebach.com";
     process.env.CLERK_PUBLISHABLE_KEY = "pk_test_example";
     process.env.CLERK_SECRET_KEY = "sk_test_example";
@@ -150,7 +151,8 @@ botTokenEnv = "CUSTOM_SLACK_BOT_TOKEN"
     expect(config.slack.eventsPath).toBe("/api/custom-slack/events");
     expect(config.api.enabled).toBe(true);
     expect(config.admin.enabled).toBe(true);
-    expect(config.admin.publicBaseUrl).toBe("https://me.galebach.com");
+    expect(config.admin.publicBaseUrl).toBe("https://brain.decisive-outcomes.com");
+    expect(config.slack.publicBaseUrl).toBe("https://me.galebach.com");
     expect(config.slackSigningSecret).toBe("slack-signing-secret");
     expect(config.slackBotToken).toBe("xoxb-test-token");
     expect(config.clerkPublishableKey).toBe("pk_test_example");

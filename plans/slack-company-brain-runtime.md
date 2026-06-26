@@ -389,7 +389,7 @@ query support.
 ## Admin and dashboard
 
 Current implementation note: the service now includes an initial
-`/admin/codex-chat/` page in the codex-chat API process. It is Clerk-gated with
+`/admin/codex-chat/` page in the codex-chat API process. In the current deployment it is exposed at `https://brain.decisive-outcomes.com/admin/codex-chat/` via `CODEX_CHAT_ADMIN_PUBLIC_BASE_URL`, while Slack Events remain on `https://me.galebach.com/api/slack/events`. It is Clerk-gated with
 server-side email allowlist checks, fails closed when Clerk keys or allowed
 emails are absent, writes only the Slack/bootstrap env vars needed for the
 current HTTP Events API adapter, and renders/validates the Slack manifest. This
@@ -656,7 +656,7 @@ extension rather than a hidden behavior in the first implementation.
 ### Phase 6 — Clerk-authenticated admin dashboard and approval UX
 
 - [x] Add initial Clerk-protected Slack config/manifest admin page inside the
-      codex-chat service (`/admin/codex-chat/`) with fail-closed allowed-email
+      codex-chat service (`https://brain.decisive-outcomes.com/admin/codex-chat/`) with fail-closed allowed-email
       enforcement. This is a bootstrap page only.
 - [ ] Build the admin/dashboard app as a Clerk-authenticated internal surface
       with server-side allowed-user enforcement.

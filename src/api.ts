@@ -30,7 +30,8 @@ const ADMIN_REQUIRED_ENV_VARS = [
   "CODEX_CHAT_SLACK_EVENTS_PATH",
   "CODEX_CHAT_API_ENABLED",
   "CODEX_CHAT_ADMIN_ENABLED",
-  "CODEX_CHAT_BASE_URL"
+  "CODEX_CHAT_BASE_URL",
+  "CODEX_CHAT_ADMIN_PUBLIC_BASE_URL"
 ] as const;
 
 export interface AudioIngestionCompletedEvent {
@@ -186,8 +187,8 @@ export class ApiGateway {
 
   private handleAdminPageAuthFailure(request: IncomingMessage, response: ServerResponse, auth: Exclude<Awaited<ReturnType<typeof authorizeAdminRequest>>, { ok: true }>): void {
     if (auth.statusCode === 401 && this.config.clerkSignInUrl) {
-      const currentUrl = externalUrlFromRequest(request, this.config.admin.publicBaseUrl);
-      const signInUrl = new URL(this.config.clerkSignInUrl, this.config.admin.publicBaseUrl || currentUrl);
+      const currentUrl = externalUrlFromRequest(request, this.adminPublicBaseUrlFromRequest(request));
+      const signInUrl = new URL(this.config.clerkSignInUrl, this.adminPublicBaseUrlFromRequest(request) || currentUrl);
       signInUrl.searchParams.set("redirect_url", currentUrl);
       response.statusCode = 302;
       response.setHeader("location", signInUrl.toString());
@@ -205,7 +206,7 @@ export class ApiGateway {
       serviceName: this.config.admin.serviceName,
       requiredVars: ADMIN_REQUIRED_ENV_VARS,
       present,
-      baseUrl: this.baseUrlFromRequest(request),
+      baseUrl: this.slackPublicBaseUrlFromRequest(request),
       eventsPath: this.config.slack.eventsPath,
       restartCommand: restartCommand(this.config.admin.serviceName)
     });
@@ -223,7 +224,7 @@ export class ApiGateway {
     const botToken = stringField(payload, "botToken");
     const appToken = stringField(payload, "appToken");
     const eventsPath = stringField(payload, "eventsPath") || this.config.slack.eventsPath;
-    const baseUrl = stringField(payload, "baseUrl") || this.baseUrlFromRequest(request);
+    const baseUrl = stringField(payload, "baseUrl") || this.slackPublicBaseUrlFromRequest(request);
     if (!signingSecret || !botToken) {
       this.sendJson(response, 400, { error: "signing_secret_and_bot_token_required" });
       return;
@@ -260,7 +261,7 @@ export class ApiGateway {
 
   private async handleAdminManifestGet(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
     try {
-      const baseUrl = url.searchParams.get("baseUrl") || this.baseUrlFromRequest(request);
+      const baseUrl = url.searchParams.get("baseUrl") || this.slackPublicBaseUrlFromRequest(request);
       const eventsPath = url.searchParams.get("eventsPath") || this.config.slack.eventsPath;
       const rendered = await renderSlackManifest({ rootDir: this.config.rootDir, baseUrl, eventsPath });
       this.sendJson(response, 200, rendered);
@@ -455,11 +456,21 @@ export class ApiGateway {
     response.end(value);
   }
 
-  private baseUrlFromRequest(request: IncomingMessage): string {
+  private slackPublicBaseUrlFromRequest(request: IncomingMessage): string {
+    const configured = this.config.slack.publicBaseUrl.trim();
+    if (configured) return configured;
+    return this.originFromRequest(request);
+  }
+
+  private adminPublicBaseUrlFromRequest(request: IncomingMessage): string {
     const configured = this.config.admin.publicBaseUrl.trim();
     if (configured) return configured;
+    return this.originFromRequest(request);
+  }
+
+  private originFromRequest(request: IncomingMessage): string {
     const proto = firstHeaderValue(request.headers["x-forwarded-proto"]) || "https";
-    const host = firstHeaderValue(request.headers["x-forwarded-host"]) || firstHeaderValue(request.headers.host) || "me.galebach.com";
+    const host = firstHeaderValue(request.headers["x-forwarded-host"]) || firstHeaderValue(request.headers.host) || this.config.api.host;
     return `${proto}://${host}`;
   }
 
@@ -600,7 +611,7 @@ function restartCommand(serviceName: string): string {
 }
 
 function externalUrlFromRequest(request: IncomingMessage, configuredBaseUrl: string): string {
-  const url = new URL(request.url ?? "/", configuredBaseUrl || "https://me.galebach.com");
+  const url = new URL(request.url ?? "/", configuredBaseUrl || "http://127.0.0.1");
   const proto = firstHeaderValue(request.headers["x-forwarded-proto"]);
   const host = firstHeaderValue(request.headers["x-forwarded-host"]) || firstHeaderValue(request.headers.host);
   if (host) url.host = host;

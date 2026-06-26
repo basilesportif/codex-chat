@@ -65,6 +65,9 @@ path = "monitors.json"
 [transcription]
 enabled = false
 
+[slack]
+publicBaseUrl = "https://me.galebach.com"
+
 [api]
 enabled = true
 host = "127.0.0.1"
@@ -73,7 +76,7 @@ port = 0
 [admin]
 enabled = true
 envFile = "${envFile ?? join(root, "env")}"
-publicBaseUrl = "https://me.galebach.com"
+publicBaseUrl = "https://brain.decisive-outcomes.com"
 `);
   process.env.CLERK_PUBLISHABLE_KEY = "pk_test_ZmFrZS5jbGVyay5hY2NvdW50cy5kZXYk";
   process.env.CLERK_SECRET_KEY = "sk_test_secret";

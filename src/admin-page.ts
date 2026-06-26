@@ -16,7 +16,7 @@ function jsString(value: string | undefined): string {
 export function renderAdminPage(config: AppConfig): string {
   const publishableKey = config.clerkPublishableKey ?? "";
   const signInUrl = config.clerkSignInUrl ?? "";
-  const publicBaseUrl = config.admin.publicBaseUrl ?? "";
+  const publicBaseUrl = config.slack.publicBaseUrl || config.admin.publicBaseUrl || "";
   const eventsPath = config.slack.eventsPath;
   return `<!doctype html>
 <html lang="en">
@@ -62,7 +62,7 @@ export function renderAdminPage(config: AppConfig): string {
           <p class="muted">Secrets are write-only here. Existing values are never displayed.</p>
           <div id="config-status" class="status muted">Loading current status…</div>
           <form id="slack-form">
-            <label>Public base URL <input name="baseUrl" placeholder="https://me.galebach.com" value="${htmlEscape(publicBaseUrl)}" /></label>
+            <label>Slack public base URL <input name="baseUrl" placeholder="https://me.galebach.com" value="${htmlEscape(publicBaseUrl)}" /></label>
             <label>Slack Events path <input name="eventsPath" value="${htmlEscape(eventsPath)}" /></label>
             <label>Slack Signing Secret <input name="signingSecret" type="password" autocomplete="off" placeholder="paste to add/replace" /></label>
             <label>Slack Bot Token <input name="botToken" type="password" autocomplete="off" placeholder="xoxb-…" /></label>

@@ -194,7 +194,7 @@ Events API URL.
 The codex-chat service now serves an initial Clerk-protected admin page at:
 
 ```text
-https://me.galebach.com/admin/codex-chat/
+https://brain.decisive-outcomes.com/admin/codex-chat/
 ```
 
 This is only the Slack bootstrap/config surface. It can write the Slack env vars
@@ -221,6 +221,7 @@ Required Slack env names for the current HTTP Events API adapter:
 - `CODEX_CHAT_SLACK_EVENTS_PATH=/api/slack/events`
 - `CODEX_CHAT_API_ENABLED=true`
 - `CODEX_CHAT_BASE_URL=https://me.galebach.com`
+- `CODEX_CHAT_ADMIN_PUBLIC_BASE_URL=https://brain.decisive-outcomes.com`
 
 After the code is deployed, you can use the admin page to add/replace Slack
 secrets. To bootstrap Clerk and Slack env from a shell without pulling a local
@@ -233,6 +234,7 @@ ssh codex-chat 'set -euo pipefail
 ENV_FILE="$HOME/.config/codex-chat/env"
 SERVICE_NAME="codex-chat.service"
 BASE_URL="https://me.galebach.com"
+ADMIN_BASE_URL="https://brain.decisive-outcomes.com"
 ALLOWED_EMAILS="timgalebachukraine@gmail.com,tim.galebach@gmail.com"
 umask 077
 mkdir -p "$(dirname "$ENV_FILE")"
@@ -244,7 +246,7 @@ read -rsp "CLERK_SECRET_KEY: " CLERK_SECRET_KEY; printf "\n" >&2
 read -erp "CLERK_SIGN_IN_URL: " CLERK_SIGN_IN_URL
 read -rsp "SLACK_SIGNING_SECRET: " SLACK_SIGNING_SECRET; printf "\n" >&2
 read -rsp "SLACK_BOT_TOKEN: " SLACK_BOT_TOKEN; printf "\n" >&2
-export CLERK_PUBLISHABLE_KEY CLERK_SECRET_KEY CLERK_SIGN_IN_URL SLACK_SIGNING_SECRET SLACK_BOT_TOKEN BASE_URL ALLOWED_EMAILS
+export CLERK_PUBLISHABLE_KEY CLERK_SECRET_KEY CLERK_SIGN_IN_URL SLACK_SIGNING_SECRET SLACK_BOT_TOKEN BASE_URL ADMIN_BASE_URL ALLOWED_EMAILS
 
 python3 - "$ENV_FILE" <<'"'"'PY_ENV'"'"'
 import os
@@ -264,6 +266,7 @@ updates = {
     "CODEX_CHAT_ADMIN_ENABLED": "true",
     "CODEX_CHAT_API_ENABLED": "true",
     "CODEX_CHAT_BASE_URL": os.environ["BASE_URL"],
+    "CODEX_CHAT_ADMIN_PUBLIC_BASE_URL": os.environ["ADMIN_BASE_URL"],
     "CODEX_CHAT_SLACK_ENABLED": "true",
     "CODEX_CHAT_SLACK_EVENTS_PATH": "/api/slack/events",
 }
@@ -305,8 +308,9 @@ Clerk secret values in the environment file, not TOML.
 The Events API URL must terminate HTTPS and reverse-proxy to the codex-chat API
 listener. The default app/runtime assumption is:
 
-- public URL: `https://me.galebach.com/api/slack/events`
-- codex-chat API path: `/api/slack/events`
+- Slack public URL: `https://me.galebach.com/api/slack/events`
+- admin public URL: `https://brain.decisive-outcomes.com/admin/codex-chat/`
+- codex-chat API path: `/api/slack/events` for Slack and `/admin/codex-chat/` plus `/api/admin/codex-chat/*` for admin
 - local service listener: `127.0.0.1:49346` when using the example TOML
 - Caddy/nginx/proxy preserves the path and forwards Slack's signed HTTP request
   body and headers unchanged
@@ -318,7 +322,7 @@ service listener without printing secrets:
 ssh codex-chat 'set -euo pipefail
 printf "listening ports:\n"; ss -ltn | grep -E ":(80|443|49346)\b" || true
 printf "candidate proxy routes:\n"
-sudo sh -c '\''grep -RhsE "reverse_proxy|codex-chat|49346|api/slack/events|me\.galebach\.com" /etc/caddy /etc/nginx 2>/dev/null || true'\''
+sudo sh -c '\''grep -RhsE "reverse_proxy|codex-chat|49346|api/slack/events|admin/codex-chat|me\.galebach\.com|brain\.decisive-outcomes\.com" /etc/caddy /etc/nginx 2>/dev/null || true'\''
 '
 ```
 
@@ -387,7 +391,7 @@ Ask codex-chat something like:
 ## Troubleshooting notes
 
 - **URL verification fails:** confirm the manifest's request URL is exactly
-  `https://me.galebach.com/api/slack/events` for the current deployment, the
+  `https://me.galebach.com/api/slack/events` for the current Slack deployment, the
   proxy forwards that path to the codex-chat API listener, and
   `CODEX_CHAT_SLACK_EVENTS_PATH` is `/api/slack/events` unless the manifest was
   rendered with the same custom path.

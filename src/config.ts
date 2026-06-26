@@ -114,12 +114,14 @@ const configSchema = z.object({
   slack: z.object({
     enabled: z.boolean().default(false),
     eventsPath: z.string().regex(/^\/[A-Za-z0-9/_-]*$/, "Slack events path must be an absolute URL path").default("/api/slack/events"),
+    publicBaseUrl: z.string().default("https://me.galebach.com"),
     signingSecretEnv: z.string().default("SLACK_SIGNING_SECRET"),
     botTokenEnv: z.string().default("SLACK_BOT_TOKEN"),
     appTokenEnv: z.string().default("SLACK_APP_TOKEN")
   }).default({
     enabled: false,
     eventsPath: "/api/slack/events",
+    publicBaseUrl: "https://me.galebach.com",
     signingSecretEnv: "SLACK_SIGNING_SECRET",
     botTokenEnv: "SLACK_BOT_TOKEN",
     appTokenEnv: "SLACK_APP_TOKEN"
@@ -135,7 +137,7 @@ const configSchema = z.object({
     routePath: z.string().regex(/^\/[A-Za-z0-9/_-]*\/$/, "Admin route path must be an absolute path ending in /").default("/admin/codex-chat/"),
     envFile: z.string().default("~/.config/codex-chat/env"),
     serviceName: z.string().default("codex-chat.service"),
-    publicBaseUrl: z.string().default("https://me.galebach.com"),
+    publicBaseUrl: z.string().default(""),
     clerkPublishableKeyEnv: z.string().default("CLERK_PUBLISHABLE_KEY"),
     clerkSecretKeyEnv: z.string().default("CLERK_SECRET_KEY"),
     clerkSignInUrlEnv: z.string().default("CLERK_SIGN_IN_URL"),
@@ -145,7 +147,7 @@ const configSchema = z.object({
     routePath: "/admin/codex-chat/",
     envFile: "~/.config/codex-chat/env",
     serviceName: "codex-chat.service",
-    publicBaseUrl: "https://me.galebach.com",
+    publicBaseUrl: "",
     clerkPublishableKeyEnv: "CLERK_PUBLISHABLE_KEY",
     clerkSecretKeyEnv: "CLERK_SECRET_KEY",
     clerkSignInUrlEnv: "CLERK_SIGN_IN_URL",
@@ -278,6 +280,7 @@ const defaultConfig = configSchema.parse({
   slack: {
     enabled: false,
     eventsPath: "/api/slack/events",
+    publicBaseUrl: "https://me.galebach.com",
     signingSecretEnv: "SLACK_SIGNING_SECRET",
     botTokenEnv: "SLACK_BOT_TOKEN",
     appTokenEnv: "SLACK_APP_TOKEN"
@@ -293,7 +296,7 @@ const defaultConfig = configSchema.parse({
     routePath: "/admin/codex-chat/",
     envFile: "~/.config/codex-chat/env",
     serviceName: "codex-chat.service",
-    publicBaseUrl: "https://me.galebach.com",
+    publicBaseUrl: "",
     clerkPublishableKeyEnv: "CLERK_PUBLISHABLE_KEY",
     clerkSecretKeyEnv: "CLERK_SECRET_KEY",
     clerkSignInUrlEnv: "CLERK_SIGN_IN_URL",
@@ -491,7 +494,7 @@ function collectEnvOverrides(env: NodeJS.ProcessEnv = process.env): Record<strin
     { name: "CODEX_CHAT_ADMIN_ENV_FILE", path: ["admin", "envFile"] },
     { name: "CODEX_CHAT_ADMIN_SERVICE_NAME", path: ["admin", "serviceName"] },
     { name: "CODEX_CHAT_ADMIN_PUBLIC_BASE_URL", path: ["admin", "publicBaseUrl"] },
-    { name: "CODEX_CHAT_BASE_URL", path: ["admin", "publicBaseUrl"] },
+    { name: "CODEX_CHAT_BASE_URL", path: ["slack", "publicBaseUrl"] },
     { name: "CODEX_CHAT_TELEGRAM_MODE", path: ["telegram", "mode"] },
     { name: "CODEX_CHAT_SLACK_ENABLED", path: ["slack", "enabled"], parse: parseBooleanEnv },
     { name: "CODEX_CHAT_SLACK_EVENTS_PATH", path: ["slack", "eventsPath"] },

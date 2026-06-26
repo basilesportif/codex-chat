@@ -5,8 +5,8 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appDir = resolve(here, "..");
-const manifestPath = resolve(appDir, "manifest.json");
-const metadataPath = resolve(appDir, "install-metadata.example.json");
+const manifestPath = process.argv[2] ? resolve(process.argv[2]) : resolve(appDir, "manifest.json");
+const metadataPath = process.argv[3] ? resolve(process.argv[3]) : resolve(appDir, "install-metadata.example.json");
 
 const requiredScopes = [
   "app_mentions:read",
@@ -63,4 +63,4 @@ includesAll(metadata.scopes?.bot, requiredScopes, "install metadata bot scopes")
 includesAll(metadata.events?.bot_events, requiredEvents, "install metadata bot events");
 validateRequestUrl(metadata.events?.request_url, "install metadata request_url");
 
-console.log("Slack app manifest and metadata template look valid.");
+console.log(`Slack app manifest and metadata template look valid: ${manifestPath}`);

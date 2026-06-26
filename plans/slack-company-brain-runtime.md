@@ -5,10 +5,13 @@ Status: durable architecture plan / implementation roadmap
 
 ## Decision
 
-Keep the Slack/company-brain work in the `codex-chat` repo, but stop treating
-`codex-chat` as a Telegram-shaped bot. The target architecture is a
-capability-aware, multi-surface agent runtime where Telegram, Slack, and later
-surfaces are adapters over shared core abstractions.
+Keep the Slack/company-brain runtime adapter work in the `codex-chat` repo, but
+stop treating `codex-chat` as a Telegram-shaped bot. The target architecture is
+a capability-aware, multi-surface agent runtime where Telegram, Slack, and later
+surfaces are adapters over shared core abstractions. The strategic next
+implementation phase for admin/control-plane work is to promote Brain into the
+long-running server process/web app and orchestrator/control-plane; `codex-chat`
+should stay focused on runtime adapters, contracts, and execution.
 
 Telegram remains supported. Slack should not be bolted onto Telegram-specific
 message, user, command, or permission types. Instead, both Telegram and Slack
@@ -27,6 +30,8 @@ runtime events through surface-specific adapters.
   and audit/correlation IDs across surfaces.
 - Keep the company brain state and retrieval layer ready for a central server
   with many subagents, persisted summaries, indexes, and context compression.
+- Move near-term admin/control-plane functions into Brain rather than expanding
+  the bootstrap `/admin/codex-chat/` page beyond Slack setup/diagnostics.
 
 ## Current state to preserve
 
@@ -398,10 +403,16 @@ for Slack setup, not the durable project control plane. It does not implement
 users, capabilities, bundles, audit browsing, job management, approval UX,
 deploy/restart orchestration, or cross-surface admin operations.
 
-The long-term admin/control plane should live in Brain. `codex-chat` should keep
-runtime adapter contracts and behavior, while Brain owns web/admin policy,
-install metadata, env/deploy/restart orchestration, health views, capability and
-audit administration, and `assistant-agent-logic` checkout selection.
+The long-term admin/control plane should live in Brain, and near-term work
+should migrate admin/control-plane functions there instead of growing this
+bootstrap page. `codex-chat` should keep runtime adapter contracts and behavior,
+while Brain owns web/admin policy, install metadata, env/deploy/restart
+orchestration, health views, capability and audit administration, and
+`assistant-agent-logic` checkout/version orchestration. Brain's web/admin UI
+should be treated as a heavily used settings-management surface for recurring
+operations, not just occasional setup. It may eventually host a guided,
+sequential Brain setup/install workflow from the web UI, while still allowing
+setup from Codex sessions when that is easier for an operator.
 
 Build an admin/dashboard surface that can manage and inspect:
 
@@ -534,13 +545,15 @@ short of broad Slack history/search tools, full capability enforcement,
 capability bundles, or admin/dashboard flows. The installable app surface lives
 in `slack-app/`; it owns the Slack manifest, scopes/events, non-secret install
 metadata template, and deployment/env notes that feed the `src/slack.ts`
-adapter.
+adapter. Phase 2 is still operationally open until the real Slack app is
+installed and live app-mention/DM/private-channel canaries pass.
 
 - [x] Add Slack app config and secret metadata checks without exposing token
       values.
 - [x] Add initial Clerk-protected codex-chat admin config page for Slack env
       bootstrap and manifest rendering/validation. This page is deliberately
-      narrower than the future capabilities/admin dashboard.
+      narrower than the future capabilities/admin dashboard and should not grow
+      into the long-term control plane.
 - [x] Add installable Slack app surface (`slack-app/`) with manifest, required
       scopes/events, config/env examples, install metadata template, and local
       validation.
@@ -558,16 +571,50 @@ adapter.
       deployed codex-chat URL, and run live app-mention/DM/private-channel
       canaries before declaring Phase 2 operationally complete.
 
-### Phase 3 — capability requirements, enforcement, and audit spine
+### Phase 3 — promote Brain as the long-running web/admin control plane
+
+This is the strategic next implementation phase, even while Phase 2 live
+canaries remain open. Brain should become the always-on server process/web app
+and orchestrator/control-plane for company-brain administration. `codex-chat`
+continues to own Telegram, Slack Events API/replies, the Slack manifest
+contract, `ActorContext`/`OutputTarget` runtime semantics, and subagent/runtime
+execution.
+
+- [ ] Stand up Brain as a persistent web/admin process on the server behind
+      Clerk with fail-closed admin allowlist policy.
+- [ ] Treat Brain's UI as a heavily used settings-management surface for
+      recurring operations, not just an occasional setup page.
+- [ ] Design the tradeoff between guided/sequential Brain setup/install flows in
+      the web UI and setup from Codex sessions; keep both paths available when
+      each is the easier operator workflow.
+- [ ] Move non-secret Slack install metadata, workspace/channel mappings, and
+      install health/status into Brain's private control-plane store.
+- [ ] Move env/config metadata, secret-reference management, deploy/update,
+      restart/rollback, and health-check orchestration into Brain-controlled
+      admin flows.
+- [ ] Move Clerk/admin policy, dashboard allowlists, capability bundle planning,
+      temporary approvals, revocations, and audit browsing into Brain.
+- [ ] Let Brain select and validate the `assistant-agent-logic` checkout/ref for
+      each deployed servant stack while assistant workflows remain in that repo.
+- [ ] Expose the `codex-chat`-owned Slack manifest contract in a stable
+      no-secrets way so Brain can render, validate, copy/download, and use it
+      without forking adapter semantics.
+- [ ] Keep the current `/admin/codex-chat/` page bootstrap/temporary for Slack
+      setup or runtime-local diagnostics only; do not expand it into the
+      durable admin/control plane.
+
+### Phase 4 — capability requirements, enforcement, and audit spine
 
 Do not start full capability enforcement, capability bundles, temporary approval
 flows, or admin grant management directly from the rough capability lists in
 this document. First run a dedicated brainstorming/planning session to capture
 all requirements and produce the canonical capability vocabulary, resource
 selector model, grant lifecycle, migration plan, audit schema, denial behavior,
-and admin UX. Only then implement this phase.
+and admin UX. Brain should own the admin/planning/control-plane surface for
+capabilities and audit, while `codex-chat` enforces runtime checks at tools,
+adapters, output sends, and subagent execution.
 
-Tim's Phase 3 capability-system decisions to carry into that planning session:
+Tim's capability-system decisions to carry into that planning session:
 
 1. Capabilities are positive grants only. Do not introduce an explicit deny or
    block model in the first version; absence of a matching grant means the
@@ -629,7 +676,7 @@ extension rather than a hidden behavior in the first implementation.
       migration path.
 - [ ] Ensure subagents receive narrowed run context, not tokens or broad grants.
 
-### Phase 4 — Slack adapter depth and runtime-owned Slack tools
+### Phase 5 — Slack adapter depth and runtime-owned Slack tools
 
 - [ ] Implement progress message updates from `ProgressEvent`s.
 - [ ] Add selected interactive button clicks from progress/admin messages.
@@ -641,7 +688,7 @@ extension rather than a hidden behavior in the first implementation.
 - [ ] Keep Slack read/write tools runtime-owned and capability-checked; never
       pass raw Slack tokens to the main Codex process or subagents.
 
-### Phase 5 — cross-surface company brain operations
+### Phase 6 — cross-surface company brain operations
 
 - [ ] Allow Telegram-originated company-brain reads/searches over Slack when
       capability grants allow it.
@@ -653,29 +700,6 @@ extension rather than a hidden behavior in the first implementation.
 - [ ] Add persisted summaries for Slack threads/channels and repeated topics.
 - [ ] Add context compression policies for long company runs.
 
-### Phase 6 — Clerk-authenticated admin dashboard and approval UX
-
-- [x] Add initial Clerk-protected Slack config/manifest admin page inside the
-      codex-chat service (`https://brain.decisive-outcomes.com/admin/codex-chat/`) with fail-closed allowed-email
-      enforcement. This is a bootstrap page only.
-- [ ] Build the admin/dashboard app as a Clerk-authenticated internal surface
-      with server-side allowed-user enforcement.
-- [ ] Require at least one configured allowed dashboard user; if the allowlist is
-      empty or missing, deny all dashboard access.
-- [ ] Build users/actors view, including allowed dashboard users and their
-      identity mappings.
-- [ ] Build Slack channel and Telegram chat mapping view.
-- [ ] Build capability bundle UI so admins can set common capability bundles on
-      users while preserving auditable individual grants.
-- [ ] Build capability grant/revocation UI for inspecting and editing individual
-      abilities created directly or by bundles.
-- [ ] Build audit viewer.
-- [ ] Build running jobs/subagents/Employees view with cancel/steer buttons.
-- [ ] Add AI-assisted capability assignment proposals with human confirmation.
-- [ ] Add Slack button-click approvals for temporary capabilities.
-- [ ] Mirror sensitive admin operations through Telegram admin commands where
-      useful.
-
 ### Phase 7 — central server and scale-out subagents
 
 - [ ] Centralize event ingestion, queueing, progress fanout, audits, and indexes.
@@ -685,33 +709,9 @@ extension rather than a hidden behavior in the first implementation.
 - [ ] Persist run summaries, source summaries, and artifacts.
 - [ ] Add retrieval/index maintenance jobs for Slack and Telegram history.
 - [ ] Add operational dashboards for worker health, queue depth, stuck runs, and
-      capability-denial rates.
+      capability-denial rates through Brain, while preserving `codex-chat` as
+      the runtime executor.
 - [ ] Run live canaries with Slack-only, Telegram-only, and cross-surface tasks.
-
-### Phase 8 — promote durable admin/control plane into Brain
-
-This is the intentional end state for admin ownership, not a prerequisite for
-Slack adapter foundation work. `codex-chat` keeps the runtime adapters,
-contracts, and orchestration behavior; Brain becomes the always-on web/admin
-control plane for company-brain operations.
-
-- [ ] Keep the exact Slack manifest contract, Slack Events API handler, Slack
-      send/reply behavior, `ActorContext`/`OutputTarget` runtime behavior, and
-      subagent/runtime orchestration in `codex-chat`.
-- [ ] Expose the `codex-chat`-owned Slack manifest contract in a stable
-      no-secrets way so Brain's web UI can render, validate, copy/download, and
-      use it without forking adapter semantics.
-- [ ] Move durable Slack install metadata, workspace/channel mappings, and
-      non-secret install state into Brain's private control-plane store.
-- [ ] Move env/config metadata, secret-reference management, deploy/update,
-      restart/rollback, and health-check orchestration into Brain-controlled
-      admin flows.
-- [ ] Move Clerk/admin policy, dashboard allowlists, capability bundles,
-      temporary approvals, revocations, and audit browsing into Brain.
-- [ ] Let Brain select and validate the `assistant-agent-logic` checkout/ref for
-      each deployed servant stack while assistant workflows remain in that repo.
-- [ ] Treat the current `/admin/codex-chat/` page as bootstrap/temporary only;
-      do not expand it into the long-term control plane.
 
 ## Avoid
 

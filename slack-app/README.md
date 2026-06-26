@@ -19,6 +19,8 @@ real signing secrets and tokens in the service environment.
   Slack adapter and names the env vars used for secrets.
 - `.env.example` — local/deployment env names for Slack secrets and adapter
   enablement.
+- `scripts/render-manifest.mjs` — dependency-free renderer for producing a
+  deploy-ready manifest from `manifest.json` without Slack secrets.
 - `scripts/validate-manifest.mjs` — dependency-free validation for this app
   surface's manifest and metadata template.
 
@@ -97,31 +99,52 @@ match the service path (`/api/slack/events` by default).
 
 ### 1. Render and validate the Slack manifest
 
-Run from the repo root:
+From your local machine, use this copy/paste command to pull the latest repo on
+the deployment host, render the manifest with the default Events API URL
+`https://me.galebach.com/api/slack/events`, and save it locally. Press Enter at
+the prompt to write into your current local directory, or type a destination
+directory such as `~/Downloads` or `../ops`; `~` and relative paths are handled
+by the local shell wrapper.
 
 ```bash
-cd /home/tim/pkg/tim/codex-chat
-: "${SLACK_EVENTS_URL:?set CODEX_CHAT_BASE_URL and SLACK_EVENTS_URL first}"
+ssh codex-chat-assistant-1 'set -euo pipefail; cd ~/pkg/tim/codex-chat; git pull --ff-only origin main >&2; node slack-app/scripts/render-manifest.mjs --output /tmp/codex-chat.slack.manifest.json; node slack-app/scripts/validate-manifest.mjs /tmp/codex-chat.slack.manifest.json >&2; cat /tmp/codex-chat.slack.manifest.json' | bash -c 'set -euo pipefail
+tmp=$(mktemp "${TMPDIR:-/tmp}/codex-chat.slack.manifest.XXXXXX")
+trap '\''rm -f "$tmp"'\'' EXIT
+cat > "$tmp"
+python3 -m json.tool "$tmp" >/dev/null
+read -erp "Destination directory [$(pwd)]: " dest </dev/tty || dest=.
+dest=${dest:-.}
+case "$dest" in
+  "~") dest="$HOME" ;;
+  "~/"*) dest="$HOME/${dest#~/}" ;;
+esac
+mkdir -p "$dest"
+out="$dest/codex-chat.slack.manifest.json"
+mv "$tmp" "$out"
+trap - EXIT
+printf "Wrote Slack manifest to %s\n" "$out"
+'
+```
 
-python3 - <<'PY_MANIFEST'
-import json
-import os
-from pathlib import Path
+For a non-interactive write to your current local directory, redirect stdout
+directly instead:
 
-src = Path("slack-app/manifest.json")
-out = Path("/tmp/codex-chat.slack.manifest.json")
-manifest = json.loads(src.read_text())
-manifest["settings"]["event_subscriptions"]["request_url"] = os.environ["SLACK_EVENTS_URL"]
-out.write_text(json.dumps(manifest, indent=2) + "\n")
-print(out)
-print(manifest["settings"]["event_subscriptions"]["request_url"])
-PY_MANIFEST
+```bash
+ssh codex-chat-assistant-1 'set -euo pipefail; cd ~/pkg/tim/codex-chat; git pull --ff-only origin main >&2; node slack-app/scripts/render-manifest.mjs --output /tmp/codex-chat.slack.manifest.json; node slack-app/scripts/validate-manifest.mjs /tmp/codex-chat.slack.manifest.json >&2; cat /tmp/codex-chat.slack.manifest.json' > ./codex-chat.slack.manifest.json
+```
 
-node slack-app/scripts/validate-manifest.mjs /tmp/codex-chat.slack.manifest.json
+To render from an already-local checkout, run the script directly. It writes to
+stdout by default, or to a path/directory that can use `~` or be relative to the
+current working directory:
+
+```bash
+node slack-app/scripts/render-manifest.mjs --output-dir ~/Downloads
+node slack-app/scripts/render-manifest.mjs --base-url https://me.galebach.com --events-path /api/slack/events > ./codex-chat.slack.manifest.json
+node slack-app/scripts/validate-manifest.mjs ./codex-chat.slack.manifest.json
 ```
 
 Keep `slack-app/manifest.json` committed with the placeholder URL. Use the
-rendered `/tmp/codex-chat.slack.manifest.json` in Slack.
+rendered `codex-chat.slack.manifest.json` in Slack.
 
 ### 2. Create or update the Slack app
 

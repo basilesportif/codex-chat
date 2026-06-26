@@ -18,12 +18,15 @@ function safeJsonForHtml(value: unknown): string {
 }
 
 function deriveClerkFrontendApi(publishableKey: string): string {
-  const parts = String(publishableKey || "").split("_");
-  if (parts.length < 3) return "";
+  const match = String(publishableKey || "").match(/^pk_(?:test|live)_(.+)$/);
+  if (!match) return "";
   try {
-    return Buffer.from(parts[2] ?? "", "base64")
+    const decoded = Buffer.from(match[1] ?? "", "base64")
       .toString("utf8")
-      .slice(0, -1);
+      .trim()
+      .replace(/\$$/, "");
+    if (!decoded || !decoded.includes(".") || decoded.includes("/") || /\s/.test(decoded)) return "";
+    return decoded;
   } catch {
     return "";
   }
@@ -65,15 +68,33 @@ export function renderAdminSignInPage(
   </main>
   <script type="application/json" id="admin-sign-in-config">${payload}</script>
   <script>
+    function withTimeout(promise, ms, message) {
+      let timer;
+      return Promise.race([
+        promise,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error(message)), ms);
+        })
+      ]).finally(() => clearTimeout(timer));
+    }
+
     window.addEventListener('load', async function () {
       const root = document.getElementById('sign-in');
       const config = JSON.parse(document.getElementById('admin-sign-in-config').textContent);
       if (!config.publishableKey || !window.Clerk) {
-        root.innerHTML = '<div class="error">Clerk is not configured for this admin page.</div>';
+        root.textContent = '';
+        const errorBox = document.createElement('div');
+        errorBox.className = 'error';
+        errorBox.textContent = 'Clerk is not configured for this admin page.';
+        root.appendChild(errorBox);
         return;
       }
       try {
-        await window.Clerk.load({ ui: { ClerkUI: window.__internal_ClerkUICtor } });
+        await withTimeout(
+          window.Clerk.load({ ui: { ClerkUI: window.__internal_ClerkUICtor } }),
+          10000,
+          'Timed out loading Clerk sign-in. Check Clerk allowed origins for this domain, browser third-party cookie settings, or network blockers.'
+        );
         if (window.Clerk.user) {
           window.location.assign(config.redirectUrl);
           return;
@@ -86,7 +107,11 @@ export function renderAdminSignInPage(
           signUpFallbackRedirectUrl: config.redirectUrl
         });
       } catch (error) {
-        root.innerHTML = '<div class="error">Sign-in failed to load. Please refresh and try again.</div>';
+        root.textContent = '';
+        const errorBox = document.createElement('div');
+        errorBox.className = 'error';
+        errorBox.textContent = error.message || 'Sign-in failed to load. Please refresh and try again.';
+        root.appendChild(errorBox);
       }
     });
   </script>
@@ -123,6 +148,7 @@ export function renderAdminPage(config: AppConfig): string {
     .ok { color: var(--ok); } .bad { color: var(--danger); } .hidden { display:none !important; }
     code { background:#020617; border:1px solid var(--line); border-radius:6px; padding:1px 5px; }
     #sign-in { min-height: 420px; display:flex; align-items:center; justify-content:center; }
+    #auth-status { max-width: 440px; text-align:right; font-size:13px; }
   </style>
 </head>
 <body>
@@ -131,10 +157,10 @@ export function renderAdminPage(config: AppConfig): string {
       <h1>Brain Control Plane</h1>
       <div class="muted">Brain control plane for Slack app configuration and manifest workflow. Full capabilities admin is still future work.</div>
     </div>
-    <div class="row"><div id="user-button"></div><button id="sign-out" class="secondary hidden">Sign out / switch account</button></div>
+    <div class="row"><div id="auth-status" class="muted"></div><div id="user-button"></div><button id="sign-out" class="secondary hidden">Sign out / switch account</button></div>
   </header>
   <main>
-    <section id="boot" class="card"><h2>Loading Clerk…</h2><p class="muted">Checking sign-in and server-side allowlist.</p></section>
+    <section id="boot" class="card"><h2>Loading admin…</h2><p class="muted">Checking the server-side allowlist. Clerk account controls load separately so a Clerk client-side delay cannot block this page.</p></section>
     <section id="sign-in-panel" class="card hidden"><h2>Sign in</h2><p class="muted">Use an allowlisted Clerk account.</p><div id="sign-in"></div></section>
     <section id="denied" class="card hidden"><h2>Access denied</h2><p id="denied-message" class="bad"></p><button id="denied-sign-out" class="danger">Sign out / switch account</button></section>
     <section id="app" class="hidden">
@@ -185,26 +211,78 @@ export function renderAdminPage(config: AppConfig): string {
 
     function loadScript(src, attrs = {}) {
       return new Promise((resolve, reject) => {
+        const existing = Array.from(document.scripts).find((script) => script.src === src);
+        if (existing) {
+          if (existing.dataset.loaded === 'true') resolve();
+          else {
+            existing.addEventListener('load', resolve, { once: true });
+            existing.addEventListener('error', () => reject(new Error('Failed to load ' + src)), { once: true });
+          }
+          return;
+        }
         const script = document.createElement('script');
         script.src = src;
         script.defer = true;
         script.crossOrigin = 'anonymous';
         for (const [key, value] of Object.entries(attrs)) script.setAttribute(key, value);
-        script.onload = resolve;
+        script.onload = () => { script.dataset.loaded = 'true'; resolve(); };
         script.onerror = () => reject(new Error('Failed to load ' + src));
         document.head.appendChild(script);
       });
     }
 
+    function withTimeout(promise, ms, message) {
+      let timer;
+      return Promise.race([
+        promise,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error(message)), ms);
+        })
+      ]).finally(() => clearTimeout(timer));
+    }
+
+    function adminSignInUrl() {
+      if (CONFIG.signInUrl) return CONFIG.signInUrl;
+      const path = location.pathname.replace(/\\/?$/, '/auth/sign-in');
+      return path + '?redirect_url=' + encodeURIComponent(location.href);
+    }
+
+    let clerkLoadError = '';
+    let clerkLoadPromise;
+
+    async function loadClerkControls() {
+      if (!CONFIG.publishableKey) throw new Error('CLERK_PUBLISHABLE_KEY is missing; account switch controls are unavailable.');
+      const frontendApi = frontendApiFromPublishableKey(CONFIG.publishableKey);
+      await withTimeout(loadScript('https://' + frontendApi + '/npm/@clerk/ui@1/dist/ui.browser.js'), 10000, 'Timed out loading Clerk UI bundle.');
+      await withTimeout(loadScript('https://' + frontendApi + '/npm/@clerk/clerk-js@6/dist/clerk.browser.js', { 'data-clerk-publishable-key': CONFIG.publishableKey }), 10000, 'Timed out loading Clerk browser SDK.');
+      await withTimeout(Clerk.load({ ui: { ClerkUI: window.__internal_ClerkUICtor } }), 10000, 'Timed out initializing Clerk. Check Clerk allowed origins for this domain, browser third-party cookie settings, or network blockers.');
+      return Clerk;
+    }
+
+    function beginClerkLoad() {
+      if (!clerkLoadPromise) {
+        clerkLoadPromise = loadClerkControls().catch((error) => {
+          clerkLoadError = error.message || String(error);
+          return null;
+        });
+      }
+      return clerkLoadPromise;
+    }
+
     async function authHeaders() {
-      const token = await window.Clerk?.session?.getToken();
-      return token ? { authorization: 'Bearer ' + token } : {};
+      if (typeof window.Clerk?.session?.getToken !== 'function') return {};
+      try {
+        const token = await withTimeout(window.Clerk.session.getToken(), 2500, 'Timed out getting Clerk session token; falling back to same-origin session cookie.');
+        return token ? { authorization: 'Bearer ' + token } : {};
+      } catch {
+        return {};
+      }
     }
 
     async function api(path, options = {}) {
       const headers = { ...(options.headers || {}), ...(await authHeaders()) };
       if (options.body && !headers['content-type']) headers['content-type'] = 'application/json';
-      const response = await fetch(path, { ...options, headers });
+      const response = await fetch(path, { ...options, headers, credentials: 'same-origin' });
       const text = await response.text();
       let payload;
       try { payload = text ? JSON.parse(text) : null; } catch { payload = { raw: text }; }
@@ -244,38 +322,55 @@ export function renderAdminPage(config: AppConfig): string {
     }
 
     async function initialize() {
-      if (!CONFIG.publishableKey) {
-        hide('boot'); show('denied'); setText('denied-message', 'CLERK_PUBLISHABLE_KEY is missing. Admin access fails closed.');
-        return;
-      }
+      const clerkReady = beginClerkLoad();
+      let me;
       try {
-        const frontendApi = frontendApiFromPublishableKey(CONFIG.publishableKey);
-        await loadScript('https://' + frontendApi + '/npm/@clerk/ui@1/dist/ui.browser.js');
-        await loadScript('https://' + frontendApi + '/npm/@clerk/clerk-js@6/dist/clerk.browser.js', { 'data-clerk-publishable-key': CONFIG.publishableKey });
-        await Clerk.load({ ui: { ClerkUI: window.__internal_ClerkUICtor } });
+        me = await api('/api/admin/codex-chat/me');
       } catch (error) {
-        hide('boot'); show('denied'); setText('denied-message', error.message || String(error));
+        hide('boot'); show('denied'); setText('denied-message', 'Server rejected this session: ' + (error.payload?.error || error.message));
         return;
       }
       hide('boot');
-      if (!Clerk.isSignedIn) {
-        show('sign-in-panel');
-        Clerk.mountSignIn($('sign-in'), CONFIG.signInUrl ? { signInUrl: CONFIG.signInUrl } : undefined);
-        return;
-      }
-      Clerk.mountUserButton($('user-button'));
+      hide('denied'); hide('sign-in-panel'); show('app');
+      setText('auth-status', 'Signed in as ' + (me.email || 'an allowlisted Clerk user') + '.');
       show('sign-out');
+
+      void clerkReady.then((clerk) => {
+        if (!clerk) {
+          setText('auth-status', 'Signed in as ' + (me.email || 'an allowlisted Clerk user') + '. Clerk account controls unavailable: ' + clerkLoadError);
+          return;
+        }
+        try {
+          if (clerk.isSignedIn) {
+            clerk.mountUserButton($('user-button'));
+            setText('auth-status', 'Signed in as ' + (me.email || clerk.user?.primaryEmailAddress?.emailAddress || 'an allowlisted Clerk user') + '.');
+          } else {
+            setText('auth-status', 'Server session is valid, but Clerk browser state is signed out. Use switch account if needed.');
+          }
+        } catch (error) {
+          setText('auth-status', 'Signed in as ' + (me.email || 'an allowlisted Clerk user') + '. Clerk account controls failed: ' + (error.message || String(error)));
+        }
+      });
+
       try {
-        const me = await api('/api/admin/codex-chat/me');
-        hide('denied'); hide('sign-in-panel'); show('app');
         await Promise.all([loadConfigStatus(), loadManifest()]);
       } catch (error) {
         show('denied'); setText('denied-message', 'Server rejected this Clerk session: ' + (error.payload?.error || error.message));
       }
     }
 
-    $('sign-out').onclick = () => Clerk.signOut({ redirectUrl: location.pathname });
-    $('denied-sign-out').onclick = () => Clerk?.signOut({ redirectUrl: location.pathname });
+    async function signOutOrSwitch() {
+      let clerk = window.Clerk || null;
+      if (!clerk) {
+        setText('auth-status', 'Loading Clerk account controls to sign out…');
+        clerk = await withTimeout(beginClerkLoad(), 3000, 'Timed out waiting for Clerk account controls.').catch(() => null);
+      }
+      if (clerk?.signOut) return clerk.signOut({ redirectUrl: location.pathname });
+      window.location.assign(adminSignInUrl());
+    }
+
+    $('sign-out').onclick = () => { void signOutOrSwitch(); };
+    $('denied-sign-out').onclick = () => { void signOutOrSwitch(); };
     $('reload-config').onclick = () => loadConfigStatus().catch((e) => setText('config-status', e.message));
     $('reload-manifest').onclick = () => loadManifest().catch((e) => setText('manifest-status', e.message));
     $('slack-form').onsubmit = async (event) => {
@@ -298,7 +393,7 @@ export function renderAdminPage(config: AppConfig): string {
     $('download-manifest').onclick = () => {
       const blob = new Blob([$('manifest-text').value], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
-      const a = document.createElement('a'); a.href = url; a.download = 'codex-chat.slack.manifest.json'; a.click(); URL.revokeObjectURL(url);
+      const a = document.createElement('a'); a.href = url; a.download = 'brain-control-plane.slack.manifest.json'; a.click(); URL.revokeObjectURL(url);
     };
     $('validate-manifest').onclick = async () => {
       try {

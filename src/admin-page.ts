@@ -45,7 +45,7 @@ export function renderAdminSignInPage(
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Sign in · codex-chat admin</title>
+  <title>Sign in · Brain Control Plane</title>
   <style>
     :root { color-scheme: dark; --bg:#020617; --panel:#0f172a; --muted:#94a3b8; --text:#e5e7eb; --line:#334155; --accent:#38bdf8; --danger:#f87171; }
     body { margin:0; min-height:100vh; display:grid; place-items:center; background: radial-gradient(circle at top, rgba(56,189,248,.16), transparent 32rem), var(--bg); color:var(--text); font:15px/1.5 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
@@ -59,7 +59,7 @@ export function renderAdminSignInPage(
 </head>
 <body>
   <main>
-    <h1>Sign in to codex-chat admin</h1>
+    <h1>Sign in to Brain Control Plane</h1>
     <p>Continue with Clerk, then return to the admin page.</p>
     <div id="sign-in">Loading sign-in…</div>
   </main>
@@ -105,7 +105,7 @@ export function renderAdminPage(config: AppConfig): string {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>codex-chat admin</title>
+  <title>Brain Control Plane</title>
   <style>
     :root { color-scheme: light dark; --bg:#0f172a; --panel:#111827; --muted:#94a3b8; --text:#e5e7eb; --line:#334155; --accent:#38bdf8; --danger:#f87171; --ok:#4ade80; }
     body { margin: 0; font: 15px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
@@ -128,8 +128,8 @@ export function renderAdminPage(config: AppConfig): string {
 <body>
   <header>
     <div>
-      <h1>codex-chat admin</h1>
-      <div class="muted">Initial Slack app configuration and manifest workflow. Full capabilities admin is still future work.</div>
+      <h1>Brain Control Plane</h1>
+      <div class="muted">Brain control plane for Slack app configuration and manifest workflow. Full capabilities admin is still future work.</div>
     </div>
     <div class="row"><div id="user-button"></div><button id="sign-out" class="secondary hidden">Sign out / switch account</button></div>
   </header>
@@ -226,7 +226,7 @@ export function renderAdminPage(config: AppConfig): string {
         '',
         ...data.requiredVars.map((name) => name + ': ' + (data.present[name] ? 'present' : 'missing'))
       ];
-      setText('config-status', lines.join('\n'));
+      setText('config-status', lines.join('\\n'));
       document.querySelector('[name="baseUrl"]').value = data.baseUrl || CONFIG.defaultBaseUrl || '';
       document.querySelector('[name="eventsPath"]').value = data.eventsPath || CONFIG.defaultEventsPath || '/api/slack/events';
     }
@@ -285,7 +285,7 @@ export function renderAdminPage(config: AppConfig): string {
       show('save-status'); setText('save-status', 'Writing env file…');
       try {
         const result = await api('/api/admin/codex-chat/slack-config', { method: 'POST', body: JSON.stringify(body) });
-        setText('save-status', result.message + '\n\nRestart command:\n' + result.restartCommand);
+        setText('save-status', result.message + '\\n\\nRestart command:\\n' + result.restartCommand);
         event.currentTarget.signingSecret.value = '';
         event.currentTarget.botToken.value = '';
         event.currentTarget.appToken.value = '';

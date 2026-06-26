@@ -14,6 +14,7 @@ import {
   parseAdminAllowedEmails,
 } from "../admin-auth.js";
 import { ApiGateway, type ApiGatewayHooks } from "../api.js";
+import { renderAdminPage } from "../admin-page.js";
 import { loadConfig, type AppConfig } from "../config.js";
 import { mergeEnvFileText, writeMergedEnvFile } from "../env-file.js";
 import { FileStore } from "../file-store.js";
@@ -307,6 +308,16 @@ describe("admin env file management", () => {
 });
 
 describe("admin routes", () => {
+
+  test("rendered admin inline scripts parse", async () => {
+    const config = await adminConfig();
+    const html = renderAdminPage(config);
+    const scripts = Array.from(html.matchAll(/<script>([\s\S]*?)<\/script>/g), (match) => match[1]);
+    expect(scripts.length).toBeGreaterThan(0);
+    for (const script of scripts) {
+      expect(() => new Function(script)).not.toThrow();
+    }
+  });
   test("admin page route is server-authenticated", async () => {
     const { baseUrl } = await apiHarness(undefined, {
       adminAuthDeps: {
@@ -336,14 +347,14 @@ describe("admin routes", () => {
     );
     expect(signIn.status).toBe(200);
     const signInHtml = await signIn.text();
-    expect(signInHtml).toContain("Sign in to codex-chat admin");
+    expect(signInHtml).toContain("Sign in to Brain Control Plane");
     expect(signInHtml).toContain("forceRedirectUrl");
 
     const authed = await fetch(`${baseUrl}/admin/codex-chat/`, {
       headers: { cookie: "__session=test-token" },
     });
     expect(authed.status).toBe(200);
-    expect(await authed.text()).toContain("codex-chat admin");
+    expect(await authed.text()).toContain("Brain Control Plane");
   });
 
   test("admin route can be configured as /admin without exposing codex-chat path", async () => {

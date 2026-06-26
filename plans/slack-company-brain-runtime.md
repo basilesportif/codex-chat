@@ -51,9 +51,13 @@ Based on the current repo/system state:
       install metadata template, adapter config/env examples, validation, and
       a canonical operator runbook in `slack-app/SLACK.md`.
 - [x] Capability-aware runtime abstractions are implemented in `codex-chat`.
+- [x] Initial Clerk-protected codex-chat admin config page exists inside the
+      codex-chat service at `/admin/codex-chat/` for Slack env bootstrap and
+      manifest rendering/copy/download/validation.
 - [ ] Durable company-mode capability state exists outside long-term JSON files.
-- [ ] Admin dashboard exists for users, channel mappings, capabilities, audits,
-      and running jobs.
+- [ ] Full admin dashboard exists for users, channel mappings, capabilities,
+      audits, and running jobs. The initial Slack config page is not that full
+      dashboard.
 
 ## Core runtime abstractions
 
@@ -383,6 +387,15 @@ query support.
 
 ## Admin and dashboard
 
+Current implementation note: the service now includes an initial
+`/admin/codex-chat/` page in the codex-chat API process. It is Clerk-gated with
+server-side email allowlist checks, fails closed when Clerk keys or allowed
+emails are absent, writes only the Slack/bootstrap env vars needed for the
+current HTTP Events API adapter, and renders/validates the Slack manifest. This
+is intentionally a bootstrap/config surface only. It does not implement users,
+capabilities, bundles, audit browsing, job management, approval UX, or
+cross-surface admin operations.
+
 Build an admin/dashboard surface that can manage and inspect:
 
 - users/actors and identity mappings across Telegram and Slack
@@ -518,6 +531,9 @@ adapter.
 
 - [x] Add Slack app config and secret metadata checks without exposing token
       values.
+- [x] Add initial Clerk-protected codex-chat admin config page for Slack env
+      bootstrap and manifest rendering/validation. This page is deliberately
+      narrower than the future capabilities/admin dashboard.
 - [x] Add installable Slack app surface (`slack-app/`) with manifest, required
       scopes/events, config/env examples, install metadata template, and local
       validation.
@@ -632,6 +648,9 @@ extension rather than a hidden behavior in the first implementation.
 
 ### Phase 6 — Clerk-authenticated admin dashboard and approval UX
 
+- [x] Add initial Clerk-protected Slack config/manifest admin page inside the
+      codex-chat service (`/admin/codex-chat/`) with fail-closed allowed-email
+      enforcement. This is a bootstrap page only.
 - [ ] Build the admin/dashboard app as a Clerk-authenticated internal surface
       with server-side allowed-user enforcement.
 - [ ] Require at least one configured allowed dashboard user; if the allowlist is

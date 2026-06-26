@@ -2,7 +2,7 @@ import { describe, expect, test } from "vitest";
 import type { AppConfig } from "../config.js";
 import { childSecretEnvNames, sanitizeChildProcessEnv } from "../env.js";
 
-function config(apiKeyEnv = "TRANSCRIPTION_API_KEY", ingestKeysEnv?: string): Pick<AppConfig, "transcription"> & Partial<Pick<AppConfig, "ingest" | "slack">> {
+function config(apiKeyEnv = "TRANSCRIPTION_API_KEY", ingestKeysEnv?: string): Pick<AppConfig, "transcription"> & Partial<Pick<AppConfig, "admin" | "ingest" | "slack">> {
   return {
     transcription: { apiKeyEnv },
     ingest: ingestKeysEnv ? { apiKeysEnv: ingestKeysEnv } : undefined,
@@ -10,8 +10,11 @@ function config(apiKeyEnv = "TRANSCRIPTION_API_KEY", ingestKeysEnv?: string): Pi
       signingSecretEnv: "SLACK_SIGNING_SECRET",
       botTokenEnv: "SLACK_BOT_TOKEN",
       appTokenEnv: "SLACK_APP_TOKEN"
+    },
+    admin: {
+      clerkSecretKeyEnv: "CLERK_SECRET_KEY"
     }
-  } as Pick<AppConfig, "transcription"> & Partial<Pick<AppConfig, "ingest" | "slack">>;
+  } as Pick<AppConfig, "transcription"> & Partial<Pick<AppConfig, "admin" | "ingest" | "slack">>;
 }
 
 describe("child process environment sanitizer", () => {
@@ -49,13 +52,15 @@ describe("child process environment sanitizer", () => {
       "CUSTOM_TRANSCRIPTION_KEY",
       "SLACK_SIGNING_SECRET",
       "SLACK_BOT_TOKEN",
-      "SLACK_APP_TOKEN"
+      "SLACK_APP_TOKEN",
+      "CLERK_SECRET_KEY"
     ]));
     expect(new Set(childSecretEnvNames(config("OPENAI_API_KEY")))).toEqual(new Set([
       "OPENAI_API_KEY",
       "SLACK_SIGNING_SECRET",
       "SLACK_BOT_TOKEN",
-      "SLACK_APP_TOKEN"
+      "SLACK_APP_TOKEN",
+      "CLERK_SECRET_KEY"
     ]));
   });
 
@@ -83,6 +88,17 @@ describe("child process environment sanitizer", () => {
     expect(sanitized).not.toHaveProperty("SLACK_SIGNING_SECRET");
     expect(sanitized).not.toHaveProperty("SLACK_BOT_TOKEN");
     expect(sanitized).not.toHaveProperty("SLACK_APP_TOKEN");
+    expect(sanitized.OTHER_VAR).toBe("keep");
+  });
+
+  test("strips configured Clerk secret key", () => {
+    const sanitized = sanitizeChildProcessEnv(
+      config("CUSTOM_TRANSCRIPTION_KEY"),
+      { CLERK_SECRET_KEY: "sk-secret", CLERK_PUBLISHABLE_KEY: "pk-public", OTHER_VAR: "keep" }
+    );
+
+    expect(sanitized).not.toHaveProperty("CLERK_SECRET_KEY");
+    expect(sanitized.CLERK_PUBLISHABLE_KEY).toBe("pk-public");
     expect(sanitized.OTHER_VAR).toBe("keep");
   });
 });

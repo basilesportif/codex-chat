@@ -130,6 +130,27 @@ const configSchema = z.object({
     port: z.number().int().min(0).max(65535).default(49346),
     allowNonLocalhost: z.boolean().default(false)
   }),
+  admin: z.object({
+    enabled: z.boolean().default(false),
+    routePath: z.string().regex(/^\/[A-Za-z0-9/_-]*\/$/, "Admin route path must be an absolute path ending in /").default("/admin/codex-chat/"),
+    envFile: z.string().default("~/.config/codex-chat/env"),
+    serviceName: z.string().default("codex-chat.service"),
+    publicBaseUrl: z.string().default("https://me.galebach.com"),
+    clerkPublishableKeyEnv: z.string().default("CLERK_PUBLISHABLE_KEY"),
+    clerkSecretKeyEnv: z.string().default("CLERK_SECRET_KEY"),
+    clerkSignInUrlEnv: z.string().default("CLERK_SIGN_IN_URL"),
+    clerkAllowedEmailsEnv: z.string().default("CLERK_ALLOWED_EMAILS")
+  }).default({
+    enabled: false,
+    routePath: "/admin/codex-chat/",
+    envFile: "~/.config/codex-chat/env",
+    serviceName: "codex-chat.service",
+    publicBaseUrl: "https://me.galebach.com",
+    clerkPublishableKeyEnv: "CLERK_PUBLISHABLE_KEY",
+    clerkSecretKeyEnv: "CLERK_SECRET_KEY",
+    clerkSignInUrlEnv: "CLERK_SIGN_IN_URL",
+    clerkAllowedEmailsEnv: "CLERK_ALLOWED_EMAILS"
+  }),
   behavior: z.object({
     dir: z.string().default("behavior"),
     entrypoint: z.string().default("AGENTS.md"),
@@ -206,6 +227,10 @@ export type AppConfig = z.infer<typeof configSchema> & {
   slackBotToken?: string;
   slackAppToken?: string;
   openaiApiKey?: string;
+  clerkPublishableKey?: string;
+  clerkSecretKey?: string;
+  clerkSignInUrl?: string;
+  clerkAllowedEmails?: string;
 };
 export type EmployeeDefinitionConfig = z.infer<typeof employeeDefinitionSchema>;
 
@@ -262,6 +287,17 @@ const defaultConfig = configSchema.parse({
     host: "127.0.0.1",
     port: 49346,
     allowNonLocalhost: false
+  },
+  admin: {
+    enabled: false,
+    routePath: "/admin/codex-chat/",
+    envFile: "~/.config/codex-chat/env",
+    serviceName: "codex-chat.service",
+    publicBaseUrl: "https://me.galebach.com",
+    clerkPublishableKeyEnv: "CLERK_PUBLISHABLE_KEY",
+    clerkSecretKeyEnv: "CLERK_SECRET_KEY",
+    clerkSignInUrlEnv: "CLERK_SIGN_IN_URL",
+    clerkAllowedEmailsEnv: "CLERK_ALLOWED_EMAILS"
   },
   behavior: {
     dir: "behavior",
@@ -450,6 +486,12 @@ function collectEnvOverrides(env: NodeJS.ProcessEnv = process.env): Record<strin
     { name: "CODEX_CHAT_API_HOST", path: ["api", "host"] },
     { name: "CODEX_CHAT_API_PORT", path: ["api", "port"], parse: parseNumberEnv },
     { name: "CODEX_CHAT_API_ALLOW_NON_LOCALHOST", path: ["api", "allowNonLocalhost"], parse: parseBooleanEnv },
+    { name: "CODEX_CHAT_ADMIN_ENABLED", path: ["admin", "enabled"], parse: parseBooleanEnv },
+    { name: "CODEX_CHAT_ADMIN_ROUTE_PATH", path: ["admin", "routePath"] },
+    { name: "CODEX_CHAT_ADMIN_ENV_FILE", path: ["admin", "envFile"] },
+    { name: "CODEX_CHAT_ADMIN_SERVICE_NAME", path: ["admin", "serviceName"] },
+    { name: "CODEX_CHAT_ADMIN_PUBLIC_BASE_URL", path: ["admin", "publicBaseUrl"] },
+    { name: "CODEX_CHAT_BASE_URL", path: ["admin", "publicBaseUrl"] },
     { name: "CODEX_CHAT_TELEGRAM_MODE", path: ["telegram", "mode"] },
     { name: "CODEX_CHAT_SLACK_ENABLED", path: ["slack", "enabled"], parse: parseBooleanEnv },
     { name: "CODEX_CHAT_SLACK_EVENTS_PATH", path: ["slack", "eventsPath"] },
@@ -492,8 +534,12 @@ export async function loadConfig(configPath = "config/codex-chat.toml"): Promise
   const slackBotToken = process.env[config.slack.botTokenEnv];
   const slackAppToken = process.env[config.slack.appTokenEnv];
   const openaiApiKey = process.env[config.transcription.apiKeyEnv];
+  const clerkPublishableKey = process.env[config.admin.clerkPublishableKeyEnv];
+  const clerkSecretKey = process.env[config.admin.clerkSecretKeyEnv];
+  const clerkSignInUrl = process.env[config.admin.clerkSignInUrlEnv];
+  const clerkAllowedEmails = process.env[config.admin.clerkAllowedEmailsEnv];
   const ingestApiKeys = parseIngestApiKeys(process.env[config.ingest.apiKeysEnv]);
-  const api = { ...config.api, enabled: config.api.enabled || ingestApiKeys.length > 0 || config.slack.enabled };
+  const api = { ...config.api, enabled: config.api.enabled || ingestApiKeys.length > 0 || config.slack.enabled || config.admin.enabled };
   const ingest = { ...config.ingest, apiKeys: ingestApiKeys };
   return {
     ...config,
@@ -506,7 +552,11 @@ export async function loadConfig(configPath = "config/codex-chat.toml"): Promise
     slackSigningSecret,
     slackBotToken,
     slackAppToken,
-    openaiApiKey
+    openaiApiKey,
+    clerkPublishableKey,
+    clerkSecretKey,
+    clerkSignInUrl,
+    clerkAllowedEmails
   };
 }
 

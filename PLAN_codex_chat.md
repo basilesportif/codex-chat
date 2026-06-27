@@ -1,8 +1,20 @@
 # codex-chat Technical Architecture Plan
 
+> Historical note (2026-06-27): this document began as the Telegram-first
+> implementation plan for codex-chat. The current architectural boundary is
+> broader: codex-chat is the internal multi-surface runtime/adapter/engine, and
+> Brain is the external app/admin control plane. The canonical
+> Slack/company-brain control-plane roadmap moved to
+> `/home/tim/pkg/tim/brain/plans/slack-company-brain-runtime.md`.
+
 ## 1. Purpose and Scope
 
-`codex-chat` is a long-running local service that connects a Telegram bot to a warm Codex agent. The service owns transport, persistence, scheduling, process supervision, file handling, and routing. Codex owns reasoning, coding, and agentic work.
+`codex-chat` is a long-running local service that connects surface adapters
+such as Telegram and Slack Events to a warm Codex agent. The service owns
+transport adapters, persistence, scheduling, process supervision, file handling,
+Slack signature verification/runtime handling, and routing. Codex owns
+reasoning, coding, and agentic work. Brain owns the external admin/control-plane
+surface for the active deployment.
 
 The project should be designed as a service wrapper around the Codex CLI, not as a reimplementation of Codex. The key architectural boundary is a `CodexClient` interface that hides the exact process protocol. The first implementation should use the best available Codex CLI process interface and keep a fallback path for older or less stable interfaces.
 

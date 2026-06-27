@@ -1,6 +1,8 @@
 # codex-chat
 
-Telegram-driven Codex instance with subagent support.
+Internal multi-surface Codex runtime, adapter, and execution engine for
+Telegram, Slack Events, subagents, loops, monitors, and audio ingestion. Brain
+is the external app/admin control plane for the current deployment.
 
 ## Quick Start
 
@@ -57,10 +59,18 @@ codex-chat jobs list
 ## Slack Events API
 
 `codex-chat` owns the Slack runtime adapter and receives signed Slack Events API
-requests at `/api/slack/events` by default. Brain owns the admin/control-plane
-surface; this service intentionally does not serve `/admin/codex-chat` or
-`/api/admin/codex-chat/*` compatibility routes. Use `slack-app/SLACK.md` and the
-no-secret manifest scripts under `slack-app/scripts/` for install/update work.
+requests at `/api/slack/events` by default. In the active `tim-main-brain`
+deployment, Slack's public Events URL is
+`https://brain.decisive-outcomes.com/api/slack/events`; Brain/Caddy
+reverse-proxies the raw signed request to this service so codex-chat can verify
+Slack signatures, fast-ack, queue, and own runtime behavior.
+
+Brain owns the admin/control-plane surface at
+`https://brain.decisive-outcomes.com/admin`; this service intentionally does not
+serve `/admin`, `/admin/codex-chat`, or `/api/admin/codex-chat/*`
+compatibility routes. Use `slack-app/SLACK.md` and the no-secret manifest
+scripts under `slack-app/scripts/` for codex-chat-owned manifest/runtime
+contracts; Brain may call those scripts from the selected checkout.
 
 ## Audio Ingestion API
 
@@ -390,14 +400,25 @@ The behavior pack includes `behavior/skills/setup-server/SKILL.md`, a deployment
 
 ## Example: three-repo assistant architecture
 
-`codex-chat` is intentionally independent of any one assistant logic/data layout. It can run on top of different behavior packs, data stores, and workflow repositories. This deployment uses a three-repo architecture:
+`codex-chat` is intentionally independent of any one assistant logic/data layout. It can run on top of different behavior packs, data stores, and workflow repositories. The current deployment uses a Brain-led four-repo architecture:
 
-- `codex-chat` — Telegram/Codex runtime service. It receives Telegram messages, sends immediate acknowledgements, runs Codex, dispatches subagents, executes loops/monitors, and returns replies.
+- `brain` — external app/admin control plane. The active `tim-main-brain`
+  instance runs `brain-admin.service` on `codex-chat-assistant-1` and owns
+  admin UI, deployment-specific settings, env/config writes, and Slack install
+  metadata.
+- `codex-chat` — internal runtime/adapter/engine. It receives Telegram and
+  Slack runtime events, sends immediate acknowledgements, runs Codex, dispatches
+  subagents, executes loops/monitors, handles audio ingest, verifies Slack
+  signatures, and returns replies.
 - `assistant-agent-logic` — reusable assistant logic: skills, prompts, helper scripts, setup/migration tooling, and Repo Registry runtime code.
 - `assistant-agent-data` — private/user-owned workspace data: todos, instructions, Repo Registry state, task definitions, and durable assistant state.
 
-In this architecture, `codex-chat` supplies the runtime while `assistant-agent-logic` supplies reusable workflows and `assistant-agent-data` supplies user-specific state. Other deployments can replace the logic and data layers while keeping `codex-chat` as the Telegram/Codex service.
+In this architecture, Brain supplies the external control plane, `codex-chat`
+supplies the runtime/adapter engine, `assistant-agent-logic` supplies reusable
+workflows, and `assistant-agent-data` supplies user-specific state. Other
+deployments can replace the control plane, logic, or data layers while keeping
+codex-chat as the internal runtime service.
 
-A separate web repo, `codex-chat-web`, lives at `tim@89.167.72.52:~/pkg/tim/codex-chat-web`. `me.galebach.com` is an on-demand static HTML/CSS/JS scratch page host, not a dashboard. `codex-chat-web` owns publisher/pruner/tooling and generic shared page-host code only; request-specific pages publish by default as unlisted `/pages/<id>/` URLs with TTL/pruning and stay out of git unless Tim explicitly promotes them. Durable page metadata belongs in `assistant-agent-data` at `data/web-pages/manifest.json`.
+A separate web repo, `codex-chat-web`, lives at `tim@89.167.72.52:~/pkg/tim/codex-chat-web`. `me.galebach.com` is an on-demand static HTML/CSS/JS scratch page host, not a dashboard. `codex-chat-web` owns publisher/pruner/tooling and generic shared page-host code only; request-specific pages publish by default as Clerk-protected `/private/pages/<id>/` URLs with TTL/pruning and stay out of git unless Tim explicitly promotes them. Durable page metadata belongs in `assistant-agent-data` at `data/web-pages/manifest.json`.
 
 The canonical documentation for this deployment's repo relationships lives in `assistant-agent-data` at `docs/assistant-system-architecture.md`.

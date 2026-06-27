@@ -59,34 +59,15 @@ appTokenEnv = "SLACK_APP_TOKEN"
 
 [api]
 # HTTP API for server-to-server integrations such as audio ingestion and Slack
-# Events API, plus the optional Clerk-protected admin page below. This also
-# auto-enables when CODEXCHAT_INGEST_API_KEYS is set, slack.enabled=true, or
-# admin.enabled=true.
+# Events API. This also auto-enables when CODEXCHAT_INGEST_API_KEYS is set or
+# slack.enabled=true. Brain owns the Clerk-protected admin/control-plane surface;
+# codex-chat does not serve /admin, /admin/codex-chat, or
+# /api/admin/codex-chat/* routes.
 enabled = false
 host = "127.0.0.1"
 port = 49346
 # Set true only when binding behind trusted private networking / reverse proxy.
 allowNonLocalhost = false
-
-[admin]
-# Initial Clerk-protected admin page for Slack env and manifest bootstrap.
-# Full capability CRUD/bundles/admin dashboard work is intentionally future
-# Phase 3/5 work, not this page.
-enabled = false
-routePath = "/admin/codex-chat/"
-envFile = "~/.config/codex-chat/env"
-serviceName = "codex-chat.service"
-# Public origin for this admin page. Leave empty to derive from the request
-# Host header, or set CODEX_CHAT_ADMIN_PUBLIC_BASE_URL in the runtime env.
-# Current Brain deployment uses:
-#   CODEX_CHAT_ADMIN_PUBLIC_BASE_URL=https://brain.decisive-outcomes.com
-#   CODEX_CHAT_ADMIN_ROUTE_PATH=/admin
-#   CLERK_SIGN_IN_URL=https://brain.decisive-outcomes.com/admin/auth/sign-in
-publicBaseUrl = ""
-clerkPublishableKeyEnv = "CLERK_PUBLISHABLE_KEY"
-clerkSecretKeyEnv = "CLERK_SECRET_KEY"
-clerkSignInUrlEnv = "CLERK_SIGN_IN_URL"
-clerkAllowedEmailsEnv = "CLERK_ALLOWED_EMAILS"
 
 [behavior]
 dir = "behavior"

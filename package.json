@@ -1,7 +1,7 @@
 {
   "name": "codex-chat",
   "version": "0.1.0",
-  "description": "Telegram-driven Codex service with subagent, loop, and monitor support.",
+  "description": "Internal multi-surface Codex runtime, adapter, and execution engine with Telegram, Slack, subagent, loop, monitor, and audio-ingest support.",
   "type": "module",
   "license": "UNLICENSED",
   "private": true,

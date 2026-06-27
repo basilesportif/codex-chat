@@ -17,8 +17,8 @@ The implementation must parse the allowlist case-insensitively, de-dupe internal
 ## Findings
 
 - Authoritative `codex-chat-web` source is remote: `tim@89.167.72.52:~/pkg/tim/codex-chat-web`; deploy host/domain are `codex-chat-assistant-1` / `me.galebach.com` per repo registry (`index.yaml:823-919`).
-- Current setup already uses Caddy. Today, Caddy serves all `/pages/*` directly from `/srv/codex-chat-web/pages` (`/etc/caddy/Caddyfile:15-31`). Protected page requests must stop being directly file-served by Caddy; they should hit ExpressJS first so server-side Clerk auth gates both HTML and assets.
-- Current `codex-chat-web` is static + publisher/pruner only. Defaults publish public, unlisted pages to `/srv/codex-chat-web/pages/<id>/` and `https://me.galebach.com/pages/<id>/` (`README.md:56-70`, `scripts/lib/generated-pages.mjs:19-24`).
+- Historical setup used Caddy to serve public `/pages/*` directly from `/srv/codex-chat-web/pages` (`/etc/caddy/Caddyfile:15-31`). Protected page requests must not be directly file-served by Caddy; they should hit ExpressJS first so server-side Clerk auth gates both HTML and assets.
+- Historical `codex-chat-web` defaults published public, unlisted pages to `/srv/codex-chat-web/pages/<id>/` and `https://me.galebach.com/pages/<id>/`. Current scratch-page defaults must be Clerk-protected `/private/pages/<id>/` backed by `/srv/codex-chat-web/private-pages/<id>/`; legacy `/pages/*` is only for explicitly preserved historical/public pages.
 - Active manifest pages at research time: `conference-map`, `frsa-2026-just-the-facts`, `frsa-2026-meeting-synthesis`; legacy redirect exists for the old conference-map URL.
 - Current env file on deploy host exists at `/home/tim/.config/codex-chat-web/env`, mode `0600`, currently only `GOOGLE_MAPS_API_KEY`; preserve it.
 - Repo registry identifies Tim's continual learning repo as the Clerk reference: `tim-continual-learning` at `tim@89.167.72.52:~/pkg/mush/tim-continual-learning`, remote `git@github.com:basilesportif/tim-continual-learning.git`. Relevant Clerk guidance lives in `skills/clerk/SKILL.md` and `skills/admin-site/references/clerk-react-pattern.md`.

@@ -68,9 +68,11 @@ Slack signatures, fast-ack, queue, and own runtime behavior.
 Brain owns the admin/control-plane surface at
 `https://brain.decisive-outcomes.com/admin`; this service intentionally does not
 serve `/admin`, `/admin/codex-chat`, or `/api/admin/codex-chat/*`
-compatibility routes. Use `slack-app/SLACK.md` and the no-secret manifest
-scripts under `slack-app/scripts/` for codex-chat-owned manifest/runtime
-contracts; Brain may call those scripts from the selected checkout.
+compatibility routes. codex-chat keeps only the Slack runtime, adapter, and
+no-secret manifest contract under `slack-app/`. Brain owns human-facing Slack
+administration such as env writes, restart guidance, and live verification.
+Brain may call the checked-in no-secret manifest scripts from the selected
+checkout.
 
 ## Audio Ingestion API
 

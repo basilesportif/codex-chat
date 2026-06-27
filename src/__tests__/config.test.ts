@@ -23,11 +23,6 @@ const overrideEnvNames = [
   "CODEX_CHAT_API_HOST",
   "CODEX_CHAT_API_PORT",
   "CODEX_CHAT_API_ALLOW_NON_LOCALHOST",
-  "CODEX_CHAT_ADMIN_ENABLED",
-  "CODEX_CHAT_ADMIN_ROUTE_PATH",
-  "CODEX_CHAT_ADMIN_ENV_FILE",
-  "CODEX_CHAT_ADMIN_SERVICE_NAME",
-  "CODEX_CHAT_ADMIN_PUBLIC_BASE_URL",
   "CODEX_CHAT_BASE_URL",
   "CODEX_CHAT_TELEGRAM_MODE",
   "CODEX_CHAT_SLACK_ENABLED",
@@ -46,10 +41,6 @@ const overrideEnvNames = [
   "CUSTOM_SLACK_SIGNING_SECRET",
   "CUSTOM_SLACK_BOT_TOKEN",
   "CUSTOM_SLACK_APP_TOKEN",
-  "CLERK_PUBLISHABLE_KEY",
-  "CLERK_SECRET_KEY",
-  "CLERK_SIGN_IN_URL",
-  "CLERK_ALLOWED_EMAILS",
 ];
 
 async function tempConfig(contents: string): Promise<string> {
@@ -96,8 +87,6 @@ userIds = [12345]
     expect(config.subagents.defaultServiceTier).toBe("fast");
     expect(config.subagents.backend).toBe("codex_exec");
     expect(config.api.enabled).toBe(false);
-    expect(config.admin.enabled).toBe(false);
-    expect(config.admin.routePath).toBe("/admin/codex-chat/");
     expect(config.slack.enabled).toBe(false);
     expect(config.slack.eventsPath).toBe("/api/slack/events");
     expect(config.ingest.audioMaxMb).toBe(100);
@@ -122,14 +111,7 @@ userIds = [12345]
     process.env.TELEGRAM_BOT_TOKEN = "token-from-default-env";
     process.env.CUSTOM_SLACK_SIGNING_SECRET = "slack-signing-secret";
     process.env.CUSTOM_SLACK_BOT_TOKEN = "xoxb-test-token";
-    process.env.CODEX_CHAT_ADMIN_ENABLED = "true";
-    process.env.CODEX_CHAT_ADMIN_PUBLIC_BASE_URL =
-      "https://brain.decisive-outcomes.com";
     process.env.CODEX_CHAT_BASE_URL = "https://me.galebach.com";
-    process.env.CLERK_PUBLISHABLE_KEY = "pk_test_example";
-    process.env.CLERK_SECRET_KEY = "sk_test_example";
-    process.env.CLERK_SIGN_IN_URL = "https://accounts.example.com/sign-in";
-    process.env.CLERK_ALLOWED_EMAILS = "tim.galebach@gmail.com";
     const path = await tempConfig(`
 version = 1
 
@@ -153,17 +135,9 @@ botTokenEnv = "CUSTOM_SLACK_BOT_TOKEN"
     expect(config.slack.enabled).toBe(true);
     expect(config.slack.eventsPath).toBe("/api/custom-slack/events");
     expect(config.api.enabled).toBe(true);
-    expect(config.admin.enabled).toBe(true);
-    expect(config.admin.publicBaseUrl).toBe(
-      "https://brain.decisive-outcomes.com",
-    );
     expect(config.slack.publicBaseUrl).toBe("https://me.galebach.com");
     expect(config.slackSigningSecret).toBe("slack-signing-secret");
     expect(config.slackBotToken).toBe("xoxb-test-token");
-    expect(config.clerkPublishableKey).toBe("pk_test_example");
-    expect(config.clerkSecretKey).toBe("sk_test_example");
-    expect(config.clerkSignInUrl).toBe("https://accounts.example.com/sign-in");
-    expect(config.clerkAllowedEmails).toBe("tim.galebach@gmail.com");
   });
 
   test("allows transcription model env overrides", async () => {

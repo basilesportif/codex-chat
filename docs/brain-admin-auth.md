@@ -1,63 +1,53 @@
-# Brain admin Clerk auth and routing
+# Brain admin routing boundary
 
-The codex-chat Slack/bootstrap admin page is currently published at:
+`codex-chat` no longer serves a Clerk admin UI or `/api/admin/codex-chat/*`
+compatibility API. Brain owns the human/admin surface for this transition. The
+active admin URL is:
 
 ```text
 https://brain.decisive-outcomes.com/admin
 ```
 
-Runtime env should make the public URL and sign-in route explicit:
+`codex-chat` keeps only runtime HTTP contracts it must own, including the Slack
+Events API (`/api/slack/events` by default) and runtime ingestion endpoints such
+as `/api/ingest/audio`. Slack manifest rendering/validation remains available
+from checked-in no-secret scripts under `slack-app/`; Brain can call those from
+the selected `codex-chat` checkout instead of depending on a codex-chat-hosted
+admin route.
 
-```text
-CODEX_CHAT_ADMIN_ENABLED=true
-CODEX_CHAT_ADMIN_PUBLIC_BASE_URL=https://brain.decisive-outcomes.com
-CODEX_CHAT_ADMIN_ROUTE_PATH=/admin
-CLERK_SIGN_IN_URL=https://brain.decisive-outcomes.com/admin/auth/sign-in
-CLERK_ALLOWED_EMAILS=timgalebachukraine@gmail.com,tim.galebach@gmail.com
-```
-
-Do not configure `CLERK_SIGN_IN_URL` to a Clerk-hosted `*.accounts.dev` URL for
-this app. The admin sign-in page is app-hosted, matching the working
-`me.galebach.com/private/pages` pattern: unauthenticated `/admin` browser
-requests redirect to `/admin/auth/sign-in?redirect_url=...`, and that page mounts
-Clerk with force/fallback redirects back to `/admin`.
-
-Caddy should proxy the new host/path to codex-chat on `127.0.0.1:49346`:
+Caddy should route Brain admin traffic to `brain-admin.service` and Slack Events
+traffic to the codex-chat API listener. Do not keep redirects or proxy rules for
+the removed `/admin/codex-chat` or `/api/admin/codex-chat/*` surfaces:
 
 ```caddyfile
 brain.decisive-outcomes.com {
 	@admin path /admin /admin/*
 	handle @admin {
-		reverse_proxy 127.0.0.1:49346
+		reverse_proxy 127.0.0.1:49347
 	}
 
-	@codexChatAdminApi path /api/admin/codex-chat /api/admin/codex-chat/*
-	handle @codexChatAdminApi {
-		reverse_proxy 127.0.0.1:49346
+	@brainAdminApi path /api/admin/brain /api/admin/brain/*
+	handle @brainAdminApi {
+		reverse_proxy 127.0.0.1:49347
+	}
+
+	@brainHealth path /healthz
+	handle @brainHealth {
+		reverse_proxy 127.0.0.1:49347
 	}
 
 	handle {
 		respond "not found" 404
 	}
 }
+
+me.galebach.com {
+	handle /api/slack/events {
+		reverse_proxy 127.0.0.1:49346
+	}
+	# other codex-chat-web/private page handlers live here
+}
 ```
 
-The older `/admin/codex-chat/` URL can remain as a same-host compatibility
-redirect, but do not redirect the hyphenated host to `brain.decisiveoutcomes.com`:
-
-```caddyfile
-@oldCodexChatAdmin path /admin/codex-chat /admin/codex-chat/*
-redir @oldCodexChatAdmin https://brain.decisive-outcomes.com/admin 308
-```
-
-DNS should be in the `decisive-outcomes.com` zone. The public Cloudflare record
-may answer with Cloudflare proxy IPs, but the configured origin should be
-`178.104.208.141`.
-
-Clerk dashboard values that may need to be allowed for production:
-
-```text
-Allowed origin / application URL: https://brain.decisive-outcomes.com
-Allowed redirect URL: https://brain.decisive-outcomes.com/admin
-Allowed redirect URL: https://brain.decisive-outcomes.com/admin/auth/sign-in
-```
+Brain's own Clerk keys and allowlist belong in `~/.config/brain-admin/env`. They
+should not be written into the codex-chat service environment.

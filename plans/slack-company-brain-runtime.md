@@ -30,11 +30,9 @@ runtime events through surface-specific adapters.
   and audit/correlation IDs across surfaces.
 - Keep the company brain state and retrieval layer ready for a central server
   with many subagents, persisted summaries, indexes, and context compression.
-- Move near-term admin/control-plane functions into Brain rather than expanding
-  the bootstrap `/admin` page beyond Slack setup/diagnostics. Phase 3 has
-  started in the Brain repo with a Clerk-protected `brain-web-admin` skeleton
-  for health/settings, write-only codex-chat env/config entries, and approved
-  deploy/restart operations.
+- Keep near-term admin/control-plane functions in Brain. The codex-chat-hosted
+  `/admin` and `/api/admin/codex-chat/*` compatibility surfaces have been
+  removed; codex-chat keeps runtime APIs such as Slack Events and audio ingest.
 
 ## Current state to preserve
 
@@ -59,10 +57,10 @@ Based on the current repo/system state:
       install metadata template, adapter config/env examples, validation, and
       a canonical operator runbook in `slack-app/SLACK.md`.
 - [x] Capability-aware runtime abstractions are implemented in `codex-chat`.
-- [x] Initial Clerk-protected codex-chat admin config page exists inside the
-      codex-chat service at `/admin` for Slack env bootstrap and
-      manifest rendering/copy/download/validation. This is a bootstrap/temporary
-      surface, not the long-term admin/control plane.
+- [x] Brain owns the Clerk-protected admin/control-plane surface at
+      `https://brain.decisive-outcomes.com/admin`.
+- [x] The legacy codex-chat-hosted admin config page and
+      `/api/admin/codex-chat/*` routes have been removed.
 - [x] Brain Phase 3 control-plane implementation has started outside
       `codex-chat`: the Brain repo now owns an initial Clerk-protected
       `brain-web-admin` service skeleton for health/settings, safe write-only
@@ -401,28 +399,24 @@ query support.
 
 ## Admin and dashboard
 
-Current implementation note: the service now includes an initial
-`/admin` page in the codex-chat API process. In the current deployment it is exposed at `https://brain.decisive-outcomes.com/admin` via `CODEX_CHAT_ADMIN_PUBLIC_BASE_URL`, while Slack Events remain on `https://me.galebach.com/api/slack/events`. It is Clerk-gated with
-server-side email allowlist checks, fails closed when Clerk keys or allowed
-emails are absent, writes only the Slack/bootstrap env vars needed for the
-current HTTP Events API adapter, and renders/validates the Slack manifest. This
-is intentionally a bootstrap/config surface only. It is temporary scaffolding
-for Slack setup, not the durable project control plane. It does not implement
-users, capabilities, bundles, audit browsing, job management, approval UX,
-deploy/restart orchestration, or cross-surface admin operations.
+Current implementation note: Brain now owns the Clerk-protected admin/control
+plane at `https://brain.decisive-outcomes.com/admin`. The codex-chat API
+process no longer serves `/admin`, `/admin/codex-chat`, or
+`/api/admin/codex-chat/*` compatibility surfaces. This is a deliberate breaking
+transition: if an operator still needs old setup affordances, add them to Brain
+or use the no-secret `slack-app/` manifest scripts from a selected codex-chat
+checkout.
 
-The long-term admin/control plane should live in Brain, and near-term work
-should migrate admin/control-plane functions there instead of growing this
-bootstrap page. `codex-chat` should keep runtime adapter contracts and behavior,
-while Brain owns web/admin policy, install metadata, env/deploy/restart
-orchestration, health views, capability and audit administration, and
-`assistant-agent-logic` checkout/version orchestration. Brain's web/admin UI
-should be treated as a heavily used settings-management surface for recurring
-operations, not just occasional setup. It may eventually host a guided,
-sequential Brain setup/install workflow from the web UI, while still allowing
-setup from Codex sessions when that is easier for an operator.
+`codex-chat` should keep runtime adapter contracts and behavior, while Brain
+owns web/admin policy, install metadata, env/deploy/restart orchestration,
+health views, capability and audit administration, and `assistant-agent-logic`
+checkout/version orchestration. Brain's web/admin UI should be treated as a
+heavily used settings-management surface for recurring operations, not just
+occasional setup. It may eventually host a guided, sequential Brain
+setup/install workflow from the web UI, while still allowing setup from Codex
+sessions when that is easier for an operator.
 
-Build an admin/dashboard surface that can manage and inspect:
+Build Brain's admin/dashboard surface to manage and inspect:
 
 - users/actors and identity mappings across Telegram and Slack
 - allowed dashboard users and their admin status
@@ -436,22 +430,11 @@ Build an admin/dashboard surface that can manage and inspect:
 - AI-assisted capability assignment proposals
 - button-click operations for approvals, grants, reroutes, cancels, and retries
 
-The dashboard must be Clerk-authenticated and fail closed. Tim's current Clerk
-pattern, documented in the Tim Continual Learning `clerk` and `admin-site`
-skills, is Clerk sign-in plus a server-side email allowlist such as
-`CLERK_ALLOWED_EMAILS`: resolve the verified Clerk email, normalize it
-case-insensitively, and reject signed-in users outside the allowlist with a
-server-side `403`. The dashboard should follow that pattern, keep
-`/api/health` public where applicable, protect `/api/auth/me` and remaining
-admin APIs, and provide a visible logout/switch-account path on forbidden or
-auth-adjacent pages.
-
-For this runtime dashboard, the allowed-user list is required authorization
-state: if no allowed dashboard users are configured, no one gets access to the
-dashboard, including signed-in Clerk users. This is stricter than any permissive
-dev default and matches the admin-site expectation that internal tools require a
-server-side allowlist. Store only environment variable names and non-secret
-metadata in repo/registry documentation; never record Clerk secret values.
+The dashboard must be Clerk-authenticated and fail closed. The allowed-user list
+is required authorization state: if no allowed dashboard users are configured, no
+one gets access to the dashboard, including signed-in Clerk users. Store only
+environment variable names and non-secret metadata in repo/registry
+documentation; never record Clerk secret values.
 
 Dashboard admins should be able to assign capabilities to users in bundles,
 then inspect and adjust the individual grants created by each bundle. Bundles
@@ -558,10 +541,7 @@ installed and live app-mention/DM/private-channel canaries pass.
 
 - [x] Add Slack app config and secret metadata checks without exposing token
       values.
-- [x] Add initial Clerk-protected codex-chat admin config page for Slack env
-      bootstrap and manifest rendering/validation. This page is deliberately
-      narrower than the future capabilities/admin dashboard and should not grow
-      into the long-term control plane.
+- [x] Remove the legacy codex-chat-hosted admin config page and keep Slack env/admin workflows in Brain or private operator scripts.
 - [x] Add installable Slack app surface (`slack-app/`) with manifest, required
       scopes/events, config/env examples, install metadata template, and local
       validation.

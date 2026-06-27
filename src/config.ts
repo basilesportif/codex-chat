@@ -175,35 +175,6 @@ const configSchema = z.object({
     port: z.number().int().min(0).max(65535).default(49346),
     allowNonLocalhost: z.boolean().default(false),
   }),
-  admin: z
-    .object({
-      enabled: z.boolean().default(false),
-      routePath: z
-        .string()
-        .regex(
-          /^\/[A-Za-z0-9/_-]*\/?$/,
-          "Admin route path must be an absolute path and may end in /",
-        )
-        .default("/admin/codex-chat/"),
-      envFile: z.string().default("~/.config/codex-chat/env"),
-      serviceName: z.string().default("codex-chat.service"),
-      publicBaseUrl: z.string().default(""),
-      clerkPublishableKeyEnv: z.string().default("CLERK_PUBLISHABLE_KEY"),
-      clerkSecretKeyEnv: z.string().default("CLERK_SECRET_KEY"),
-      clerkSignInUrlEnv: z.string().default("CLERK_SIGN_IN_URL"),
-      clerkAllowedEmailsEnv: z.string().default("CLERK_ALLOWED_EMAILS"),
-    })
-    .default({
-      enabled: false,
-      routePath: "/admin/codex-chat/",
-      envFile: "~/.config/codex-chat/env",
-      serviceName: "codex-chat.service",
-      publicBaseUrl: "",
-      clerkPublishableKeyEnv: "CLERK_PUBLISHABLE_KEY",
-      clerkSecretKeyEnv: "CLERK_SECRET_KEY",
-      clerkSignInUrlEnv: "CLERK_SIGN_IN_URL",
-      clerkAllowedEmailsEnv: "CLERK_ALLOWED_EMAILS",
-    }),
   behavior: z.object({
     dir: z.string().default("behavior"),
     entrypoint: z.string().default("AGENTS.md"),
@@ -284,10 +255,6 @@ export type AppConfig = z.infer<typeof configSchema> & {
   slackBotToken?: string;
   slackAppToken?: string;
   openaiApiKey?: string;
-  clerkPublishableKey?: string;
-  clerkSecretKey?: string;
-  clerkSignInUrl?: string;
-  clerkAllowedEmails?: string;
 };
 export type EmployeeDefinitionConfig = z.infer<typeof employeeDefinitionSchema>;
 
@@ -345,17 +312,6 @@ const defaultConfig = configSchema.parse({
     host: "127.0.0.1",
     port: 49346,
     allowNonLocalhost: false,
-  },
-  admin: {
-    enabled: false,
-    routePath: "/admin/codex-chat/",
-    envFile: "~/.config/codex-chat/env",
-    serviceName: "codex-chat.service",
-    publicBaseUrl: "",
-    clerkPublishableKeyEnv: "CLERK_PUBLISHABLE_KEY",
-    clerkSecretKeyEnv: "CLERK_SECRET_KEY",
-    clerkSignInUrlEnv: "CLERK_SIGN_IN_URL",
-    clerkAllowedEmailsEnv: "CLERK_ALLOWED_EMAILS",
   },
   behavior: {
     dir: "behavior",
@@ -583,18 +539,6 @@ function collectEnvOverrides(
       path: ["api", "allowNonLocalhost"],
       parse: parseBooleanEnv,
     },
-    {
-      name: "CODEX_CHAT_ADMIN_ENABLED",
-      path: ["admin", "enabled"],
-      parse: parseBooleanEnv,
-    },
-    { name: "CODEX_CHAT_ADMIN_ROUTE_PATH", path: ["admin", "routePath"] },
-    { name: "CODEX_CHAT_ADMIN_ENV_FILE", path: ["admin", "envFile"] },
-    { name: "CODEX_CHAT_ADMIN_SERVICE_NAME", path: ["admin", "serviceName"] },
-    {
-      name: "CODEX_CHAT_ADMIN_PUBLIC_BASE_URL",
-      path: ["admin", "publicBaseUrl"],
-    },
     { name: "CODEX_CHAT_BASE_URL", path: ["slack", "publicBaseUrl"] },
     { name: "CODEX_CHAT_TELEGRAM_MODE", path: ["telegram", "mode"] },
     {
@@ -677,10 +621,6 @@ export async function loadConfig(
   const slackBotToken = process.env[config.slack.botTokenEnv];
   const slackAppToken = process.env[config.slack.appTokenEnv];
   const openaiApiKey = process.env[config.transcription.apiKeyEnv];
-  const clerkPublishableKey = process.env[config.admin.clerkPublishableKeyEnv];
-  const clerkSecretKey = process.env[config.admin.clerkSecretKeyEnv];
-  const clerkSignInUrl = process.env[config.admin.clerkSignInUrlEnv];
-  const clerkAllowedEmails = process.env[config.admin.clerkAllowedEmailsEnv];
   const ingestApiKeys = parseIngestApiKeys(
     process.env[config.ingest.apiKeysEnv],
   );
@@ -689,8 +629,7 @@ export async function loadConfig(
     enabled:
       config.api.enabled ||
       ingestApiKeys.length > 0 ||
-      config.slack.enabled ||
-      config.admin.enabled,
+      config.slack.enabled,
   };
   const ingest = { ...config.ingest, apiKeys: ingestApiKeys };
   return {
@@ -705,10 +644,6 @@ export async function loadConfig(
     slackBotToken,
     slackAppToken,
     openaiApiKey,
-    clerkPublishableKey,
-    clerkSecretKey,
-    clerkSignInUrl,
-    clerkAllowedEmails,
   };
 }
 

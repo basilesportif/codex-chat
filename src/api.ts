@@ -6,18 +6,7 @@ import {
 } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { Logger } from "pino";
-import {
-  authorizeAdminRequest,
-  type ClerkUserLookup,
-  type VerifyClerkToken,
-} from "./admin-auth.js";
-import { renderAdminPage, renderAdminSignInPage } from "./admin-page.js";
 import type { AppConfig } from "./config.js";
-import {
-  readEnvKeyPresence,
-  resolveEnvFilePath,
-  writeMergedEnvFile,
-} from "./env-file.js";
 import type { FileStore } from "./file-store.js";
 import type { StateStore } from "./state.js";
 import type { Transcriber } from "./transcription.js";
@@ -29,10 +18,6 @@ import {
 } from "./audio-ingest.js";
 import { authenticateIngestRequest, type IngestApiKey } from "./ingest-auth.js";
 import {
-  renderSlackManifest,
-  validateSlackManifest,
-} from "./slack-manifest.js";
-import {
   normalizeSlackEventCallback,
   verifySlackRequestSignature,
   type SlackEventEnvelope,
@@ -43,15 +28,6 @@ const MULTIPART_OVERHEAD_BYTES = 1024 * 1024;
 const SLACK_EVENT_MAX_BYTES = 1024 * 1024;
 const SLACK_IDEMPOTENCY_TTL_MS = 24 * 60 * 60_000;
 const MAX_SEEN_SLACK_EVENTS = 5_000;
-const ADMIN_JSON_MAX_BYTES = 128 * 1024;
-const ADMIN_OPERATIONAL_ENV_VARS = [
-  "CODEX_CHAT_SLACK_ENABLED",
-  "CODEX_CHAT_SLACK_EVENTS_PATH",
-  "CODEX_CHAT_API_ENABLED",
-  "CODEX_CHAT_ADMIN_ENABLED",
-  "CODEX_CHAT_BASE_URL",
-  "CODEX_CHAT_ADMIN_PUBLIC_BASE_URL",
-] as const;
 
 export interface AudioIngestionCompletedEvent {
   keyIdentity: string;
@@ -63,10 +39,6 @@ export interface ApiGatewayHooks {
     event: AudioIngestionCompletedEvent,
   ) => Promise<void>;
   onSlackUserEvent?: (event: UserEvent) => Promise<void>;
-  adminAuthDeps?: {
-    verifyTokenImpl?: VerifyClerkToken;
-    getUser?: ClerkUserLookup;
-  };
 }
 
 interface MultipartFilePart {
@@ -132,8 +104,7 @@ export class ApiGateway {
     }
     if (
       !this.config.slack.enabled &&
-      this.config.ingest.apiKeys.length === 0 &&
-      !this.config.admin.enabled
+      this.config.ingest.apiKeys.length === 0
     ) {
       throw new Error(
         `${this.config.ingest.apiKeysEnv} is required when api.enabled=true`,
@@ -188,53 +159,6 @@ export class ApiGateway {
       `http://${request.headers.host ?? this.config.api.host}`,
     );
     if (
-      this.config.admin.enabled &&
-      request.method === "GET" &&
-      this.isAdminRoutePath(url.pathname)
-    ) {
-      const canonicalPath = this.adminRoutePath();
-      if (url.pathname !== canonicalPath) {
-        response.statusCode = 308;
-        response.setHeader("location", canonicalPath);
-        response.end();
-        return;
-      }
-      const auth = await authorizeAdminRequest(
-        request,
-        this.config,
-        this.hooks.adminAuthDeps,
-      );
-      if (!auth.ok) {
-        this.handleAdminPageAuthFailure(request, response, auth);
-        return;
-      }
-      this.sendHtml(response, 200, renderAdminPage(this.config));
-      return;
-    }
-    if (
-      this.config.admin.enabled &&
-      request.method === "GET" &&
-      url.pathname === this.adminSignInPath()
-    ) {
-      const redirectUrl = safeAdminReturnUrl(
-        url.searchParams.get("redirect_url"),
-        this.adminPublicUrlFromRequest(request),
-      );
-      this.sendHtml(
-        response,
-        200,
-        renderAdminSignInPage(this.config, redirectUrl),
-      );
-      return;
-    }
-    if (
-      this.config.admin.enabled &&
-      url.pathname.startsWith("/api/admin/codex-chat/")
-    ) {
-      await this.handleAdminRequest(request, response, url);
-      return;
-    }
-    if (
       this.config.slack.enabled &&
       request.method === "POST" &&
       url.pathname === this.config.slack.eventsPath
@@ -247,228 +171,6 @@ export class ApiGateway {
       return;
     }
     this.sendJson(response, 404, { error: "not_found" });
-  }
-
-  private async handleAdminRequest(
-    request: IncomingMessage,
-    response: ServerResponse,
-    url: URL,
-  ): Promise<void> {
-    const auth = await authorizeAdminRequest(
-      request,
-      this.config,
-      this.hooks.adminAuthDeps,
-    );
-    if (!auth.ok) {
-      this.sendJson(response, auth.statusCode, { error: auth.error });
-      return;
-    }
-
-    if (
-      request.method === "GET" &&
-      url.pathname === "/api/admin/codex-chat/me"
-    ) {
-      this.sendJson(response, 200, {
-        email: auth.admin.email,
-        userId: auth.admin.userId,
-      });
-      return;
-    }
-    if (
-      request.method === "GET" &&
-      url.pathname === "/api/admin/codex-chat/slack-config"
-    ) {
-      await this.handleAdminSlackConfigGet(request, response);
-      return;
-    }
-    if (
-      request.method === "POST" &&
-      url.pathname === "/api/admin/codex-chat/slack-config"
-    ) {
-      await this.handleAdminSlackConfigPost(request, response);
-      return;
-    }
-    if (
-      request.method === "GET" &&
-      url.pathname === "/api/admin/codex-chat/manifest"
-    ) {
-      await this.handleAdminManifestGet(request, response, url);
-      return;
-    }
-    if (
-      request.method === "POST" &&
-      url.pathname === "/api/admin/codex-chat/manifest/validate"
-    ) {
-      await this.handleAdminManifestValidate(request, response);
-      return;
-    }
-    this.sendJson(response, 404, { error: "not_found" });
-  }
-
-  private handleAdminPageAuthFailure(
-    request: IncomingMessage,
-    response: ServerResponse,
-    auth: Exclude<
-      Awaited<ReturnType<typeof authorizeAdminRequest>>,
-      { ok: true }
-    >,
-  ): void {
-    if (auth.statusCode === 401) {
-      const currentUrl = this.adminPublicUrlFromRequest(request);
-      const signInUrl = this.adminSignInUrlFromRequest(request);
-      signInUrl.searchParams.set("redirect_url", currentUrl);
-      response.statusCode = 302;
-      response.setHeader("location", signInUrl.toString());
-      response.end();
-      return;
-    }
-    this.sendHtml(
-      response,
-      auth.statusCode,
-      renderAdminDeniedPage(
-        auth.error,
-        this.adminSignInUrlFromRequest(request).toString(),
-      ),
-    );
-  }
-
-  private async handleAdminSlackConfigGet(
-    request: IncomingMessage,
-    response: ServerResponse,
-  ): Promise<void> {
-    const envFile = resolveEnvFilePath(this.config.admin.envFile);
-    const trackedVars = adminTrackedEnvVars(this.config);
-    const present = await readEnvKeyPresence(envFile, trackedVars);
-    this.sendJson(response, 200, {
-      envFile,
-      serviceName: this.config.admin.serviceName,
-      requiredVars: trackedVars,
-      trackedVars,
-      present,
-      baseUrl: this.slackPublicBaseUrlFromRequest(request),
-      eventsPath: this.config.slack.eventsPath,
-      restartCommand: restartCommand(this.config.admin.serviceName),
-    });
-  }
-
-  private async handleAdminSlackConfigPost(
-    request: IncomingMessage,
-    response: ServerResponse,
-  ): Promise<void> {
-    let payload: Record<string, unknown>;
-    try {
-      payload = await readJsonBody(request, ADMIN_JSON_MAX_BYTES);
-    } catch {
-      this.sendJson(response, 400, { error: "invalid_json" });
-      return;
-    }
-    const signingSecret = stringField(payload, "signingSecret");
-    const botToken = stringField(payload, "botToken");
-    const appToken = stringField(payload, "appToken");
-    const eventsPath = stringField(payload, "eventsPath");
-    const baseUrl = stringField(payload, "baseUrl");
-
-    if (eventsPath && !eventsPath.startsWith("/")) {
-      this.sendJson(response, 400, {
-        error: "events_path_must_start_with_slash",
-      });
-      return;
-    }
-    if (baseUrl) {
-      try {
-        new URL(baseUrl);
-      } catch {
-        this.sendJson(response, 400, { error: "base_url_invalid" });
-        return;
-      }
-    }
-
-    const updates: Record<string, string> = {};
-    if (signingSecret)
-      updates[this.config.slack.signingSecretEnv] = signingSecret;
-    if (botToken) updates[this.config.slack.botTokenEnv] = botToken;
-    if (appToken) updates[this.config.slack.appTokenEnv] = appToken;
-    if (eventsPath) updates.CODEX_CHAT_SLACK_EVENTS_PATH = eventsPath;
-    if (baseUrl) updates.CODEX_CHAT_BASE_URL = baseUrl;
-
-    if (Object.keys(updates).length === 0) {
-      this.sendJson(response, 400, { error: "no_slack_config_values_provided" });
-      return;
-    }
-
-    updates.CODEX_CHAT_SLACK_ENABLED = "true";
-    updates.CODEX_CHAT_API_ENABLED = "true";
-    updates.CODEX_CHAT_ADMIN_ENABLED = "true";
-    await writeMergedEnvFile(this.config.admin.envFile, updates);
-    this.sendJson(response, 200, {
-      ok: true,
-      message:
-        "Slack env values were written without echoing secrets. Restart codex-chat to apply them.",
-      envFile: resolveEnvFilePath(this.config.admin.envFile),
-      restartRequired: true,
-      restartCommand: restartCommand(this.config.admin.serviceName),
-    });
-  }
-
-  private async handleAdminManifestGet(
-    request: IncomingMessage,
-    response: ServerResponse,
-    url: URL,
-  ): Promise<void> {
-    try {
-      const baseUrl =
-        url.searchParams.get("baseUrl") ||
-        this.slackPublicBaseUrlFromRequest(request);
-      const eventsPath =
-        url.searchParams.get("eventsPath") || this.config.slack.eventsPath;
-      const rendered = await renderSlackManifest({
-        rootDir: this.config.rootDir,
-        baseUrl,
-        eventsPath,
-      });
-      this.sendJson(response, 200, rendered);
-    } catch (error) {
-      this.sendJson(response, 400, {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-
-  private async handleAdminManifestValidate(
-    request: IncomingMessage,
-    response: ServerResponse,
-  ): Promise<void> {
-    let payload: Record<string, unknown>;
-    try {
-      payload = await readJsonBody(request, ADMIN_JSON_MAX_BYTES);
-    } catch {
-      this.sendJson(response, 400, { error: "invalid_json" });
-      return;
-    }
-    const text = stringField(payload, "manifest");
-    if (!text) {
-      this.sendJson(response, 400, { error: "manifest_required" });
-      return;
-    }
-    try {
-      const manifest = JSON.parse(text);
-      const requestUrl = (
-        manifest as {
-          settings?: { event_subscriptions?: { request_url?: string } };
-        }
-      ).settings?.event_subscriptions?.request_url;
-      const expectedEventsPath =
-        typeof requestUrl === "string"
-          ? new URL(requestUrl).pathname
-          : this.config.slack.eventsPath;
-      this.sendJson(response, 200, {
-        validation: validateSlackManifest(manifest, expectedEventsPath),
-      });
-    } catch (error) {
-      this.sendJson(response, 400, {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
   }
 
   private async handleSlackEvents(
@@ -734,52 +436,6 @@ export class ApiGateway {
     response.end(value);
   }
 
-  private slackPublicBaseUrlFromRequest(request: IncomingMessage): string {
-    const configured = this.config.slack.publicBaseUrl.trim();
-    if (configured) return configured;
-    return this.originFromRequest(request);
-  }
-
-  private adminPublicBaseUrlFromRequest(request: IncomingMessage): string {
-    const configured = this.config.admin.publicBaseUrl.trim();
-    if (configured) return configured;
-    return this.originFromRequest(request);
-  }
-
-  private adminRoutePath(): string {
-    return normalizeAdminPath(this.config.admin.routePath);
-  }
-
-  private isAdminRoutePath(pathname: string): boolean {
-    const routePath = this.adminRoutePath();
-    if (pathname === routePath) return true;
-    if (routePath.endsWith("/")) return pathname === routePath.slice(0, -1);
-    return pathname === `${routePath}/`;
-  }
-
-  private adminSignInPath(): string {
-    const routePath = this.adminRoutePath().replace(/\/+$/, "");
-    return `${routePath || ""}/auth/sign-in` || "/auth/sign-in";
-  }
-
-  private adminPublicUrlFromRequest(request: IncomingMessage): string {
-    const base = this.adminPublicBaseUrlFromRequest(request);
-    const url = new URL(this.adminRoutePath(), ensureTrailingSlash(base));
-    return stripTrailingSlashExceptRoot(url.toString());
-  }
-
-  private adminSignInUrlFromRequest(request: IncomingMessage): URL {
-    const base = this.adminPublicBaseUrlFromRequest(request);
-    const fallback = new URL(this.adminSignInPath(), ensureTrailingSlash(base));
-    const configured = this.config.clerkSignInUrl?.trim();
-    if (!configured) return fallback;
-    const configuredUrl = new URL(configured, ensureTrailingSlash(base));
-    return isClerkHostedAccountUrl(configuredUrl) ||
-      configuredUrl.origin !== fallback.origin
-      ? fallback
-      : configuredUrl;
-  }
-
   private originFromRequest(request: IncomingMessage): string {
     const proto =
       firstHeaderValue(request.headers["x-forwarded-proto"]) || "https";
@@ -967,26 +623,6 @@ async function readJsonBody(
   return parsed as Record<string, unknown>;
 }
 
-function stringField(record: Record<string, unknown>, key: string): string {
-  const value = record[key];
-  return typeof value === "string" ? value.trim() : "";
-}
-
-function restartCommand(serviceName: string): string {
-  return `systemctl --user restart ${serviceName} || sudo systemctl restart ${serviceName}`;
-}
-
-function adminTrackedEnvVars(config: AppConfig): string[] {
-  return Array.from(
-    new Set([
-      config.slack.signingSecretEnv,
-      config.slack.botTokenEnv,
-      config.slack.appTokenEnv,
-      ...ADMIN_OPERATIONAL_ENV_VARS,
-    ]),
-  );
-}
-
 function externalUrlFromRequest(
   request: IncomingMessage,
   configuredBaseUrl: string,
@@ -1004,54 +640,3 @@ function externalUrlFromRequest(
   return url.toString();
 }
 
-function normalizeAdminPath(value: string): string {
-  const path = value.trim() || "/admin/codex-chat/";
-  return path.startsWith("/") ? path : `/${path}`;
-}
-
-function ensureTrailingSlash(value: string): string {
-  return value.endsWith("/") ? value : `${value}/`;
-}
-
-function stripTrailingSlashExceptRoot(value: string): string {
-  const url = new URL(value);
-  if (url.pathname.length > 1) url.pathname = url.pathname.replace(/\/+$/, "");
-  return url.toString();
-}
-
-function safeAdminReturnUrl(
-  candidate: string | null,
-  fallback: string,
-): string {
-  if (!candidate) return fallback;
-  try {
-    const parsed = new URL(candidate);
-    const expected = new URL(fallback);
-    return parsed.origin === expected.origin ? parsed.toString() : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function isClerkHostedAccountUrl(url: URL): boolean {
-  const hostname = url.hostname.toLowerCase();
-  return (
-    hostname === "accounts.dev" ||
-    hostname.endsWith(".accounts.dev") ||
-    hostname.endsWith(".accounts.clerk.dev")
-  );
-}
-
-function renderAdminDeniedPage(
-  error: string,
-  signInUrl: string | undefined,
-): string {
-  const escapedError = error
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;");
-  const link = signInUrl
-    ? `<p><a href="${signInUrl.replaceAll("&", "&amp;").replaceAll('"', "&quot;")}">Sign in or switch Clerk account</a></p>`
-    : "";
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Brain Control Plane denied</title><style>body{font:16px system-ui;margin:3rem;max-width:720px;background:#0f172a;color:#e5e7eb}.card{border:1px solid #334155;border-radius:16px;padding:24px;background:#111827}.bad{color:#f87171}a{color:#38bdf8}</style></head><body><section class="card"><h1>Brain Control Plane access denied</h1><p class="bad">${escapedError}</p><p>Admin routes require Clerk auth and a non-empty server-side allowlist.</p>${link}</section></body></html>`;
-}

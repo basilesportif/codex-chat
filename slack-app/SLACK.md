@@ -29,9 +29,7 @@ real signing secrets and tokens in the service environment.
   path is requested.
 - `scripts/validate-manifest.mjs` — dependency-free validation for this app
   surface's manifest and metadata template.
-- `src/admin-*`, `src/env-file.ts`, and `src/slack-manifest.ts` — codex-chat
-  service-side admin page/auth/env/manifest helpers. They live in the service
-  repo because this initial admin page is served by codex-chat itself.
+- `src/slack-manifest.ts` — codex-chat-owned manifest rendering/validation logic used by the checked-in helper scripts and tests. Brain should call these no-secret helpers from a selected checkout instead of using a codex-chat-hosted admin route.
 
 ## Adapter mapping
 
@@ -189,31 +187,18 @@ After install, capture non-secret IDs for operations by copying
 in the workspace/team/app/bot IDs, installer, rollout channels, scopes, and
 Events API URL.
 
-### 4. Enable the Clerk admin page and write codex-chat env/config
+### 4. Configure Slack env through Brain or the private service env
 
-The codex-chat service now serves an initial Clerk-protected admin page at:
+Brain owns the admin/control-plane surface at:
 
 ```text
 https://brain.decisive-outcomes.com/admin
 ```
 
-This is only the Slack bootstrap/config surface. It can write the Slack env vars
-below and render/copy/download/validate the manifest. It is not the future
-capabilities, bundles, users, audit, or running-jobs admin dashboard.
-
-Required admin/auth env names:
-
-- `CODEX_CHAT_ADMIN_ENABLED=true`
-- `CLERK_PUBLISHABLE_KEY`
-- `CLERK_SECRET_KEY`
-- `CODEX_CHAT_ADMIN_PUBLIC_BASE_URL=https://brain.decisive-outcomes.com`
-- `CODEX_CHAT_ADMIN_ROUTE_PATH=/admin`
-- `CLERK_SIGN_IN_URL=https://brain.decisive-outcomes.com/admin/auth/sign-in`
-- `CLERK_ALLOWED_EMAILS=timgalebachukraine@gmail.com,tim.galebach@gmail.com`
-
-If Clerk keys or allowed emails are missing/empty, admin access fails closed.
-The page and admin APIs enforce the allowlist server-side; secret values are not
-shown back in the UI.
+Use Brain to write codex-chat env values, or merge the same keys directly into
+the private codex-chat service env file with hidden prompts. Do not configure
+`CODEX_CHAT_ADMIN_*` or Clerk keys in codex-chat; the codex-chat-hosted admin
+surface and `/api/admin/codex-chat/*` compatibility routes are removed.
 
 Required Slack env names for the current HTTP Events API adapter:
 
@@ -223,42 +208,10 @@ Required Slack env names for the current HTTP Events API adapter:
 - `CODEX_CHAT_SLACK_EVENTS_PATH=/api/slack/events`
 - `CODEX_CHAT_API_ENABLED=true`
 - `CODEX_CHAT_BASE_URL=https://me.galebach.com`
-- `CODEX_CHAT_ADMIN_PUBLIC_BASE_URL=https://brain.decisive-outcomes.com`
-
-After the code is deployed, you can use the admin page to add/replace Slack
-secrets. To bootstrap Clerk env from a shell, prefer the checked-in helper, which
-preserves unmanaged env-file lines, chmods the file to `600`, restarts the
-service, and prints no secret values:
-
-```bash
-ssh -t codex-chat 'cd ~/pkg/tim/codex-chat && git pull --ff-only origin main && scripts/configure-clerk-env.sh'
-```
-
-Use the defaults unless intentionally testing another host:
-
-```text
-CODEX_CHAT_ADMIN_PUBLIC_BASE_URL=https://brain.decisive-outcomes.com
-CODEX_CHAT_ADMIN_ROUTE_PATH=/admin
-CLERK_SIGN_IN_URL=https://brain.decisive-outcomes.com/admin/auth/sign-in
-CLERK_ALLOWED_EMAILS=timgalebachukraine@gmail.com,tim.galebach@gmail.com
-```
-
-Do not use a Clerk-hosted `*.accounts.dev` value for `CLERK_SIGN_IN_URL` here.
-The admin flow is app-hosted, like the working `me.galebach.com/private/pages`
-flow: unauthenticated `/admin` navigations redirect to
-`/admin/auth/sign-in?redirect_url=https://brain.decisive-outcomes.com/admin`, and
-Clerk JS is mounted with force/fallback redirects back to the admin page.
-
-To bootstrap Slack secrets without using the UI, merge the same keys plus
-`SLACK_SIGNING_SECRET`, `SLACK_BOT_TOKEN`, `CODEX_CHAT_SLACK_ENABLED=true`,
-`CODEX_CHAT_SLACK_EVENTS_PATH=/api/slack/events`, `CODEX_CHAT_API_ENABLED=true`,
-and `CODEX_CHAT_BASE_URL=https://me.galebach.com` into the systemd env file.
-Keep using hidden prompts and do not print secret values.
 
 If your service uses TOML instead of env overrides, merge the non-secret
 fragment from `slack-app/codex-chat.slack.example.toml` into the deployed
-`config/codex-chat.toml`. Keep `SLACK_SIGNING_SECRET`, `SLACK_BOT_TOKEN`, and
-Clerk secret values in the environment file, not TOML.
+`config/codex-chat.toml`. Keep `SLACK_SIGNING_SECRET` and `SLACK_BOT_TOKEN` in the codex-chat environment file, not TOML. Brain Clerk secrets live only in the Brain admin environment.
 
 ### 5. Caddy route/proxy assumptions
 
@@ -266,8 +219,8 @@ The Events API URL must terminate HTTPS and reverse-proxy to the codex-chat API
 listener. The default app/runtime assumption is:
 
 - Slack public URL: `https://me.galebach.com/api/slack/events`
-- admin public URL: `https://brain.decisive-outcomes.com/admin`
-- codex-chat API path: `/api/slack/events` for Slack and `/admin` plus `/admin/auth/sign-in` and `/api/admin/codex-chat/*` for admin
+- Brain admin URL: `https://brain.decisive-outcomes.com/admin` (served by `brain-admin.service`, not codex-chat)
+- codex-chat API path: `/api/slack/events` for Slack runtime delivery
 - local service listener: `127.0.0.1:49346` when using the example TOML
 - Caddy/nginx/proxy preserves the path and forwards Slack's signed HTTP request
   body and headers unchanged
@@ -279,7 +232,7 @@ service listener without printing secrets:
 ssh codex-chat 'set -euo pipefail
 printf "listening ports:\n"; ss -ltn | grep -E ":(80|443|49346)\b" || true
 printf "candidate proxy routes:\n"
-sudo sh -c '\''grep -RhsE "reverse_proxy|codex-chat|49346|api/slack/events|admin|me\.galebach\.com|brain\.decisive(outcomes|-outcomes)\.com" /etc/caddy /etc/nginx 2>/dev/null || true'\''
+sudo sh -c '\''grep -RhsE "reverse_proxy|codex-chat|49346|49347|api/slack/events|api/admin/brain|me\.galebach\.com|brain\.decisive-outcomes\.com" /etc/caddy /etc/nginx 2>/dev/null || true'\''
 '
 ```
 

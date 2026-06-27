@@ -53,6 +53,15 @@ codex-chat jobs list
 - Employee runtime state/proposals: `data/state/employees/`
 - Disposable generated-image staging: `data/artifacts/generated-images/`
 
+
+## Slack Events API
+
+`codex-chat` owns the Slack runtime adapter and receives signed Slack Events API
+requests at `/api/slack/events` by default. Brain owns the admin/control-plane
+surface; this service intentionally does not serve `/admin/codex-chat` or
+`/api/admin/codex-chat/*` compatibility routes. Use `slack-app/SLACK.md` and the
+no-secret manifest scripts under `slack-app/scripts/` for install/update work.
+
 ## Audio Ingestion API
 
 `POST /api/ingest/audio` accepts authenticated `multipart/form-data` uploads

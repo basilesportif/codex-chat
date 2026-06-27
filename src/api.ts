@@ -44,9 +44,7 @@ const SLACK_EVENT_MAX_BYTES = 1024 * 1024;
 const SLACK_IDEMPOTENCY_TTL_MS = 24 * 60 * 60_000;
 const MAX_SEEN_SLACK_EVENTS = 5_000;
 const ADMIN_JSON_MAX_BYTES = 128 * 1024;
-const ADMIN_REQUIRED_ENV_VARS = [
-  "SLACK_SIGNING_SECRET",
-  "SLACK_BOT_TOKEN",
+const ADMIN_OPERATIONAL_ENV_VARS = [
   "CODEX_CHAT_SLACK_ENABLED",
   "CODEX_CHAT_SLACK_EVENTS_PATH",
   "CODEX_CHAT_API_ENABLED",
@@ -339,11 +337,13 @@ export class ApiGateway {
     response: ServerResponse,
   ): Promise<void> {
     const envFile = resolveEnvFilePath(this.config.admin.envFile);
-    const present = await readEnvKeyPresence(envFile, ADMIN_REQUIRED_ENV_VARS);
+    const trackedVars = adminTrackedEnvVars(this.config);
+    const present = await readEnvKeyPresence(envFile, trackedVars);
     this.sendJson(response, 200, {
       envFile,
       serviceName: this.config.admin.serviceName,
-      requiredVars: ADMIN_REQUIRED_ENV_VARS,
+      requiredVars: trackedVars,
+      trackedVars,
       present,
       baseUrl: this.slackPublicBaseUrlFromRequest(request),
       eventsPath: this.config.slack.eventsPath,
@@ -365,39 +365,40 @@ export class ApiGateway {
     const signingSecret = stringField(payload, "signingSecret");
     const botToken = stringField(payload, "botToken");
     const appToken = stringField(payload, "appToken");
-    const eventsPath =
-      stringField(payload, "eventsPath") || this.config.slack.eventsPath;
-    const baseUrl =
-      stringField(payload, "baseUrl") ||
-      this.slackPublicBaseUrlFromRequest(request);
-    if (!signingSecret || !botToken) {
-      this.sendJson(response, 400, {
-        error: "signing_secret_and_bot_token_required",
-      });
-      return;
-    }
-    if (!eventsPath.startsWith("/")) {
+    const eventsPath = stringField(payload, "eventsPath");
+    const baseUrl = stringField(payload, "baseUrl");
+
+    if (eventsPath && !eventsPath.startsWith("/")) {
       this.sendJson(response, 400, {
         error: "events_path_must_start_with_slash",
       });
       return;
     }
-    try {
-      new URL(baseUrl);
-    } catch {
-      this.sendJson(response, 400, { error: "base_url_invalid" });
+    if (baseUrl) {
+      try {
+        new URL(baseUrl);
+      } catch {
+        this.sendJson(response, 400, { error: "base_url_invalid" });
+        return;
+      }
+    }
+
+    const updates: Record<string, string> = {};
+    if (signingSecret)
+      updates[this.config.slack.signingSecretEnv] = signingSecret;
+    if (botToken) updates[this.config.slack.botTokenEnv] = botToken;
+    if (appToken) updates[this.config.slack.appTokenEnv] = appToken;
+    if (eventsPath) updates.CODEX_CHAT_SLACK_EVENTS_PATH = eventsPath;
+    if (baseUrl) updates.CODEX_CHAT_BASE_URL = baseUrl;
+
+    if (Object.keys(updates).length === 0) {
+      this.sendJson(response, 400, { error: "no_slack_config_values_provided" });
       return;
     }
-    const updates: Record<string, string> = {
-      SLACK_SIGNING_SECRET: signingSecret,
-      SLACK_BOT_TOKEN: botToken,
-      CODEX_CHAT_SLACK_ENABLED: "true",
-      CODEX_CHAT_SLACK_EVENTS_PATH: eventsPath,
-      CODEX_CHAT_API_ENABLED: "true",
-      CODEX_CHAT_ADMIN_ENABLED: "true",
-      CODEX_CHAT_BASE_URL: baseUrl,
-    };
-    if (appToken) updates.SLACK_APP_TOKEN = appToken;
+
+    updates.CODEX_CHAT_SLACK_ENABLED = "true";
+    updates.CODEX_CHAT_API_ENABLED = "true";
+    updates.CODEX_CHAT_ADMIN_ENABLED = "true";
     await writeMergedEnvFile(this.config.admin.envFile, updates);
     this.sendJson(response, 200, {
       ok: true,
@@ -973,6 +974,17 @@ function stringField(record: Record<string, unknown>, key: string): string {
 
 function restartCommand(serviceName: string): string {
   return `systemctl --user restart ${serviceName} || sudo systemctl restart ${serviceName}`;
+}
+
+function adminTrackedEnvVars(config: AppConfig): string[] {
+  return Array.from(
+    new Set([
+      config.slack.signingSecretEnv,
+      config.slack.botTokenEnv,
+      config.slack.appTokenEnv,
+      ...ADMIN_OPERATIONAL_ENV_VARS,
+    ]),
+  );
 }
 
 function externalUrlFromRequest(

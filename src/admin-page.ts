@@ -167,14 +167,14 @@ export function renderAdminPage(config: AppConfig): string {
       <div class="grid">
         <section class="card">
           <h2>Slack env config</h2>
-          <p class="muted">Secrets are write-only here. Existing values are never displayed.</p>
+          <p class="muted">Secrets are write-only here. Existing values are never displayed. Fill only the fields you want to add or replace; blanks preserve current values.</p>
           <div id="config-status" class="status muted">Loading current status…</div>
           <form id="slack-form">
             <label>Slack public base URL <input name="baseUrl" placeholder="https://me.galebach.com" value="${htmlEscape(publicBaseUrl)}" /></label>
             <label>Slack Events path <input name="eventsPath" value="${htmlEscape(eventsPath)}" /></label>
-            <label>Slack Signing Secret <input name="signingSecret" type="password" autocomplete="off" placeholder="paste to add/replace" /></label>
-            <label>Slack Bot Token <input name="botToken" type="password" autocomplete="off" placeholder="xoxb-…" /></label>
-            <label>Slack App Token <input name="appToken" type="password" autocomplete="off" placeholder="optional; not needed for HTTP Events API" /></label>
+            <label>Slack Signing Secret <input name="signingSecret" type="password" autocomplete="off" placeholder="paste to add/replace; blank preserves" /></label>
+            <label>Slack Bot Token <input name="botToken" type="password" autocomplete="off" placeholder="optional for saving; needed for Slack posting/canaries" /></label>
+            <label>Slack App Token <input name="appToken" type="password" autocomplete="off" placeholder="optional; blank preserves" /></label>
             <div class="row" style="margin-top:16px"><button type="submit">Write env file</button><button type="button" id="reload-config" class="secondary">Reload status</button></div>
           </form>
           <p class="muted">After writing env vars, restart the service manually unless you used the SSH bootstrap command.</p>
@@ -302,7 +302,8 @@ export function renderAdminPage(config: AppConfig): string {
         'service: ' + data.serviceName,
         'restart after save: ' + data.restartCommand,
         '',
-        ...data.requiredVars.map((name) => name + ': ' + (data.present[name] ? 'present' : 'missing'))
+        'tracked env vars:',
+        ...(data.trackedVars || data.requiredVars || []).map((name) => name + ': ' + (data.present[name] ? 'present' : 'missing'))
       ];
       setText('config-status', lines.join('\\n'));
       document.querySelector('[name="baseUrl"]').value = data.baseUrl || CONFIG.defaultBaseUrl || '';

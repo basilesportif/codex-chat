@@ -470,4 +470,86 @@ describe("admin routes", () => {
     expect(written).toContain("SLACK_SIGNING_SECRET='secret-value'");
     expect((await stat(envFile)).mode & 0o777).toBe(0o600);
   });
+
+  test("Slack config route allows signing-secret-only update and preserves omitted tokens", async () => {
+    const root = await tempRoot();
+    const envFile = join(root, "env");
+    await writeFile(
+      envFile,
+      [
+        "SLACK_BOT_TOKEN='xoxb-existing-value'",
+        "SLACK_APP_TOKEN='xapp-existing-value'",
+        "CODEX_CHAT_BASE_URL='https://existing.example.com'",
+        "",
+      ].join("\n"),
+      { mode: 0o600 },
+    );
+    const { baseUrl } = await apiHarness(envFile, {
+      adminAuthDeps: {
+        verifyTokenImpl: vi.fn(async () => ({ sub: "user_123" }) as never),
+        getUser: vi.fn(async () => ({
+          primaryEmailAddressId: "email_1",
+          emailAddresses: [
+            { id: "email_1", emailAddress: "tim.galebach@gmail.com" },
+          ],
+        })),
+      },
+    });
+
+    const authed = await authFetch(
+      baseUrl,
+      "/api/admin/codex-chat/slack-config",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          signingSecret: "new-signing-secret",
+        }),
+      },
+    );
+
+    expect(authed.status).toBe(200);
+    const payload = (await authed.json()) as { message: string };
+    expect(JSON.stringify(payload)).not.toContain("new-signing-secret");
+    const written = await readFile(envFile, "utf8");
+    expect(written).toContain("SLACK_SIGNING_SECRET='new-signing-secret'");
+    expect(written).toContain("SLACK_BOT_TOKEN='xoxb-existing-value'");
+    expect(written).toContain("SLACK_APP_TOKEN='xapp-existing-value'");
+    expect(written).toContain(
+      "CODEX_CHAT_BASE_URL='https://existing.example.com'",
+    );
+  });
+
+  test("Slack config route does not create a bot token when only signing secret is provided", async () => {
+    const root = await tempRoot();
+    const envFile = join(root, "env");
+    const { baseUrl } = await apiHarness(envFile, {
+      adminAuthDeps: {
+        verifyTokenImpl: vi.fn(async () => ({ sub: "user_123" }) as never),
+        getUser: vi.fn(async () => ({
+          primaryEmailAddressId: "email_1",
+          emailAddresses: [
+            { id: "email_1", emailAddress: "tim.galebach@gmail.com" },
+          ],
+        })),
+      },
+    });
+
+    const authed = await authFetch(
+      baseUrl,
+      "/api/admin/codex-chat/slack-config",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          signingSecret: "signing-secret-without-bot-token",
+        }),
+      },
+    );
+
+    expect(authed.status).toBe(200);
+    const written = await readFile(envFile, "utf8");
+    expect(written).toContain(
+      "SLACK_SIGNING_SECRET='signing-secret-without-bot-token'",
+    );
+    expect(written).not.toContain("SLACK_BOT_TOKEN=");
+  });
 });

@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const DEFAULT_BASE_URL = "https://me.galebach.com";
+const DEFAULT_BASE_URL = "https://brain.decisive-outcomes.com";
 const DEFAULT_EVENTS_PATH = "/api/slack/events";
 const DEFAULT_FILENAME = "codex-chat.slack.manifest.json";
 const secretPatterns = [/xox[abprs]-[A-Za-z0-9-]{12,}/, /xapp-[A-Za-z0-9-]{12,}/];

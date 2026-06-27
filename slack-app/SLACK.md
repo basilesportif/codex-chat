@@ -107,14 +107,14 @@ match the service path (`/api/slack/events` by default). The current expected
 Slack Events URL for the deployed app is:
 
 ```text
-https://me.galebach.com/api/slack/events
+https://brain.decisive-outcomes.com/api/slack/events
 ```
 
 ### 1. Render and validate the Slack manifest
 
 From your local machine, this short command asks the remote `codex-chat` host
 to pull the latest checkout, render the manifest with the default Events API URL
-`https://me.galebach.com/api/slack/events`, validate it, and print only JSON to
+`https://brain.decisive-outcomes.com/api/slack/events`, validate it, and print only JSON to
 stdout. Redirect it wherever you want the local copy to land:
 
 ```bash
@@ -146,7 +146,7 @@ current working directory:
 
 ```bash
 node slack-app/scripts/render-manifest.mjs --output-dir ~/Downloads
-node slack-app/scripts/render-manifest.mjs --base-url https://me.galebach.com --events-path /api/slack/events > ./codex-chat.slack.manifest.json
+node slack-app/scripts/render-manifest.mjs --base-url https://brain.decisive-outcomes.com --events-path /api/slack/events > ./codex-chat.slack.manifest.json
 node slack-app/scripts/validate-manifest.mjs ./codex-chat.slack.manifest.json
 ```
 
@@ -207,7 +207,7 @@ Required Slack env names for the current HTTP Events API adapter:
 - `CODEX_CHAT_SLACK_ENABLED=true`
 - `CODEX_CHAT_SLACK_EVENTS_PATH=/api/slack/events`
 - `CODEX_CHAT_API_ENABLED=true`
-- `CODEX_CHAT_BASE_URL=https://me.galebach.com`
+- `CODEX_CHAT_BASE_URL=https://brain.decisive-outcomes.com`
 
 If your service uses TOML instead of env overrides, merge the non-secret
 fragment from `slack-app/codex-chat.slack.example.toml` into the deployed
@@ -218,7 +218,7 @@ fragment from `slack-app/codex-chat.slack.example.toml` into the deployed
 The Events API URL must terminate HTTPS and reverse-proxy to the codex-chat API
 listener. The default app/runtime assumption is:
 
-- Slack public URL: `https://me.galebach.com/api/slack/events`
+- Slack public URL: `https://brain.decisive-outcomes.com/api/slack/events`
 - Brain admin URL: `https://brain.decisive-outcomes.com/admin` (served by `brain-admin.service`, not codex-chat)
 - codex-chat API path: `/api/slack/events` for Slack runtime delivery
 - local service listener: `127.0.0.1:49346` when using the example TOML
@@ -301,7 +301,7 @@ Ask codex-chat something like:
 ## Troubleshooting notes
 
 - **URL verification fails:** confirm the manifest's request URL is exactly
-  `https://me.galebach.com/api/slack/events` for the current Slack deployment, the
+  `https://brain.decisive-outcomes.com/api/slack/events` for the current Slack deployment, the
   proxy forwards that path to the codex-chat API listener, and
   `CODEX_CHAT_SLACK_EVENTS_PATH` is `/api/slack/events` unless the manifest was
   rendered with the same custom path.

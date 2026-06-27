@@ -52,7 +52,7 @@ adminUserIds = []
 enabled = false
 eventsPath = "/api/slack/events"
 # Public origin used when rendering Slack Events API URLs.
-publicBaseUrl = "https://me.galebach.com"
+publicBaseUrl = "https://brain.decisive-outcomes.com"
 signingSecretEnv = "SLACK_SIGNING_SECRET"
 botTokenEnv = "SLACK_BOT_TOKEN"
 appTokenEnv = "SLACK_APP_TOKEN"

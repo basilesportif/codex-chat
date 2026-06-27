@@ -8,12 +8,15 @@ active admin URL is:
 https://brain.decisive-outcomes.com/admin
 ```
 
-`codex-chat` keeps only runtime HTTP contracts it must own, including the Slack
-Events API (`/api/slack/events` by default) and runtime ingestion endpoints such
-as `/api/ingest/audio`. Slack manifest rendering/validation remains available
-from checked-in no-secret scripts under `slack-app/`; Brain can call those from
-the selected `codex-chat` checkout instead of depending on a codex-chat-hosted
-admin route.
+`codex-chat` keeps only runtime HTTP contracts it must own, including the
+internal Slack Events API handler (`/api/slack/events` by default) and runtime
+ingestion endpoints such as `/api/ingest/audio`. The public Slack Events URL is
+`https://brain.decisive-outcomes.com/api/slack/events`; Brain/Caddy
+reverse-proxies the raw Slack request to codex-chat so codex-chat still verifies
+Slack signatures and owns runtime behavior. Slack manifest rendering/validation
+remains available from checked-in no-secret scripts under `slack-app/`; Brain can
+call those from the selected `codex-chat` checkout instead of depending on a
+codex-chat-hosted admin route.
 
 Caddy should route Brain admin traffic to `brain-admin.service` and Slack Events
 traffic to the codex-chat API listener. Do not keep redirects or proxy rules for
@@ -21,6 +24,11 @@ the removed `/admin/codex-chat` or `/api/admin/codex-chat/*` surfaces:
 
 ```caddyfile
 brain.decisive-outcomes.com {
+	handle /api/slack/events {
+		# Preserve Slack headers/body for codex-chat signature verification.
+		reverse_proxy 127.0.0.1:49346
+	}
+
 	@admin path /admin /admin/*
 	handle @admin {
 		reverse_proxy 127.0.0.1:49347
@@ -39,13 +47,6 @@ brain.decisive-outcomes.com {
 	handle {
 		respond "not found" 404
 	}
-}
-
-me.galebach.com {
-	handle /api/slack/events {
-		reverse_proxy 127.0.0.1:49346
-	}
-	# other codex-chat-web/private page handlers live here
 }
 ```
 

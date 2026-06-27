@@ -156,7 +156,7 @@ const configSchema = z.object({
           "Slack events path must be an absolute URL path",
         )
         .default("/api/slack/events"),
-      publicBaseUrl: z.string().default("https://me.galebach.com"),
+      publicBaseUrl: z.string().default("https://brain.decisive-outcomes.com"),
       signingSecretEnv: z.string().default("SLACK_SIGNING_SECRET"),
       botTokenEnv: z.string().default("SLACK_BOT_TOKEN"),
       appTokenEnv: z.string().default("SLACK_APP_TOKEN"),
@@ -164,7 +164,7 @@ const configSchema = z.object({
     .default({
       enabled: false,
       eventsPath: "/api/slack/events",
-      publicBaseUrl: "https://me.galebach.com",
+      publicBaseUrl: "https://brain.decisive-outcomes.com",
       signingSecretEnv: "SLACK_SIGNING_SECRET",
       botTokenEnv: "SLACK_BOT_TOKEN",
       appTokenEnv: "SLACK_APP_TOKEN",
@@ -302,7 +302,7 @@ const defaultConfig = configSchema.parse({
   slack: {
     enabled: false,
     eventsPath: "/api/slack/events",
-    publicBaseUrl: "https://me.galebach.com",
+    publicBaseUrl: "https://brain.decisive-outcomes.com",
     signingSecretEnv: "SLACK_SIGNING_SECRET",
     botTokenEnv: "SLACK_BOT_TOKEN",
     appTokenEnv: "SLACK_APP_TOKEN",

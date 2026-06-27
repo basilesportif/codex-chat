@@ -111,7 +111,7 @@ userIds = [12345]
     process.env.TELEGRAM_BOT_TOKEN = "token-from-default-env";
     process.env.CUSTOM_SLACK_SIGNING_SECRET = "slack-signing-secret";
     process.env.CUSTOM_SLACK_BOT_TOKEN = "xoxb-test-token";
-    process.env.CODEX_CHAT_BASE_URL = "https://me.galebach.com";
+    process.env.CODEX_CHAT_BASE_URL = "https://brain.decisive-outcomes.com";
     const path = await tempConfig(`
 version = 1
 
@@ -135,7 +135,7 @@ botTokenEnv = "CUSTOM_SLACK_BOT_TOKEN"
     expect(config.slack.enabled).toBe(true);
     expect(config.slack.eventsPath).toBe("/api/custom-slack/events");
     expect(config.api.enabled).toBe(true);
-    expect(config.slack.publicBaseUrl).toBe("https://me.galebach.com");
+    expect(config.slack.publicBaseUrl).toBe("https://brain.decisive-outcomes.com");
     expect(config.slackSigningSecret).toBe("slack-signing-secret");
     expect(config.slackBotToken).toBe("xoxb-test-token");
   });

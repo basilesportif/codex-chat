@@ -20,6 +20,8 @@ class StubTranscriber implements Transcriber {
 beforeEach(() => {
   process.env = { ...originalEnv };
   process.env.CODEXCHAT_INGEST_API_KEYS = "shortcut:test-secret,backup:backup-secret";
+  delete process.env.CODEX_CHAT_SLACK_ENABLED;
+  delete process.env.CODEX_CHAT_SLACK_EVENTS_PATH;
   delete process.env.CODEX_CHAT_API_PORT;
   delete process.env.CODEXCHAT_AUDIO_INGEST_MAX_MB;
 });

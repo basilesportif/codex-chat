@@ -297,13 +297,15 @@ export function renderAdminPage(config: AppConfig): string {
 
     async function loadConfigStatus() {
       const data = await api('/api/admin/codex-chat/slack-config');
+      const present = data.present || {};
+      const trackedVars = data.trackedVars || data.requiredVars || [];
       const lines = [
         'env file: ' + data.envFile,
         'service: ' + data.serviceName,
         'restart after save: ' + data.restartCommand,
         '',
         'tracked env vars:',
-        ...(data.trackedVars || data.requiredVars || []).map((name) => name + ': ' + (data.present[name] ? 'present' : 'missing'))
+        ...trackedVars.map((name) => name + ': ' + (present[name] ? 'present' : 'missing'))
       ];
       setText('config-status', lines.join('\\n'));
       document.querySelector('[name="baseUrl"]').value = data.baseUrl || CONFIG.defaultBaseUrl || '';

@@ -31,7 +31,10 @@ runtime events through surface-specific adapters.
 - Keep the company brain state and retrieval layer ready for a central server
   with many subagents, persisted summaries, indexes, and context compression.
 - Move near-term admin/control-plane functions into Brain rather than expanding
-  the bootstrap `/admin` page beyond Slack setup/diagnostics.
+  the bootstrap `/admin` page beyond Slack setup/diagnostics. Phase 3 has
+  started in the Brain repo with a Clerk-protected `brain-web-admin` skeleton
+  for health/settings, write-only codex-chat env/config entries, and approved
+  deploy/restart operations.
 
 ## Current state to preserve
 
@@ -60,6 +63,11 @@ Based on the current repo/system state:
       codex-chat service at `/admin` for Slack env bootstrap and
       manifest rendering/copy/download/validation. This is a bootstrap/temporary
       surface, not the long-term admin/control plane.
+- [x] Brain Phase 3 control-plane implementation has started outside
+      `codex-chat`: the Brain repo now owns an initial Clerk-protected
+      `brain-web-admin` service skeleton for health/settings, safe write-only
+      codex-chat env/config updates, and approved codex-chat deploy/restart
+      operations.
 - [ ] Durable company-mode capability state exists outside long-term JSON files.
 - [ ] Full admin dashboard exists for users, channel mappings, capabilities,
       audits, and running jobs. The initial Slack config page is not that full

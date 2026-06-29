@@ -33,6 +33,7 @@ Scope: planning only; no runtime code changes in this commit.
 - OpenRouter has a beta OpenAI-compatible Responses API but documents it as stateless; each request must provide its full input context and tool-call outputs, so Codex's stateful app-server thread semantics should start with `wire_api = "chat"` unless a specific Responses-profile smoke test proves compatibility. Source: OpenRouter Responses API Beta docs consulted 2026-06-29.
 - OpenRouter prompt-cache/sticky routing can be account/model/conversation keyed, and docs describe optional `session_id` for sticky routing. Current Codex provider config and codex-chat dispatch state do not expose a first-class OpenRouter `session_id`, so MVP should not depend on sticky routing for correctness. Source: OpenRouter Prompt Caching docs consulted 2026-06-29.
 - OpenRouter service tiers are provider/model dependent top-level `service_tier` request values such as `flex` and `priority`, which do not map directly to codex-chat's current OpenAI Fast-tier behavior. MVP should default to omitting Codex `serviceTier`/`features.fast_mode` for explicit OpenRouter profiles unless an operator has verified and mapped the selected model/provider tier. Source: OpenRouter Service Tiers docs consulted 2026-06-29.
+- Chosen first OpenRouter smoke-test models as of 2026-06-29: primary `z-ai/glm-5.2`; backup `qwen/qwen3-coder`. `z-ai/glm-5.2` is preferred because OpenRouter advertises tool, structured-output, and reasoning/reasoning-effort parameters, a 1M context window, long-horizon agentic/coding positioning, and current pricing of $0.95 input / $3 output per 1M tokens. `qwen/qwen3-coder` is the cheaper backup at $0.22 input / $1.80 output per 1M tokens with tool and structured-output support, but the smoke test should keep context modest because pricing/provider limits vary past large contexts and it does not advertise the same reasoning controls. Source: OpenRouter model pages/API consulted 2026-06-29.
 
 ## Target design
 
@@ -119,7 +120,7 @@ OpenRouter via OpenAI-compatible Chat Completions:
 
 ```toml
 # ~/.codex/openrouter.config.toml
-model = "anthropic/claude-sonnet-4.5"
+model = "z-ai/glm-5.2"
 model_provider = "openrouter"
 model_reasoning_effort = "medium"
 # service_tier intentionally unset unless verified against the selected model/provider.
@@ -160,9 +161,10 @@ This sequence intentionally stops before main-loop provider switching, Employee 
 1. **Codex profile prerequisite**
    - Operator creates `~/.codex/openrouter.config.toml` on the service account, not in repo `.codex/config.toml`, because Codex ignores provider/profile/auth-sensitive keys from project config.
    - Service environment contains `OPENROUTER_API_KEY`; docs/examples must show only the env var name, never a value.
-   - Manual preflight outside codex-chat:
+   - Manual preflight outside codex-chat; run the primary first, then the backup only if the primary is unavailable or fails for provider/model reasons:
      ```bash
-     codex --profile openrouter exec --model anthropic/claude-sonnet-4.5 "Reply with: openrouter ok"
+     codex --profile openrouter exec --model z-ai/glm-5.2 "Reply with: openrouter ok"
+     codex --profile openrouter exec --model qwen/qwen3-coder "Reply with: openrouter backup ok"
      ```
 
 2. **Config/schema additions, default no-op** — implemented 2026-06-29 in codex-chat/Brain for subagent profile/provider plumbing; live OpenRouter smoke still requires key entry and codex-chat restart.
@@ -195,13 +197,13 @@ This sequence intentionally stops before main-loop provider switching, Employee 
      ```bash
      systemctl --user restart codex-chat.service
      ```
-   - Smoke dispatch request should use `subagents.backend = "codex_app_server"`, `codexProfile = "openrouter"`, `modelProvider = "openrouter"`, `model = "anthropic/claude-sonnet-4.5"` or another verified OpenRouter slug, `serviceTierMode = "omit"`, and a trivial task such as writing a short final answer plus running one safe read-only command.
+   - Smoke dispatch request should use `subagents.backend = "codex_app_server"`, `codexProfile = "openrouter"`, `modelProvider = "openrouter"`, `model = "z-ai/glm-5.2"` first; if unavailable or failing for provider reasons, retry the same smoke with backup `model = "qwen/qwen3-coder"`, `serviceTierMode = "omit"`, and a trivial task such as writing a short final answer plus running one safe read-only command.
 
 ### MVP config example (no secrets)
 
 ```toml
 # ~/.codex/openrouter.config.toml -- service account user-level profile
-model = "anthropic/claude-sonnet-4.5"
+model = "z-ai/glm-5.2"
 model_provider = "openrouter"
 model_reasoning_effort = "medium"
 

@@ -1,9 +1,10 @@
 import type { OutputTarget } from "./types.js";
 import type { SlackEventEnvelope, SlackMessageLikeEvent, SlackSendTextResult } from "./slack.js";
 import { slackTargetChannelId, slackTargetThreadTs } from "./runtime.js";
+import type { HydratedSlackContext, SlackSourceKind } from "./slack-context.js";
 import { nowIso } from "./util.js";
 
-export type SlackTelemetryDirection = "inbound" | "outbound";
+export type SlackTelemetryDirection = "inbound" | "outbound" | "context" | "subagent";
 export type SlackTelemetryOutcome =
   | "accepted"
   | "ignored"
@@ -12,7 +13,10 @@ export type SlackTelemetryOutcome =
   | "url_verification"
   | "attempt"
   | "success"
-  | "failure";
+  | "failure"
+  | "hydrated"
+  | "fallback"
+  | "callback_routed";
 
 export interface SlackTelemetryObservation {
   schemaVersion: 1;
@@ -38,6 +42,16 @@ export interface SlackTelemetryObservation {
   outboundResultCount?: number;
   outboundResultChannels?: string[];
   outboundResultTs?: string[];
+  sourceKind?: SlackSourceKind;
+  selectedSources?: string[];
+  messagesIncluded?: number;
+  contextTruncated?: boolean;
+  fallbackCodes?: string[];
+  promptExposed?: boolean;
+  outputThreadTsPresent?: boolean;
+  conversationSessionId?: string;
+  correlationId?: string;
+  jobId?: string;
 }
 
 export interface SlackTelemetrySummary {
@@ -50,6 +64,8 @@ export interface SlackTelemetrySummary {
   lastOutboundAttempt?: SlackTelemetryObservation;
   lastOutboundSuccess?: SlackTelemetryObservation;
   lastOutboundFailure?: SlackTelemetryObservation;
+  lastContextDecision?: SlackTelemetryObservation;
+  lastSubagentRouting?: SlackTelemetryObservation;
 }
 
 export interface SlackTelemetryStatus extends SlackTelemetrySummary {
@@ -91,6 +107,8 @@ export function updateSlackTelemetrySummary(
   if (observation.direction === "outbound" && observation.outcome === "attempt") summary.lastOutboundAttempt = observation;
   if (observation.direction === "outbound" && observation.outcome === "success") summary.lastOutboundSuccess = observation;
   if (observation.direction === "outbound" && observation.outcome === "failure") summary.lastOutboundFailure = observation;
+  if (observation.direction === "context") summary.lastContextDecision = observation;
+  if (observation.direction === "subagent") summary.lastSubagentRouting = observation;
   return summary;
 }
 
@@ -194,6 +212,68 @@ export function slackOutboundTelemetryObservation(input: {
   });
 }
 
+export function slackContextTelemetryObservation(input: {
+  event: {
+    outputTarget?: OutputTarget;
+    conversationSessionId?: string;
+    correlationId?: string;
+    metadata?: Record<string, unknown>;
+  };
+  context: HydratedSlackContext;
+  promptExposed: boolean;
+  observedAt?: string;
+}): SlackTelemetryObservation {
+  const sourceOnly = input.context.selectedSources.every((source) => source === "source_event_only");
+  return sanitizeSlackTelemetryObservation({
+    schemaVersion: 1,
+    observedAt: input.observedAt ?? nowIso(),
+    direction: "context",
+    outcome: input.context.fallbackCodes.length > 0 && sourceOnly ? "fallback" : "hydrated",
+    teamId: stringValue(input.event.metadata?.slackTeamId) ?? input.event.outputTarget?.teamId,
+    enterpriseId: stringValue(input.event.metadata?.slackEnterpriseId),
+    channelId: stringValue(input.event.metadata?.slackChannelId) ?? input.event.outputTarget?.channelId,
+    channelType: stringValue(input.event.metadata?.slackChannelType),
+    userId: stringValue(input.event.metadata?.slackUserId),
+    messageTs: stringValue(input.event.metadata?.slackMessageTs) ?? input.event.outputTarget?.messageId,
+    threadTs: stringValue(input.event.metadata?.slackReplyThreadTs) ?? slackTargetThreadTs(input.event.outputTarget),
+    eventId: stringValue(input.event.metadata?.slackEventId),
+    sourceKind: input.context.sourceKind,
+    selectedSources: input.context.selectedSources,
+    messagesIncluded: input.context.messagesIncluded,
+    contextTruncated: input.context.truncated,
+    fallbackCodes: input.context.fallbackCodes,
+    promptExposed: input.promptExposed,
+    outputThreadTsPresent: Boolean(slackTargetThreadTs(input.event.outputTarget) ?? input.event.metadata?.slackReplyThreadTs),
+    conversationSessionId: input.event.conversationSessionId,
+    correlationId: input.event.correlationId,
+  });
+}
+
+export function slackSubagentRoutingTelemetryObservation(input: {
+  target?: OutputTarget;
+  jobId?: string;
+  conversationSessionId?: string;
+  correlationId?: string;
+  outcome?: Extract<SlackTelemetryOutcome, "callback_routed" | "failure">;
+  reason?: string;
+  observedAt?: string;
+}): SlackTelemetryObservation {
+  return sanitizeSlackTelemetryObservation({
+    schemaVersion: 1,
+    observedAt: input.observedAt ?? nowIso(),
+    direction: "subagent",
+    outcome: input.outcome ?? "callback_routed",
+    reason: input.reason,
+    channelId: slackTargetChannelId(input.target),
+    threadTs: slackTargetThreadTs(input.target),
+    teamId: input.target?.teamId,
+    outputThreadTsPresent: Boolean(slackTargetThreadTs(input.target)),
+    conversationSessionId: input.conversationSessionId,
+    correlationId: input.correlationId,
+    jobId: input.jobId,
+  });
+}
+
 export function sanitizeSlackTelemetryObservation(observation: SlackTelemetryObservation): SlackTelemetryObservation {
   return {
     schemaVersion: 1,
@@ -219,6 +299,16 @@ export function sanitizeSlackTelemetryObservation(observation: SlackTelemetryObs
     ...(Number.isFinite(observation.outboundResultCount) ? { outboundResultCount: observation.outboundResultCount } : {}),
     ...(observation.outboundResultChannels?.length ? { outboundResultChannels: observation.outboundResultChannels.map(boundedString).slice(0, 20) } : {}),
     ...(observation.outboundResultTs?.length ? { outboundResultTs: observation.outboundResultTs.map(boundedString).slice(0, 20) } : {}),
+    ...(observation.sourceKind ? { sourceKind: observation.sourceKind } : {}),
+    ...(observation.selectedSources?.length ? { selectedSources: observation.selectedSources.map(boundedString).slice(0, 20) } : {}),
+    ...(Number.isFinite(observation.messagesIncluded) ? { messagesIncluded: observation.messagesIncluded } : {}),
+    ...(typeof observation.contextTruncated === "boolean" ? { contextTruncated: observation.contextTruncated } : {}),
+    ...(observation.fallbackCodes?.length ? { fallbackCodes: observation.fallbackCodes.map(boundedString).slice(0, 20) } : {}),
+    ...(typeof observation.promptExposed === "boolean" ? { promptExposed: observation.promptExposed } : {}),
+    ...(typeof observation.outputThreadTsPresent === "boolean" ? { outputThreadTsPresent: observation.outputThreadTsPresent } : {}),
+    ...(observation.conversationSessionId ? { conversationSessionId: boundedString(observation.conversationSessionId) } : {}),
+    ...(observation.correlationId ? { correlationId: boundedString(observation.correlationId) } : {}),
+    ...(observation.jobId ? { jobId: boundedString(observation.jobId) } : {}),
   };
 }
 
@@ -252,4 +342,8 @@ function sanitizeReason(value: string): string {
 function uniqueDefined(values?: Array<string | undefined>): string[] | undefined {
   const filtered = [...new Set((values ?? []).filter((value): value is string => Boolean(value)))];
   return filtered.length ? filtered : undefined;
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value ? value : undefined;
 }

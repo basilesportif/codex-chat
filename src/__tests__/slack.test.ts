@@ -228,10 +228,46 @@ describe("Slack runtime foundation", () => {
       id: "slack:team:T123:channel:C345:thread:1782000000.000100",
       surfaceKind: "slack"
     });
+    expect(normalized.event.metadata).toMatchObject({
+      slackSourceKind: "public_channel_root",
+      slackReplyThreadTs: "1782000000.000100"
+    });
     expect(normalized.event.capabilityGrants?.[0]).toMatchObject({
       scope: "temporary",
       operations: expect.arrayContaining(["slack:read_source", "slack:post_source_thread", "subagents:dispatch"]),
       resourceSelectors: { surfaceKind: "slack", teamId: "T123", channelId: "C345", threadTs: "1782000000.000100" }
+    });
+  });
+
+  test("normalizes existing thread mentions to continue in the source thread", () => {
+    const normalized = normalizeSlackEventCallback(slackEnvelope({
+      event_id: "EvThread",
+      event: {
+        type: "app_mention",
+        user: "U234",
+        text: "<@UBOT> continue this",
+        channel: "C345",
+        channel_type: "channel",
+        ts: "1782000005.000200",
+        thread_ts: "1782000000.000100",
+        event_ts: "1782000005.000200"
+      }
+    }), "2026-06-26T00:00:00.000Z");
+
+    expect(normalized.status).toBe("event");
+    if (normalized.status !== "event") throw new Error("expected event");
+    expect(normalized.event.outputTarget).toMatchObject({
+      surfaceKind: "slack",
+      channelId: "C345",
+      threadId: "1782000000.000100",
+      messageId: "1782000005.000200"
+    });
+    expect(normalized.event.conversationKey?.id).toBe("slack:team:T123:channel:C345:thread:1782000000.000100");
+    expect(normalized.event.metadata).toMatchObject({
+      slackSourceKind: "thread",
+      slackSourceThreadTs: "1782000000.000100",
+      slackEventThreadTs: "1782000000.000100",
+      slackReplyThreadTs: "1782000000.000100"
     });
   });
 
@@ -365,6 +401,7 @@ describe("Slack runtime foundation", () => {
       yield { type: "final", text: "Slack answer." };
     });
     const slackSend = vi.spyOn(service.slack, "sendText").mockResolvedValue([{ channel: "C345", ts: "1782000002.000100" }]);
+    vi.spyOn(service.slack, "fetchConversationHistory").mockResolvedValue({ ok: false, error: "test_disabled" });
     const telegramSend = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
     const normalized = normalizeSlackEventCallback(slackEnvelope(), "2026-06-26T00:00:00.000Z");
     if (normalized.status !== "event") throw new Error("expected event");
@@ -402,6 +439,159 @@ describe("Slack runtime foundation", () => {
     const rawTelemetry = await readFile(service.state.path("slack_telemetry/summary.json"), "utf8");
     expect(rawTelemetry).not.toContain("Slack answer.");
     expect(rawTelemetry).not.toContain("xoxb-test-token");
+  });
+
+  test("hydrates recent channel context for root channel mentions without unrelated thread replies", async () => {
+    const config = await slackConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    let prompt = "";
+    vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (input): AsyncIterable<CodexEvent> {
+      prompt = input.text;
+      yield { type: "final", text: "Channel-context answer." };
+    });
+    vi.spyOn(service.slack, "sendText").mockResolvedValue([{ channel: "C345", ts: "1782000002.000100" }]);
+    const history = vi.spyOn(service.slack, "fetchConversationHistory").mockResolvedValue({
+      ok: true,
+      messages: [
+        { type: "message", user: "U111", text: "Channel decision: ship on Friday", channel: "C345", ts: "1781999990.000100" },
+        { type: "message", user: "U222", text: "Unrelated thread reply must stay out", channel: "C345", ts: "1781999995.000100", thread_ts: "1781999900.000100" },
+        { type: "message", user: "U234", text: "<@UBOT> what did we decide?", channel: "C345", ts: "1782000000.000100" }
+      ]
+    });
+    const replies = vi.spyOn(service.slack, "fetchConversationReplies").mockResolvedValue({ ok: true, messages: [] });
+    const normalized = normalizeSlackEventCallback(slackEnvelope({
+      event_id: "EvChannelContext",
+      event: {
+        type: "app_mention",
+        user: "U234",
+        text: "<@UBOT> what did we decide?",
+        channel: "C345",
+        channel_type: "channel",
+        ts: "1782000000.000100",
+        event_ts: "1782000000.000100"
+      }
+    }), "2026-06-26T00:00:00.000Z");
+    if (normalized.status !== "event") throw new Error("expected event");
+
+    await service.enqueueUserEvent(normalized.event);
+    await waitForIdle(service);
+
+    expect(history).toHaveBeenCalledWith(expect.objectContaining({ channel: "C345", latest: "1782000000.000100", limit: 15 }));
+    expect(replies).not.toHaveBeenCalled();
+    expect(prompt).toContain("source_kind: public_channel_root");
+    expect(prompt).toContain("selected_sources: channel_history");
+    expect(prompt).toContain("Channel decision: ship on Friday");
+    expect(prompt).not.toContain("Unrelated thread reply must stay out");
+    const summary = await waitForSlackTelemetry(
+      service.state,
+      (value) => value.lastContextDecision?.eventId === "EvChannelContext" && value.lastOutboundSuccess?.channelId === "C345",
+      "Slack context telemetry",
+    );
+    expect(summary.lastContextDecision).toMatchObject({
+      direction: "context",
+      outcome: "hydrated",
+      sourceKind: "public_channel_root",
+      selectedSources: ["channel_history"],
+      messagesIncluded: 2,
+      outputThreadTsPresent: true
+    });
+  });
+
+  test("hydrates recent thread context for thread mentions without channel history", async () => {
+    const config = await slackConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    let prompt = "";
+    vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (input): AsyncIterable<CodexEvent> {
+      prompt = input.text;
+      yield { type: "final", text: "Thread-context answer." };
+    });
+    vi.spyOn(service.slack, "sendText").mockResolvedValue([{ channel: "C345", ts: "1782000006.000100" }]);
+    const history = vi.spyOn(service.slack, "fetchConversationHistory").mockResolvedValue({ ok: true, messages: [] });
+    const replies = vi.spyOn(service.slack, "fetchConversationReplies").mockResolvedValue({
+      ok: true,
+      messages: [
+        { type: "message", user: "U111", text: "Thread root deploy failed", channel: "C345", ts: "1782000000.000100", thread_ts: "1782000000.000100" },
+        { type: "message", user: "U222", text: "Thread reply has the stack trace", channel: "C345", ts: "1782000001.000100", thread_ts: "1782000000.000100" },
+        { type: "message", user: "U333", text: "Wrong thread content", channel: "C345", ts: "1782000002.000100", thread_ts: "1781999900.000100" }
+      ]
+    });
+    const normalized = normalizeSlackEventCallback(slackEnvelope({
+      event_id: "EvThreadContext",
+      event: {
+        type: "app_mention",
+        user: "U234",
+        text: "<@UBOT> summarize this thread",
+        channel: "C345",
+        channel_type: "channel",
+        ts: "1782000005.000200",
+        thread_ts: "1782000000.000100",
+        event_ts: "1782000005.000200"
+      }
+    }), "2026-06-26T00:00:00.000Z");
+    if (normalized.status !== "event") throw new Error("expected event");
+
+    await service.enqueueUserEvent(normalized.event);
+    await waitForIdle(service);
+
+    expect(history).not.toHaveBeenCalled();
+    expect(replies).toHaveBeenCalledWith(expect.objectContaining({ channel: "C345", threadTs: "1782000000.000100", latest: "1782000005.000200", limit: 30 }));
+    expect(prompt).toContain("source_kind: thread");
+    expect(prompt).toContain("selected_sources: thread_replies");
+    expect(prompt).toContain("Thread root deploy failed");
+    expect(prompt).toContain("Thread reply has the stack trace");
+    expect(prompt).not.toContain("Wrong thread content");
+    await waitForSlackTelemetry(
+      service.state,
+      (value) => value.lastContextDecision?.eventId === "EvThreadContext" && value.lastOutboundSuccess?.channelId === "C345",
+      "Slack thread context telemetry",
+    );
+  });
+
+  test("does not leak Slack context across channels", async () => {
+    const config = await slackConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    const prompts: string[] = [];
+    vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (input): AsyncIterable<CodexEvent> {
+      prompts.push(input.text);
+      yield { type: "final", text: "Scoped answer." };
+    });
+    vi.spyOn(service.slack, "sendText").mockResolvedValue([{ channel: "C345", ts: "1782000002.000100" }]);
+    vi.spyOn(service.slack, "fetchConversationHistory").mockImplementation(async (input) => ({
+      ok: true,
+      messages: input.channel === "C111"
+        ? [{ type: "message", user: "U111", text: "C111 only: pricing launch", channel: "C111", ts: "1781999990.000100" }]
+        : [{ type: "message", user: "U222", text: "C222 only: private incident", channel: "C222", ts: "1781999990.000100" }]
+    }));
+    const first = normalizeSlackEventCallback(slackEnvelope({
+      event_id: "EvC111",
+      event: { type: "app_mention", user: "U234", text: "<@UBOT> context?", channel: "C111", channel_type: "channel", ts: "1782000000.000100", event_ts: "1782000000.000100" }
+    }), "2026-06-26T00:00:00.000Z");
+    const second = normalizeSlackEventCallback(slackEnvelope({
+      event_id: "EvC222",
+      event: { type: "app_mention", user: "U234", text: "<@UBOT> context?", channel: "C222", channel_type: "channel", ts: "1782000010.000100", event_ts: "1782000010.000100" }
+    }), "2026-06-26T00:00:01.000Z");
+    if (first.status !== "event" || second.status !== "event") throw new Error("expected events");
+
+    await service.enqueueUserEvent(first.event);
+    await waitForIdle(service);
+    await service.enqueueUserEvent(second.event);
+    await waitForIdle(service);
+
+    expect(prompts[0]).toContain("C111 only: pricing launch");
+    expect(prompts[0]).not.toContain("C222 only: private incident");
+    expect(prompts[1]).toContain("C222 only: private incident");
+    expect(prompts[1]).not.toContain("C111 only: pricing launch");
+    await waitForSlackTelemetry(
+      service.state,
+      (value) => (value.counters["outbound.success"] ?? 0) >= 2 && value.lastContextDecision?.eventId === "EvC222",
+      "Slack channel isolation telemetry",
+    );
   });
 
   test("Slack outbound failure telemetry preserves send failure semantics and redacts body text", async () => {

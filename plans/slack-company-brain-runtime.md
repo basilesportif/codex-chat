@@ -23,16 +23,12 @@ Brain's detailed Slack channel/thread context and hydration design is:
 /home/tim/pkg/tim/brain/plans/2026-06-29-slack-channel-thread-context-design.md
 ```
 
-That design is docs-only until Tim requests implementation. It specifies
-thread-first context selection for existing Slack threads, bounded channel
-mention context windows, bounded thread context windows, explicit context
-controls, channel memory versus thread sessions, Slack scopes/history reads,
-stored event history, fallbacks, hydration algorithms, schema, privacy, subagent
-callback routing, telemetry, Brain admin controls, migration phases, canaries,
-and rollout/rollback. It also repeats the safety rule for this repo: read-only
-or shadow hydration must not change current Slack message delivery, output
-targets, `thread_ts`, or subagent callbacks until a separate visible behavior
-implementation is explicitly requested.
+Tim has now requested the visible implementation rather than a shadow-only
+start. The active behavior is Claude-like Slack UX: root channel mentions reply
+in a Slack thread attached to the invoking message while hydrating bounded
+recent source-channel context; existing thread mentions hydrate and continue in
+the source thread. Hydration stays bounded/redacted and falls back to the source
+event if Slack history scopes, membership, or rate budget are unavailable.
 
 `codex-chat` remains the internal runtime/adapter/engine. This repo owns the
 Slack adapter implementation, signed Events API verification/ack/queueing,
@@ -56,15 +52,14 @@ codex-chat-hosted `/admin`, `/admin/codex-chat`, or
 `/api/admin/codex-chat/*` surfaces.
 
 Major Slack runtime requirement: Slack must support multiple public channels,
-private channels, DMs, MPIMs, and reply threads coherently without fragmenting
-shared context. Tim's current preference is channel-first: a root channel
-mention should default to posting back into the main channel, while a message
-that is already in a Slack reply thread should use that thread as a distinct
-context/session. The canonical Brain plan now specifies channel-visible default
-replies, explicit thread contexts, bounded channel context hydration through
-Slack API reads and/or recorded event history, cross-channel/private-channel
-leakage guards, subagent/callback routing back to the stored Slack output
-target, per-channel/thread telemetry, and canaries covering public/private/DM/
-MPIM/channel/thread replies. This repo owns the runtime implementation contract
-for those semantics; see `slack-app/README.md` for the local adapter checklist
-and Brain's plan for the full roadmap.
+private channels, DMs, MPIMs, and reply threads coherently without cross-channel
+or cross-thread leakage. Tim's current decision is root-thread delivery:
+a root channel mention should answer in a Slack thread attached to that root
+message, while a message already in a Slack reply thread should use that thread
+as the distinct context/session. The canonical Brain plan now specifies bounded
+channel/thread context hydration through Slack API reads and/or recorded event
+history, leakage guards, subagent/callback routing back to the stored Slack
+output target, per-channel/thread/context telemetry, and canaries covering
+public/private/DM/MPIM/channel/thread replies. This repo owns the runtime
+implementation contract for those semantics; see `slack-app/README.md` for the
+local adapter checklist and Brain's plan for the full roadmap.

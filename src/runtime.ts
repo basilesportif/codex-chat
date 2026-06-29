@@ -508,8 +508,9 @@ function buildTelegramConversationKey(input: TelegramRuntimeInput): Conversation
 
 function buildSlackConversationKey(input: SlackRuntimeInput): ConversationKey {
   const channelType = input.channelType ?? slackChannelTypeFromId(input.channelId);
-  const conversationScoped = isSlackConversationScoped(channelType);
-  const threadTs = conversationScoped ? undefined : (input.threadTs ?? input.messageTs);
+  const requestedThreadTs = input.threadTs;
+  const conversationScoped = isSlackConversationScoped(channelType, requestedThreadTs);
+  const threadTs = conversationScoped ? undefined : (requestedThreadTs ?? input.messageTs);
   return {
     id: conversationScoped
       ? `slack:team:${input.teamId}:conversation:${input.channelId}`
@@ -552,8 +553,9 @@ function buildTelegramOutputTarget(input: TelegramRuntimeInput): OutputTarget {
 
 function buildSlackOutputTarget(input: SlackRuntimeInput): OutputTarget {
   const channelType = input.channelType ?? slackChannelTypeFromId(input.channelId);
-  const conversationScoped = isSlackConversationScoped(channelType);
-  const threadTs = conversationScoped ? undefined : (input.threadTs ?? input.messageTs);
+  const requestedThreadTs = input.threadTs;
+  const conversationScoped = isSlackConversationScoped(channelType, requestedThreadTs);
+  const threadTs = conversationScoped ? undefined : (requestedThreadTs ?? input.messageTs);
   return {
     id: `slack:team:${input.teamId}:channel:${input.channelId}${threadTs ? `:thread:${threadTs}` : ""}:message:${input.messageTs}`,
     surfaceKind: "slack",
@@ -723,7 +725,8 @@ function outputTargetMetadata(metadata: Record<string, unknown> | undefined, key
   return candidate as OutputTarget;
 }
 
-function isSlackConversationScoped(channelType: string | undefined): boolean {
+function isSlackConversationScoped(channelType: string | undefined, requestedThreadTs?: string): boolean {
+  if (requestedThreadTs) return false;
   return channelType === "im" || channelType === "mpim" || channelType === "group";
 }
 

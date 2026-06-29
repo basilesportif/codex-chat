@@ -168,6 +168,23 @@ const configSchema = z.object({
       signingSecretEnv: z.string().default("SLACK_SIGNING_SECRET"),
       botTokenEnv: z.string().default("SLACK_BOT_TOKEN"),
       appTokenEnv: z.string().default("SLACK_APP_TOKEN"),
+      context: z
+        .object({
+          enabled: z.boolean().default(true),
+          maxChannelMessages: z.number().int().positive().max(50).default(15),
+          maxThreadMessages: z.number().int().positive().max(100).default(30),
+          maxMessageChars: z.number().int().positive().max(2_000).default(700),
+          maxTotalChars: z.number().int().positive().max(20_000).default(6_000),
+          fetchTimeoutMs: z.number().int().positive().max(10_000).default(2_500),
+        })
+        .default({
+          enabled: true,
+          maxChannelMessages: 15,
+          maxThreadMessages: 30,
+          maxMessageChars: 700,
+          maxTotalChars: 6_000,
+          fetchTimeoutMs: 2_500,
+        }),
     })
     .default({
       enabled: false,
@@ -176,6 +193,14 @@ const configSchema = z.object({
       signingSecretEnv: "SLACK_SIGNING_SECRET",
       botTokenEnv: "SLACK_BOT_TOKEN",
       appTokenEnv: "SLACK_APP_TOKEN",
+      context: {
+        enabled: true,
+        maxChannelMessages: 15,
+        maxThreadMessages: 30,
+        maxMessageChars: 700,
+        maxTotalChars: 6_000,
+        fetchTimeoutMs: 2_500,
+      },
     }),
   api: z.object({
     enabled: z.boolean().default(false),
@@ -323,6 +348,14 @@ const defaultConfig = configSchema.parse({
     signingSecretEnv: "SLACK_SIGNING_SECRET",
     botTokenEnv: "SLACK_BOT_TOKEN",
     appTokenEnv: "SLACK_APP_TOKEN",
+    context: {
+      enabled: true,
+      maxChannelMessages: 15,
+      maxThreadMessages: 30,
+      maxMessageChars: 700,
+      maxTotalChars: 6_000,
+      fetchTimeoutMs: 2_500,
+    },
   },
   api: {
     enabled: false,

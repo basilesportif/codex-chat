@@ -75,10 +75,12 @@ Brain may call the checked-in no-secret manifest scripts from the selected
 checkout.
 
 Slack conversation continuity is a runtime requirement, not just an install
-check. Channel-scoped ambient context, thread-scoped reply sessions, DMs/MPIMs,
+check. Root channel mentions reply in a Slack thread attached to the invoking
+message while hydrating a bounded recent source-channel window; existing thread
+mentions continue in that thread and hydrate bounded thread replies. DMs/MPIMs,
 private-channel isolation, subagent callback targets, and redacted
-channel/thread telemetry are planned in Brain's canonical Slack roadmap and
-summarized in `slack-app/README.md`.
+channel/thread/context telemetry are summarized in `slack-app/README.md` and
+Brain's canonical Slack roadmap.
 
 ## Audio Ingestion API
 

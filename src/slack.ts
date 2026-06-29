@@ -65,6 +65,22 @@ export interface SlackSendTextResult {
   ts?: string;
 }
 
+export interface SlackHistoryMessage {
+  type?: string;
+  subtype?: string;
+  user?: string;
+  username?: string;
+  bot_id?: string;
+  text?: string;
+  channel?: string;
+  ts?: string;
+  thread_ts?: string;
+}
+
+export type SlackHistoryFetchResult =
+  | { ok: true; messages: SlackHistoryMessage[]; responseMetadata?: Record<string, unknown> }
+  | { ok: false; error: string; status?: number; retryAfterSec?: number };
+
 export function verifySlackRequestSignature(input: SlackSignatureVerificationInput): SlackSignatureVerificationResult {
   if (!input.signingSecret) return { ok: false, reason: "missing_secret" };
   if (!input.timestampHeader || !input.signatureHeader) return { ok: false, reason: "missing_headers" };
@@ -114,8 +130,12 @@ export function normalizeSlackEventCallback(envelope: SlackEventEnvelope, receiv
   const channelType = slackEvent.channel_type ?? slackChannelTypeFromId(channelId);
   const text = normalizeSlackText(slackEvent.text ?? "", botUserId, slackEvent.type === "app_mention");
   if (!text) return { status: "ignored", eventId, reason: "empty_text" };
-  const threadTs = slackEvent.thread_ts ?? (channelType === "channel" ? messageTs : undefined);
+  const eventThreadTs = slackEvent.thread_ts;
+  const sourceThreadTs = eventThreadTs && eventThreadTs !== messageTs ? eventThreadTs : undefined;
+  const shouldAttachRootMentionThread = slackEvent.type === "app_mention" && isSlackChannelLike(channelType) && !sourceThreadTs;
+  const threadTs = eventThreadTs ?? (shouldAttachRootMentionThread ? messageTs : undefined);
   const enterpriseId = envelope.enterprise_id ?? envelope.authorizations?.find((item) => item.enterprise_id)?.enterprise_id ?? undefined;
+  const sourceKind = slackSourceKindFromEvent({ channelType, sourceThreadTs });
 
   const event: UserEvent = withSlackRuntimeContext({
     source: "slack",
@@ -135,7 +155,11 @@ export function normalizeSlackEventCallback(envelope: SlackEventEnvelope, receiv
       slackUserId: userId,
       slackBotUserId: botUserId,
       slackMessageTs: messageTs,
+      slackEventThreadTs: eventThreadTs,
+      slackSourceThreadTs: sourceThreadTs,
       slackThreadTs: threadTs,
+      slackReplyThreadTs: threadTs,
+      slackSourceKind: sourceKind,
       slackRawTextLength: slackEvent.text?.length ?? 0
     }
   }, {
@@ -207,6 +231,96 @@ export class SlackGateway {
     }
     return results;
   }
+
+  async fetchConversationHistory(input: {
+    channel: string;
+    latest?: string;
+    inclusive?: boolean;
+    limit?: number;
+    timeoutMs?: number;
+  }): Promise<SlackHistoryFetchResult> {
+    return this.fetchMessages("conversations.history", {
+      channel: input.channel,
+      latest: input.latest,
+      inclusive: input.inclusive ?? true,
+      limit: input.limit
+    }, input.timeoutMs);
+  }
+
+  async fetchConversationReplies(input: {
+    channel: string;
+    threadTs: string;
+    latest?: string;
+    inclusive?: boolean;
+    limit?: number;
+    timeoutMs?: number;
+  }): Promise<SlackHistoryFetchResult> {
+    return this.fetchMessages("conversations.replies", {
+      channel: input.channel,
+      ts: input.threadTs,
+      latest: input.latest,
+      inclusive: input.inclusive ?? true,
+      limit: input.limit
+    }, input.timeoutMs);
+  }
+
+  private async fetchMessages(method: "conversations.history" | "conversations.replies", body: Record<string, unknown>, timeoutMs = 2_500): Promise<SlackHistoryFetchResult> {
+    if (!this.config.slackBotToken) return { ok: false, error: `${this.config.slack.botTokenEnv} is required for Slack context hydration` };
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await this.fetchImpl(`https://slack.com/api/${method}`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${this.config.slackBotToken}`,
+          "content-type": "application/json; charset=utf-8"
+        },
+        body: JSON.stringify(pruneUndefined(body)),
+        signal: controller.signal
+      });
+      const retryAfterSec = parseRetryAfter(response.headers.get("retry-after"));
+      const payload = await response.json().catch(() => undefined) as {
+        ok?: boolean;
+        error?: string;
+        messages?: SlackHistoryMessage[];
+        response_metadata?: Record<string, unknown>;
+      } | undefined;
+      if (!response.ok || payload?.ok !== true) {
+        const error = payload?.error ?? (response.status === 429 ? "rate_limited" : `http_${response.status}`);
+        this.logger.warn(
+          {
+            component: "slack",
+            event: "history_fetch_failed",
+            method,
+            channel: typeof body.channel === "string" ? body.channel : undefined,
+            status: response.status,
+            retryAfterSec,
+            error
+          },
+          "Slack context history fetch failed"
+        );
+        return { ok: false, error, status: response.status, retryAfterSec };
+      }
+      return { ok: true, messages: payload.messages ?? [], responseMetadata: payload.response_metadata };
+    } catch (error) {
+      const reason = error instanceof Error && error.name === "AbortError"
+        ? "timeout"
+        : error instanceof Error ? error.message : String(error);
+      this.logger.warn(
+        {
+          component: "slack",
+          event: "history_fetch_failed",
+          method,
+          channel: typeof body.channel === "string" ? body.channel : undefined,
+          error: reason
+        },
+        "Slack context history fetch failed"
+      );
+      return { ok: false, error: reason };
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
 }
 
 function isSupportedSlackEvent(event: SlackMessageLikeEvent): boolean {
@@ -237,6 +351,19 @@ function slackChannelTypeFromId(channelId: string): string | undefined {
   return undefined;
 }
 
+function isSlackChannelLike(channelType: string | undefined): boolean {
+  return channelType === "channel" || channelType === "group";
+}
+
+function slackSourceKindFromEvent(input: { channelType?: string; sourceThreadTs?: string }): string {
+  if (input.sourceThreadTs) return "thread";
+  if (input.channelType === "im") return "dm";
+  if (input.channelType === "mpim") return "mpim";
+  if (input.channelType === "group") return "private_channel_root";
+  if (input.channelType === "channel") return "public_channel_root";
+  return "unknown_conversation";
+}
+
 function chunkSlackText(text: string): string[] {
   const normalized = text || " ";
   if (normalized.length <= SLACK_TEXT_MAX_CHARS) return [normalized];
@@ -249,4 +376,14 @@ function chunkSlackText(text: string): string[] {
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function pruneUndefined(input: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined));
+}
+
+function parseRetryAfter(value: string | null): number | undefined {
+  if (!value) return undefined;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : undefined;
 }

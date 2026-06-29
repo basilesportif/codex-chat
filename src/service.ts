@@ -45,7 +45,13 @@ import {
 import { DisabledTranscriber, OpenAITranscriber, Transcriber, type TranscriptionMode, type TranscriptionSpeakerSegment } from "./transcription.js";
 import { sanitizeChildProcessEnv } from "./env.js";
 import { SlackGateway } from "./slack.js";
-import { slackOutboundTelemetryObservation, type SlackTelemetryObservation } from "./slack-telemetry.js";
+import { hydrateSlackContextForEvent } from "./slack-context.js";
+import {
+  slackContextTelemetryObservation,
+  slackOutboundTelemetryObservation,
+  slackSubagentRoutingTelemetryObservation,
+  type SlackTelemetryObservation
+} from "./slack-telemetry.js";
 import { isTelegramAdmin, TelegramGateway } from "./telegram.js";
 import { CodexClient, StoredAction, SubagentBackendKind, SubagentJob, SubagentOwnerType, SubagentResultTarget, UserEvent } from "./types.js";
 import { makeId, nowIso } from "./util.js";
@@ -1280,7 +1286,8 @@ export class ServiceSupervisor {
       runContext,
       status: "running"
     }));
-    const prompt = this.formatEventForCodex(event);
+    const slackContextPrompt = await this.hydrateSlackContextPrompt(event);
+    const prompt = this.formatEventForCodex(event, slackContextPrompt);
     let turnClosed = false;
     const closeTurn = async (value: Record<string, unknown>): Promise<boolean> => {
       if (this.isStaleTurnToken(turnToken)) {
@@ -1504,6 +1511,7 @@ export class ServiceSupervisor {
       await this.deliverDirectTerminalSubagent(job, result);
       return;
     }
+    this.recordSlackSubagentRoutingIfNeeded(job);
     await this.enqueueSynthetic(this.formatSubagentCallbackText(job, result), {
       source: "subagent",
       jobId: job.id,
@@ -1526,6 +1534,7 @@ export class ServiceSupervisor {
   private async deliverDirectTerminalSubagent(job: SubagentJob, result: string): Promise<void> {
     const text = this.formatDirectTerminalSubagentText(job, result);
     if (job.defaultOutputTarget || job.originChatId !== undefined) {
+      this.recordSlackSubagentRoutingIfNeeded(job);
       await this.sendTextToOutputTarget(
         job.defaultOutputTarget ?? telegramOutputTarget({ chatId: job.originChatId!, messageId: job.originMessageId }),
         text
@@ -1533,6 +1542,17 @@ export class ServiceSupervisor {
       return;
     }
     await this.telegram.notifyOps(text);
+  }
+
+  private recordSlackSubagentRoutingIfNeeded(job: SubagentJob): void {
+    const target = job.defaultOutputTarget ?? job.originTarget;
+    if (target?.surfaceKind !== "slack") return;
+    this.recordSlackTelemetry(slackSubagentRoutingTelemetryObservation({
+      target,
+      jobId: job.id,
+      conversationSessionId: job.conversationSessionId,
+      correlationId: job.correlationId
+    }));
   }
 
   private formatDirectTerminalSubagentText(job: SubagentJob, result: string): string {
@@ -2229,7 +2249,23 @@ export class ServiceSupervisor {
     }
   }
 
-  private formatEventForCodex(event: UserEvent): string {
+  private async hydrateSlackContextPrompt(event: UserEvent): Promise<string | undefined> {
+    if (event.source !== "slack") return undefined;
+    try {
+      const context = await hydrateSlackContextForEvent(event, {
+        gateway: this.slack,
+        contextConfig: this.config.slack.context
+      });
+      if (!context) return undefined;
+      this.recordSlackTelemetry(slackContextTelemetryObservation({ event, context, promptExposed: this.config.slack.context.enabled }));
+      return context.promptText;
+    } catch (error) {
+      this.logger.warn({ component: "slack", event: "context_hydration_failed", error }, "Slack context hydration failed; continuing with source event only");
+      return "Slack context hydration failed before prompt assembly. Do not claim to have read recent Slack channel/thread history; answer from the source request only or ask for more context.";
+    }
+  }
+
+  private formatEventForCodex(event: UserEvent, hydratedContext?: string): string {
     ensureEventRuntimeContext(event);
     const header = [
       `codex-chat event source: ${event.source}`,
@@ -2245,6 +2281,9 @@ export class ServiceSupervisor {
       event.source === "slack" && typeof event.metadata?.slackChannelId === "string" ? `slack channel_id: ${event.metadata.slackChannelId}` : "",
       event.source === "slack" && typeof event.metadata?.slackChannelType === "string" ? `slack channel_type: ${event.metadata.slackChannelType}` : "",
       event.source === "slack" && typeof event.metadata?.slackUserId === "string" ? `slack user_id: ${event.metadata.slackUserId}` : "",
+      event.source === "slack" && typeof event.metadata?.slackSourceKind === "string" ? `slack source_kind: ${event.metadata.slackSourceKind}` : "",
+      event.source === "slack" && typeof event.metadata?.slackSourceThreadTs === "string" ? `slack source_thread_ts: ${event.metadata.slackSourceThreadTs}` : "",
+      event.source === "slack" && typeof event.metadata?.slackReplyThreadTs === "string" ? `slack reply_thread_ts: ${event.metadata.slackReplyThreadTs}` : "",
       event.source === "slack" && typeof event.metadata?.slackThreadTs === "string" ? `slack thread_ts: ${event.metadata.slackThreadTs}` : "",
       event.source === "slack" && typeof event.metadata?.slackMessageTs === "string" ? `slack message_ts: ${event.metadata.slackMessageTs}` : "",
       `received_at: ${event.receivedAt}`
@@ -2261,7 +2300,7 @@ export class ServiceSupervisor {
       : "";
     const activeSubagents = this.formatActiveSubagentSnapshot();
     const employeeRuntimes = this.formatEmployeeRuntimeSnapshot();
-    return `${header}${replyContext ? `\n\n${replyContext}` : ""}${employeeRuntimes ? `\n\n${employeeRuntimes}` : ""}${activeSubagents ? `\n\n${activeSubagents}` : ""}\n\nUser content:\n${event.text}${attachments}`;
+    return `${header}${replyContext ? `\n\n${replyContext}` : ""}${hydratedContext ? `\n\n${hydratedContext}` : ""}${employeeRuntimes ? `\n\n${employeeRuntimes}` : ""}${activeSubagents ? `\n\n${activeSubagents}` : ""}\n\nUser content:\n${event.text}${attachments}`;
   }
 
   private formatAttachmentForCodex(item: UserEvent["attachments"][number]): string {

@@ -1,7 +1,19 @@
 # Plan: Multi-provider/model support for codex-chat
 
 Date: 2026-06-29  
-Scope: planning only; no runtime code changes in this commit.
+Scope: historical design plus follow-up notes. The explicit OpenRouter subagent MVP is complete as of 2026-06-29; leave later main-loop provider switching, Employee provider pools, and broader Brain model-provider administration as active future work.
+
+
+## Completion status — 2026-06-29
+
+The first OpenRouter-backed subagent MVP is complete enough to remove from active implementation planning and keep as history/runbook material:
+
+- Runtime/provider plumbing landed in commits `adcf49a` and `01cc8f9`: per-dispatch `codexProfile`, `modelProvider`, and `serviceTierMode`; allowlist enforcement; app-server and exec backend wiring; OpenRouter key redaction/pass-through for Codex children; and status/detail metadata.
+- Brain admin has the OpenRouter settings panel/API for write-only `OPENROUTER_API_KEY`, non-secret codex-chat subagent defaults/allowlists, and user-level `$CODEX_HOME/openrouter.config.toml` generation.
+- Live state recorded completed app-server subagent jobs using `model = "z-ai/glm-5.2"`, `codexProfile = "openrouter"`, `modelProvider = "openrouter"`, and `serviceTierMode = "omit"` (`job_572a5e6ff8f840d8802c3a28c212464f`, `job_310f3a8eead34e529c4f1d0fe6aa48d5`, `job_befbc625e9aa4d718f8ef1158e038213`).
+- The remaining model-provider work is not this MVP: broader Brain status/defaults UI, startup-time main-loop provider switching, provider-aware Employee pools, richer provider health/canaries, and additional OpenRouter usage/billing/tool-use confirmation if desired.
+
+Recommendation: do not delete this plan. Treat the MVP sections below as completed history and keep `docs/openrouter-subagents.md` as the current operator runbook.
 
 ## Research summary
 

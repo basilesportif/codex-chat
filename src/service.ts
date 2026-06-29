@@ -45,6 +45,7 @@ import {
 import { DisabledTranscriber, OpenAITranscriber, Transcriber, type TranscriptionMode, type TranscriptionSpeakerSegment } from "./transcription.js";
 import { sanitizeChildProcessEnv } from "./env.js";
 import { SlackGateway } from "./slack.js";
+import { slackOutboundTelemetryObservation, type SlackTelemetryObservation } from "./slack-telemetry.js";
 import { isTelegramAdmin, TelegramGateway } from "./telegram.js";
 import { CodexClient, StoredAction, SubagentBackendKind, SubagentJob, SubagentOwnerType, SubagentResultTarget, UserEvent } from "./types.js";
 import { makeId, nowIso } from "./util.js";
@@ -2346,7 +2347,18 @@ export class ServiceSupervisor {
 
   private async sendTextToOutputTarget(target: UserEvent["outputTarget"], text: string, format?: "text" | "markdown" | "markdownv2", preserveFormatArgument = false): Promise<void> {
     if (target?.surfaceKind === "slack") {
-      await this.slack.sendText(target, text);
+      this.recordSlackTelemetry(slackOutboundTelemetryObservation({ target, outcome: "attempt" }));
+      try {
+        const results = await this.slack.sendText(target, text);
+        this.recordSlackTelemetry(slackOutboundTelemetryObservation({ target, outcome: "success", results }));
+      } catch (error) {
+        this.recordSlackTelemetry(slackOutboundTelemetryObservation({
+          target,
+          outcome: "failure",
+          reason: error instanceof Error ? error.message : String(error),
+        }));
+        throw error;
+      }
       return;
     }
     const chatId = telegramTargetChatId(target);
@@ -2366,6 +2378,12 @@ export class ServiceSupervisor {
     const chatId = telegramTargetChatId(target);
     if (chatId === undefined) throw new Error(`Unsupported or missing document output target: ${target?.surfaceKind ?? "none"}`);
     await this.telegram.sendDocument(chatId, { ...input, replyToMessageId: telegramTargetMessageId(target) });
+  }
+
+  private recordSlackTelemetry(observation: SlackTelemetryObservation): void {
+    void this.state.recordSlackTelemetryObservation(observation).catch((error) => {
+      this.logger.warn({ component: "slack", event: "telemetry_record_failed", error }, "Slack telemetry observation was dropped");
+    });
   }
 
   private directiveReplyToMessageId(chatId: number, explicitReplyToMessageId: number | undefined, origin: UserEvent): number | undefined {

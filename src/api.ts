@@ -22,6 +22,7 @@ import {
   verifySlackRequestSignature,
   type SlackEventEnvelope,
 } from "./slack.js";
+import { slackInboundTelemetryObservation, type SlackTelemetryObservation } from "./slack-telemetry.js";
 import type { UserEvent } from "./types.js";
 
 const MULTIPART_OVERHEAD_BYTES = 1024 * 1024;
@@ -166,6 +167,14 @@ export class ApiGateway {
       await this.handleSlackEvents(request, response);
       return;
     }
+    if (request.method === "GET" && url.pathname === "/api/slack/telemetry") {
+      if (!isLoopbackApiHost(this.config.api.host)) {
+        this.sendJson(response, 404, { error: "not_found" });
+        return;
+      }
+      this.sendJson(response, 200, await this.state.readSlackTelemetryStatus());
+      return;
+    }
     if (request.method === "POST" && url.pathname === "/api/ingest/audio") {
       await this.handleAudioIngest(request, response);
       return;
@@ -188,6 +197,11 @@ export class ApiGateway {
     });
     if (!verification.ok) {
       const statusCode = verification.reason === "missing_secret" ? 503 : 401;
+      this.recordSlackTelemetry(slackInboundTelemetryObservation({
+        outcome: "rejected",
+        reason: verification.reason,
+        responseStatus: statusCode,
+      }));
       this.logger.warn(
         {
           component: "slack",
@@ -204,6 +218,11 @@ export class ApiGateway {
     try {
       envelope = JSON.parse(body.toString("utf8")) as SlackEventEnvelope;
     } catch {
+      this.recordSlackTelemetry(slackInboundTelemetryObservation({
+        outcome: "rejected",
+        reason: "invalid_json",
+        responseStatus: 400,
+      }));
       this.sendJson(response, 400, { error: "invalid_json" });
       return;
     }
@@ -212,21 +231,46 @@ export class ApiGateway {
       envelope.type === "url_verification" &&
       typeof envelope.challenge === "string"
     ) {
+      this.recordSlackTelemetry(slackInboundTelemetryObservation({
+        envelope,
+        outcome: "url_verification",
+        responseStatus: 200,
+      }));
       this.sendJson(response, 200, { challenge: envelope.challenge });
       return;
     }
     if (envelope.type !== "event_callback") {
+      this.recordSlackTelemetry(slackInboundTelemetryObservation({
+        envelope,
+        outcome: "ignored",
+        reason: `unsupported_envelope_${envelope.type ?? "unknown"}`,
+        responseStatus: 200,
+      }));
       this.sendJson(response, 200, { ok: true, ignored: true });
       return;
     }
 
     const normalized = normalizeSlackEventCallback(envelope);
     if (normalized.eventId && this.hasSeenSlackEvent(normalized.eventId)) {
+      this.recordSlackTelemetry(slackInboundTelemetryObservation({
+        envelope,
+        outcome: "duplicate",
+        reason: "duplicate_event",
+        eventId: normalized.eventId,
+        responseStatus: 200,
+      }));
       this.sendJson(response, 200, { ok: true, duplicate: true });
       return;
     }
     if (normalized.status === "ignored") {
       if (normalized.eventId) this.rememberSlackEvent(normalized.eventId);
+      this.recordSlackTelemetry(slackInboundTelemetryObservation({
+        envelope,
+        outcome: "ignored",
+        reason: normalized.reason,
+        eventId: normalized.eventId,
+        responseStatus: 200,
+      }));
       this.logger.debug(
         {
           component: "slack",
@@ -245,8 +289,20 @@ export class ApiGateway {
     }
 
     this.rememberSlackEvent(normalized.eventId);
+    this.recordSlackTelemetry(slackInboundTelemetryObservation({
+      envelope,
+      outcome: "accepted",
+      eventId: normalized.eventId,
+      responseStatus: 200,
+    }));
     this.sendJson(response, 200, { ok: true });
     void this.hooks.onSlackUserEvent?.(normalized.event).catch((error) => {
+      this.recordSlackTelemetry(slackInboundTelemetryObservation({
+        envelope,
+        outcome: "rejected",
+        reason: "enqueue_failed",
+        eventId: normalized.eventId,
+      }));
       this.logger.error(
         {
           component: "slack",
@@ -469,6 +525,15 @@ export class ApiGateway {
       if (seenAt < cutoff) this.seenSlackEventIds.delete(eventId);
     }
   }
+
+  private recordSlackTelemetry(observation: SlackTelemetryObservation): void {
+    void this.state.recordSlackTelemetryObservation(observation).catch((error) => {
+      this.logger.warn(
+        { component: "slack", event: "telemetry_record_failed", error },
+        "Slack telemetry observation was dropped",
+      );
+    });
+  }
 }
 
 export function parseMultipartBoundary(
@@ -639,4 +704,3 @@ function externalUrlFromRequest(
   if (proto) url.protocol = `${proto}:`;
   return url.toString();
 }
-

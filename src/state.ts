@@ -5,6 +5,14 @@ import { AppConfig, resolveConfigPath } from "./config.js";
 import type { AudioIngestionRecord } from "./audio-ingest.js";
 import { ConversationSession, EmployeeRuntimeState, LoopRun, MonitorEvent, ProgressEvent, StoredAction, SubagentBackendKind, SubagentJob } from "./types.js";
 import { atomicWriteJson, atomicWriteText, ensureDir, nowIso, pathExists, removeIfExists } from "./util.js";
+import {
+  emptySlackTelemetrySummary,
+  slackTelemetryStatus,
+  updateSlackTelemetrySummary,
+  type SlackTelemetryObservation,
+  type SlackTelemetryStatus,
+  type SlackTelemetrySummary
+} from "./slack-telemetry.js";
 
 const pairingCodePath = "data/pairing_code.txt";
 const subagentRuntimePath = "subagent_runtime.json";
@@ -35,7 +43,7 @@ export class StateStore {
 
   async init(): Promise<void> {
     await ensureDir(this.root);
-    for (const dir of ["messages", "files", "turns", "queued_turns", "jobs", "employees", "employee_child_results", "loop_runs", "monitor_events", "actions", "audio_ingestions", "conversation_sessions", "progress_events"]) {
+    for (const dir of ["messages", "files", "turns", "queued_turns", "jobs", "employees", "employee_child_results", "loop_runs", "monitor_events", "actions", "audio_ingestions", "conversation_sessions", "progress_events", "slack_telemetry"]) {
       await ensureDir(join(this.root, dir));
     }
     if (!(await pathExists(join(this.root, "schema.json")))) {
@@ -132,6 +140,24 @@ export class StateStore {
   async recordProgressEvent(event: ProgressEvent): Promise<void> {
     const day = new Date().toISOString().slice(0, 10);
     await this.appendJsonl(`progress_events/${day}.jsonl`, event);
+  }
+
+  async recordSlackTelemetryObservation(observation: SlackTelemetryObservation): Promise<void> {
+    const rel = "slack_telemetry/summary.json";
+    await this.withJsonFileLock(rel, async (summaryPath) => {
+      const day = safeDay(observation.observedAt);
+      await this.appendJsonl(`slack_telemetry/${day}.jsonl`, observation);
+      const current = await readJsonFile<SlackTelemetrySummary>(summaryPath, emptySlackTelemetrySummary());
+      await atomicWriteJson(summaryPath, updateSlackTelemetrySummary(current, observation));
+    });
+  }
+
+  async readSlackTelemetrySummary(): Promise<SlackTelemetrySummary> {
+    return this.readJson<SlackTelemetrySummary>("slack_telemetry/summary.json", emptySlackTelemetrySummary());
+  }
+
+  async readSlackTelemetryStatus(): Promise<SlackTelemetryStatus> {
+    return slackTelemetryStatus(await this.readSlackTelemetrySummary());
   }
 
   async saveAction(action: StoredAction): Promise<void> {
@@ -331,4 +357,9 @@ function pruneObject<T>(value: Record<string, T>, maxEntries: number): Record<st
   const entries = Object.entries(value);
   if (entries.length <= maxEntries) return value;
   return Object.fromEntries(entries.slice(entries.length - maxEntries));
+}
+
+function safeDay(value: string): string {
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10);
 }

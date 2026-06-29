@@ -11,6 +11,7 @@ import { renderSlackManifest } from "../slack-manifest.js";
 import { SlackGateway, normalizeSlackEventCallback, slackSignatureForTest, verifySlackRequestSignature } from "../slack.js";
 import { ServiceSupervisor } from "../service.js";
 import { StateStore } from "../state.js";
+import type { SlackTelemetrySummary } from "../slack-telemetry.js";
 import type { Transcriber, TranscriptionResult, TranscribeInput } from "../transcription.js";
 import type { CodexEvent, UserEvent } from "../types.js";
 
@@ -143,6 +144,19 @@ async function flush(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+async function waitForSlackTelemetry(
+  state: StateStore,
+  predicate: (summary: SlackTelemetrySummary) => boolean,
+  label = "Slack telemetry summary",
+): Promise<SlackTelemetrySummary> {
+  for (let i = 0; i < 80; i++) {
+    const summary = await state.readSlackTelemetrySummary();
+    if (predicate(summary)) return summary;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`${label} was not recorded`);
+}
+
 async function waitForIdle(service: ServiceSupervisor): Promise<void> {
   for (let i = 0; i < 30; i++) {
     if (!(service as unknown as { turnRunning: boolean }).turnRunning) return;
@@ -270,7 +284,7 @@ describe("Slack runtime foundation", () => {
 
   test("Slack Events API route fast-acks, enqueues once, and accepts no ingest key", async () => {
     const events: UserEvent[] = [];
-    const { baseUrl, config } = await apiHarness({
+    const { baseUrl, config, state } = await apiHarness({
       onSlackUserEvent: async (event) => {
         events.push(event);
       }
@@ -290,15 +304,56 @@ describe("Slack runtime foundation", () => {
     await expect(duplicate.json()).resolves.toEqual({ ok: true, duplicate: true });
     await flush();
     expect(events).toHaveLength(1);
+
+    const summary = await waitForSlackTelemetry(
+      state,
+      (value) => value.lastAcceptedEvent?.eventId === "Ev123" && value.lastIgnoredOrRejected?.reason === "duplicate_event",
+      "accepted and duplicate Slack telemetry",
+    );
+    expect(summary.lastAcceptedEvent).toMatchObject({
+      direction: "inbound",
+      outcome: "accepted",
+      eventId: "Ev123",
+      eventType: "app_mention",
+      teamId: "T123",
+      channelId: "C345",
+      userId: "U234",
+      textLength: "<@UBOT> please summarize this thread".length,
+    });
+    expect(summary.counters["inbound.accepted"]).toBe(1);
+    expect(summary.counters["inbound.duplicate"]).toBe(1);
+    const rawTelemetry = await readFile(state.path("slack_telemetry/summary.json"), "utf8");
+    expect(rawTelemetry).not.toContain("please summarize this thread");
+    expect(rawTelemetry).not.toContain("xoxb-test-token");
   });
 
   test("Slack Events API rejects invalid signatures", async () => {
-    const { baseUrl } = await apiHarness();
+    const events: UserEvent[] = [];
+    const { baseUrl, state } = await apiHarness({
+      onSlackUserEvent: async (event) => {
+        events.push(event);
+      }
+    });
 
     const response = await postSlack(baseUrl, slackEnvelope(), "wrong-secret");
 
     expect(response.status).toBe(401);
     await expect(response.json()).resolves.toEqual({ error: "invalid_signature" });
+    expect(events).toHaveLength(0);
+    const summary = await waitForSlackTelemetry(
+      state,
+      (value) => value.lastIgnoredOrRejected?.reason === "invalid_signature",
+      "invalid signature Slack telemetry",
+    );
+    expect(summary.lastIgnoredOrRejected).toMatchObject({
+      direction: "inbound",
+      outcome: "rejected",
+      reason: "invalid_signature",
+      responseStatus: 401,
+    });
+    const rawTelemetry = await readFile(state.path("slack_telemetry/summary.json"), "utf8");
+    expect(rawTelemetry).not.toContain("please summarize this thread");
+    expect(rawTelemetry).not.toContain("test-slack-signing-secret");
   });
 
   test("service delivers main-loop final text to Slack output target without Telegram", async () => {
@@ -325,6 +380,57 @@ describe("Slack runtime foundation", () => {
     const session = JSON.parse(await readFile(join(sessionsDir, files[0]!), "utf8")) as { key?: { id?: string }; defaultOutputTarget?: { channelId?: string } };
     expect(session.key?.id).toBe("slack:team:T123:channel:C345:thread:1782000000.000100");
     expect(session.defaultOutputTarget?.channelId).toBe("C345");
+    const summary = await waitForSlackTelemetry(
+      service.state,
+      (value) => value.lastOutboundSuccess?.channelId === "C345",
+      "Slack outbound success telemetry",
+    );
+    expect(summary.lastOutboundAttempt).toMatchObject({
+      direction: "outbound",
+      outcome: "attempt",
+      channelId: "C345",
+      threadTs: "1782000000.000100",
+    });
+    expect(summary.lastOutboundSuccess).toMatchObject({
+      direction: "outbound",
+      outcome: "success",
+      channelId: "C345",
+      threadTs: "1782000000.000100",
+      outboundResultCount: 1,
+      outboundResultChannels: ["C345"],
+    });
+    const rawTelemetry = await readFile(service.state.path("slack_telemetry/summary.json"), "utf8");
+    expect(rawTelemetry).not.toContain("Slack answer.");
+    expect(rawTelemetry).not.toContain("xoxb-test-token");
+  });
+
+  test("Slack outbound failure telemetry preserves send failure semantics and redacts body text", async () => {
+    const config = await slackConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    vi.spyOn(service.slack, "sendText").mockRejectedValue(new Error("Slack chat.postMessage failed: channel_not_found"));
+    const normalized = normalizeSlackEventCallback(slackEnvelope(), "2026-06-26T00:00:00.000Z");
+    if (normalized.status !== "event") throw new Error("expected event");
+
+    await expect((service as unknown as {
+      sendTextToOutputTarget: (target: UserEvent["outputTarget"], text: string) => Promise<void>;
+    }).sendTextToOutputTarget(normalized.event.outputTarget, "Do not store this Slack reply body")).rejects.toThrow("channel_not_found");
+
+    const summary = await waitForSlackTelemetry(
+      service.state,
+      (value) => value.lastOutboundFailure?.reason?.includes("channel_not_found") === true,
+      "Slack outbound failure telemetry",
+    );
+    expect(summary.lastOutboundFailure).toMatchObject({
+      direction: "outbound",
+      outcome: "failure",
+      channelId: "C345",
+      threadTs: "1782000000.000100",
+      reason: "Slack chat.postMessage failed: channel_not_found",
+    });
+    const rawTelemetry = await readFile(service.state.path("slack_telemetry/summary.json"), "utf8");
+    expect(rawTelemetry).not.toContain("Do not store this Slack reply body");
   });
 
   test("SlackGateway posts source-thread text through chat.postMessage without exposing tokens to tests", async () => {

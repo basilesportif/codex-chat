@@ -270,6 +270,10 @@ describe("cancel_job directive", () => {
 // ---------------------------------------------------------------------------
 
 async function loadTestConfig() {
+  delete process.env.CODEX_CHAT_SUBAGENTS_SERVICE_TIER_MODE;
+  delete process.env.CODEX_CHAT_CODEX_SERVICE_TIER_MODE;
+  delete process.env.CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL_PROVIDER;
+  delete process.env.CODEX_CHAT_CODEX_MODEL_PROVIDER;
   const root = await mkdtemp(join(tmpdir(), "codex-chat-intro-"));
   tempDirs.push(root);
   const configDir = join(root, "config");

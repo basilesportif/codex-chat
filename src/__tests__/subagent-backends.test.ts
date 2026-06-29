@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -100,6 +100,7 @@ function testConfig(rootDir: string): AppConfig {
 }
 
 afterEach(async () => {
+  delete process.env.CODEX_HOME;
   vi.restoreAllMocks();
   vi.resetModules();
   vi.doUnmock("node:child_process");
@@ -193,6 +194,17 @@ describe("app-server subagent backend", () => {
     vi.resetModules();
     const root = await mkdtemp(join(tmpdir(), "codex-chat-subagent-backend-"));
     tempDirs.push(root);
+    process.env.CODEX_HOME = root;
+    await writeFile(join(root, "openrouter.config.toml"), `
+model = "z-ai/glm-5.2"
+model_provider = "openrouter"
+
+[model_providers.openrouter]
+name = "OpenRouter"
+base_url = "https://openrouter.ai/api/v1"
+wire_api = "responses"
+env_key = "OPENROUTER_API_KEY"
+`);
     const sent: Array<{ method: string; params: Record<string, unknown> }> = [];
     const spawn = vi.fn(() => fakeChild());
     vi.doMock("node:child_process", async () => {
@@ -254,8 +266,11 @@ describe("app-server subagent backend", () => {
     });
 
     const args = spawn.mock.calls[0]?.[1] as string[];
-    expect(args).toContain("--profile");
-    expect(args).toContain("openrouter");
+    expect(args).not.toContain("--profile");
+    expect(args).toContain("model_provider=\"openrouter\"");
+    expect(args).toContain("model_providers.openrouter.base_url=\"https://openrouter.ai/api/v1\"");
+    expect(args).toContain("model_providers.openrouter.wire_api=\"responses\"");
+    expect(args).toContain("model_providers.openrouter.env_key=\"OPENROUTER_API_KEY\"");
     expect(args).not.toContain("features.fast_mode=true");
     expect(args).not.toContain('service_tier="fast"');
     const threadStart = sent.find((message) => message.method === "thread/start");

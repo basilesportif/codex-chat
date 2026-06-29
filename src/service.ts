@@ -16,6 +16,7 @@ import {
   spawnDeployScript,
   waitForTurnDrain
 } from "./deploy.js";
+import { loadCodexProfileConfig } from "./codex-profiles.js";
 import { DirectiveAction, parseDirectives } from "./directives.js";
 import { EmployeeManager, parseEmployeeCommand, type EmployeeCommand } from "./employees.js";
 import { FileStore } from "./file-store.js";
@@ -1091,6 +1092,112 @@ export class ServiceSupervisor {
     return lines.join("\n");
   }
 
+  private async sanitizeSubagentProviderOverride(action: DispatchSubagentAction, origin: UserEvent): Promise<{ action: DispatchSubagentAction; changed: boolean }> {
+    const providerModelCandidates = await this.subagentProviderModelCandidates(action);
+    const hasProviderSpecificModel = this.isProviderSpecificSubagentModel(action.model, providerModelCandidates);
+    if (!this.hasSubagentProviderOverride(action, hasProviderSpecificModel)) return { action, changed: false };
+    if (this.originExplicitlyRequestsSubagentProviderOverride(origin, providerModelCandidates)) {
+      return { action: await this.applyExplicitSubagentProviderDefaults(action), changed: false };
+    }
+
+    const sanitized: DispatchSubagentAction = {
+      ...action,
+      model: hasProviderSpecificModel
+        ? this.subagents.resolveModel(undefined)
+        : action.model
+    };
+    delete sanitized.codexProfile;
+    delete sanitized.modelProvider;
+    delete sanitized.serviceTierMode;
+    return { action: sanitized, changed: true };
+  }
+
+  private async applyExplicitSubagentProviderDefaults(action: DispatchSubagentAction): Promise<DispatchSubagentAction> {
+    if (!this.shouldUseConfiguredProviderModel(action)) return action;
+    const profile = action.codexProfile || "openrouter";
+    const profileConfig = await loadCodexProfileConfig(profile);
+    if (!profileConfig.model) return action;
+    return { ...action, model: profileConfig.model };
+  }
+
+  private shouldUseConfiguredProviderModel(action: DispatchSubagentAction): boolean {
+    const provider = (action.modelProvider || action.codexProfile || "").trim().toLowerCase();
+    if (provider !== "openrouter") return false;
+    const model = action.model.trim();
+    return !model || model === this.subagents.resolveModel(undefined);
+  }
+
+  private hasSubagentProviderOverride(action: DispatchSubagentAction, hasProviderSpecificModel = this.isProviderSpecificSubagentModel(action.model)): boolean {
+    return Boolean(
+      action.codexProfile ||
+      action.modelProvider ||
+      action.serviceTierMode ||
+      hasProviderSpecificModel
+    );
+  }
+
+  private isProviderSpecificSubagentModel(model: string | undefined, candidates: readonly string[] = []): boolean {
+    if (!model) return false;
+    const normalized = model.trim().toLowerCase();
+    return normalized.includes("/") ||
+      normalized.includes("openrouter") ||
+      normalized.includes("anthropic/") ||
+      normalized.includes("claude") ||
+      this.textMentionsKnownOpenRouterModel(normalized) ||
+      candidates.some((candidate) => this.textMentionsProviderModel(normalized, candidate));
+  }
+
+  private originExplicitlyRequestsSubagentProviderOverride(origin: UserEvent, providerModelCandidates: readonly string[] = []): boolean {
+    const text = origin.text.toLowerCase();
+    return /\bopen\s*router\b/.test(text) ||
+      /\bopenrouter\b/.test(text) ||
+      /\bmodel\s*provider\b/.test(text) ||
+      /\bcodex\s*profile\b/.test(text) ||
+      /\bprovider\s*override\b/.test(text) ||
+      /\banthropic\//.test(text) ||
+      /\b(?:use|using|with|via)\s+claude\b/.test(text) ||
+      /\bclaude\s+(?:model|subagent)\b/.test(text) ||
+      /\bnon[-\s]?openai\b/.test(text) ||
+      this.textMentionsKnownOpenRouterModel(text) ||
+      providerModelCandidates.some((candidate) => this.textMentionsProviderModel(text, candidate));
+  }
+
+  private async subagentProviderModelCandidates(action: DispatchSubagentAction): Promise<string[]> {
+    const candidates = new Set<string>();
+    const profiles = new Set<string>(["openrouter"]);
+    if (action.codexProfile) profiles.add(action.codexProfile);
+    for (const profile of profiles) {
+      const profileConfig = await loadCodexProfileConfig(profile);
+      if (profileConfig.model) candidates.add(profileConfig.model);
+    }
+    return [...candidates];
+  }
+
+  private textMentionsKnownOpenRouterModel(text: string): boolean {
+    return /(?:^|[^a-z0-9])glm\s*[-\s]?\s*5\.?2(?:$|[^a-z0-9])/.test(text) ||
+      /(?:^|[^a-z0-9])z-ai\/glm-5\.2(?:$|[^a-z0-9])/.test(text) ||
+      /(?:^|[^a-z0-9])qwen\/qwen3-coder(?:$|[^a-z0-9])/.test(text) ||
+      /(?:^|[^a-z0-9])qwen\s*3\s*[-\s]?\s*coder(?:$|[^a-z0-9])/.test(text);
+  }
+
+  private textMentionsProviderModel(text: string, model: string): boolean {
+    const normalizedModel = model.trim().toLowerCase();
+    if (!normalizedModel) return false;
+    if (text.includes(normalizedModel)) return true;
+
+    const tail = normalizedModel.split("/").at(-1) ?? normalizedModel;
+    const variants = new Set([
+      tail,
+      tail.replace(/[-_]+/g, " "),
+      tail.replace(/[-_\s]+/g, "")
+    ]);
+    const compactText = text.replace(/[-_\s/]+/g, "");
+    return [...variants].some((variant) => {
+      const compactVariant = variant.replace(/[-_\s/]+/g, "");
+      return compactVariant.length >= 4 && compactText.includes(compactVariant);
+    });
+  }
+
   async cancelJob(jobId: string): Promise<string> {
     return this.formatCancelJobResult(await this.subagents.requestCancel(jobId));
   }
@@ -1563,10 +1670,20 @@ export class ServiceSupervisor {
         );
       }
       if (action.type === "dispatch_subagent") {
+        const { action: dispatchAction, changed: sanitizedProviderOverride } = await this.sanitizeSubagentProviderOverride(action, origin);
         if (this.canSendTextToOutputTarget(origin.outputTarget)) {
-          await this.sendTextToOutputTarget(origin.outputTarget, options.dispatchStatusText ?? this.formatDispatchSummary(action));
+          await this.sendTextToOutputTarget(
+            origin.outputTarget,
+            sanitizedProviderOverride ? this.formatDispatchSummary(dispatchAction) : options.dispatchStatusText ?? this.formatDispatchSummary(dispatchAction)
+          );
         }
-        await this.subagents.dispatchFromDirective(action, {
+        if (sanitizedProviderOverride) {
+          this.logger.warn(
+            { component: "subagents", event: "provider_override_ignored", profile: action.profile, model: action.model, codexProfile: action.codexProfile, modelProvider: action.modelProvider, serviceTierMode: action.serviceTierMode },
+            "ignored subagent provider override because the origin did not explicitly request it"
+          );
+        }
+        await this.subagents.dispatchFromDirective(dispatchAction, {
           chatId: origin.chatId,
           messageId: origin.messageId,
           parentTurnId: options.parentTurnId,
@@ -1577,10 +1694,10 @@ export class ServiceSupervisor {
         });
         await this.state.recordProgressEvent(createProgressEvent({
           type: "subagent_dispatched",
-          message: this.formatDispatchSummary(action),
+          message: this.formatDispatchSummary(dispatchAction),
           event: origin,
           status: "running",
-          metadata: { profile: action.profile, route: action.route }
+          metadata: { profile: dispatchAction.profile, route: dispatchAction.route }
         }));
       }
       if (action.type === "cancel_job") {

@@ -5,6 +5,7 @@ import { createServer } from "node:net";
 import WebSocket from "ws";
 import type { Logger } from "pino";
 import { resolveConfigPath, type AppConfig } from "./config.js";
+import { loadCodexProfileConfig } from "./codex-profiles.js";
 import { sanitizeCodexChildProcessEnv } from "./env.js";
 import type { ServiceTier, ServiceTierMode, SubagentBackendKind, SubagentJob } from "./types.js";
 import { ensureDir, killProcessTree, nowIso } from "./util.js";
@@ -238,7 +239,10 @@ class ChildAppServerSession {
     const listenUrl = `ws://127.0.0.1:${port}`;
     const args = ["app-server", "--listen", listenUrl];
     for (const item of this.config.codex.extraConfig ?? []) args.push("-c", item);
-    if (this.input.codexProfile) args.push("--profile", this.input.codexProfile);
+    if (this.input.codexProfile) {
+      const profile = await loadCodexProfileConfig(this.input.codexProfile);
+      for (const item of profile.appServerConfig) args.push("-c", item);
+    }
     if (this.input.serviceTierMode !== "omit" && this.input.serviceTier === "fast") args.push("-c", "features.fast_mode=true", "-c", `service_tier="fast"`);
     this.logger.info(
       { component: "subagents", event: "start", backend: "codex_app_server", jobId: this.input.job.id, profile: this.input.job.profile, listenUrl, args },

@@ -10,6 +10,10 @@ import type { CodexEvent, SubagentJob, UserEvent } from "../types.js";
 const tempDirs: string[] = [];
 
 async function loadTestConfig(transport = "app-server") {
+  delete process.env.CODEX_CHAT_SUBAGENTS_SERVICE_TIER_MODE;
+  delete process.env.CODEX_CHAT_CODEX_SERVICE_TIER_MODE;
+  delete process.env.CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL_PROVIDER;
+  delete process.env.CODEX_CHAT_CODEX_MODEL_PROVIDER;
   const root = await mkdtemp(join(tmpdir(), "codex-chat-service-"));
   tempDirs.push(root);
   const configDir = join(root, "config");
@@ -82,7 +86,29 @@ function userEvent(messageId: number, text = `message ${messageId}`): UserEvent 
   };
 }
 
+async function writeOpenRouterProfile(rootDir: string, model = "z-ai/glm-5.2"): Promise<void> {
+  process.env.CODEX_HOME = rootDir;
+  await writeFile(join(rootDir, "openrouter.config.toml"), `
+model = "${model}"
+model_provider = "openrouter"
+
+[model_providers.openrouter]
+name = "OpenRouter"
+base_url = "https://openrouter.ai/api/v1"
+wire_api = "responses"
+env_key = "OPENROUTER_API_KEY"
+`);
+}
+
+async function configureOpenRouterSubagentOverrides(config: Awaited<ReturnType<typeof loadTestConfig>>, model = "z-ai/glm-5.2"): Promise<void> {
+  await writeOpenRouterProfile(config.rootDir, model);
+  config.subagents.allowProviderOverride = true;
+  config.subagents.allowedCodexProfiles = ["openrouter"];
+  config.subagents.allowedModelProviders = ["openrouter"];
+}
+
 afterEach(async () => {
+  delete process.env.CODEX_HOME;
   vi.restoreAllMocks();
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
@@ -1137,6 +1163,130 @@ describe("service supervisor", () => {
 
     expect(dispatchFromDirective).toHaveBeenCalled();
     expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("Sub: Research routing"), 502);
+  });
+
+  test("ignores accidental subagent provider overrides unless the user explicitly requested them", async () => {
+    const config = await loadTestConfig();
+    await configureOpenRouterSubagentOverrides(config);
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    const dispatchFromDirective = vi.fn().mockResolvedValue("job_123");
+    (service as unknown as { subagents: { dispatchFromDirective: typeof dispatchFromDirective } }).subagents.dispatchFromDirective = dispatchFromDirective;
+    vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
+      yield {
+        type: "final",
+        text: `\`\`\`codex-chat
+{"version":1,"actions":[{"type":"dispatch_subagent","idempotencyKey":"research-openrouter-accidental","profile":"researcher","route":"return_to_main","summary":"Research routing","prompt":"Research routing behavior","model":"anthropic/claude-sonnet-4.5","effort":"high","serviceTier":"fast","codexProfile":"openrouter","modelProvider":"openrouter","serviceTierMode":"omit"}]}
+\`\`\``
+      };
+    });
+    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+
+    await service.enqueueUserEvent(userEvent(507, "research routing behavior"));
+    await waitForIdle(service);
+
+    const dispatched = dispatchFromDirective.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(dispatched).toMatchObject({ model: "gpt-5.5", effort: "high", serviceTier: "fast" });
+    expect(dispatched.codexProfile).toBeUndefined();
+    expect(dispatched.modelProvider).toBeUndefined();
+    expect(dispatched.serviceTierMode).toBeUndefined();
+    expect(sendText).toHaveBeenCalledWith(253768951, "Sub: Research routing\nresearcher · gpt-5.5 · high · fast", 507);
+  });
+
+  test("preserves subagent provider overrides when the user explicitly requests OpenRouter GLM 5.2", async () => {
+    const config = await loadTestConfig();
+    await configureOpenRouterSubagentOverrides(config);
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    const dispatchFromDirective = vi.fn().mockResolvedValue("job_123");
+    (service as unknown as { subagents: { dispatchFromDirective: typeof dispatchFromDirective } }).subagents.dispatchFromDirective = dispatchFromDirective;
+    vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
+      yield {
+        type: "final",
+        text: `\`\`\`codex-chat
+{"version":1,"actions":[{"type":"dispatch_subagent","idempotencyKey":"research-openrouter-explicit","profile":"researcher","route":"return_to_main","summary":"OpenRouter smoke test","prompt":"OpenRouter smoke test","model":"gpt-5.5","effort":"medium","serviceTier":"fast","codexProfile":"openrouter","modelProvider":"openrouter","serviceTierMode":"omit"}]}
+\`\`\``
+      };
+    });
+    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+
+    await service.enqueueUserEvent(userEvent(508, "dispatch an OpenRouter GLM 5.2 subagent smoke test"));
+    await waitForIdle(service);
+
+    const dispatched = dispatchFromDirective.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(dispatched).toMatchObject({
+      model: "z-ai/glm-5.2",
+      codexProfile: "openrouter",
+      modelProvider: "openrouter",
+      serviceTierMode: "omit"
+    });
+    expect(sendText).toHaveBeenCalledWith(
+      253768951,
+      expect.stringContaining("researcher · z-ai/glm-5.2 · medium · fast · profile openrouter · provider openrouter · tierMode omit"),
+      508
+    );
+  });
+
+  test("preserves subagent provider overrides when the user explicitly requests GLM5.2", async () => {
+    const config = await loadTestConfig();
+    await configureOpenRouterSubagentOverrides(config);
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    const dispatchFromDirective = vi.fn().mockResolvedValue("job_123");
+    (service as unknown as { subagents: { dispatchFromDirective: typeof dispatchFromDirective } }).subagents.dispatchFromDirective = dispatchFromDirective;
+    vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
+      yield {
+        type: "final",
+        text: `\`\`\`codex-chat
+{"version":1,"actions":[{"type":"dispatch_subagent","idempotencyKey":"research-glm-compact","profile":"researcher","route":"return_to_main","summary":"GLM compact model","prompt":"GLM compact model","model":"gpt-5.5","effort":"medium","serviceTier":"fast","codexProfile":"openrouter","modelProvider":"openrouter","serviceTierMode":"omit"}]}
+\`\`\``
+      };
+    });
+    vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+
+    await service.enqueueUserEvent(userEvent(509, "dispatch a GLM5.2 subagent"));
+    await waitForIdle(service);
+
+    const dispatched = dispatchFromDirective.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(dispatched).toMatchObject({
+      model: "z-ai/glm-5.2",
+      codexProfile: "openrouter",
+      modelProvider: "openrouter",
+      serviceTierMode: "omit"
+    });
+  });
+
+  test("preserves subagent provider overrides when the user explicitly requests z-ai/glm-5.2", async () => {
+    const config = await loadTestConfig();
+    await configureOpenRouterSubagentOverrides(config);
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    const dispatchFromDirective = vi.fn().mockResolvedValue("job_123");
+    (service as unknown as { subagents: { dispatchFromDirective: typeof dispatchFromDirective } }).subagents.dispatchFromDirective = dispatchFromDirective;
+    vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
+      yield {
+        type: "final",
+        text: `\`\`\`codex-chat
+{"version":1,"actions":[{"type":"dispatch_subagent","idempotencyKey":"research-glm-slug","profile":"researcher","route":"return_to_main","summary":"GLM slug model","prompt":"GLM slug model","model":"z-ai/glm-5.2","effort":"medium","serviceTier":"fast","codexProfile":"openrouter","modelProvider":"openrouter","serviceTierMode":"omit"}]}
+\`\`\``
+      };
+    });
+    vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+
+    await service.enqueueUserEvent(userEvent(510, "dispatch a z-ai/glm-5.2 subagent"));
+    await waitForIdle(service);
+
+    const dispatched = dispatchFromDirective.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(dispatched).toMatchObject({
+      model: "z-ai/glm-5.2",
+      codexProfile: "openrouter",
+      modelProvider: "openrouter",
+      serviceTierMode: "omit"
+    });
   });
 
   test("merges an immediate same-chat send_text acknowledgement into dispatch status", async () => {

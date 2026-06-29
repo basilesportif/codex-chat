@@ -7,6 +7,7 @@ import { loadConfig, type AppConfig } from "../config.js";
 import { FileStore } from "../file-store.js";
 import { createLogger } from "../logger.js";
 import { ensureEventRuntimeContext } from "../runtime.js";
+import { renderSlackManifest } from "../slack-manifest.js";
 import { SlackGateway, normalizeSlackEventCallback, slackSignatureForTest, verifySlackRequestSignature } from "../slack.js";
 import { ServiceSupervisor } from "../service.js";
 import { StateStore } from "../state.js";
@@ -150,6 +151,24 @@ async function waitForIdle(service: ServiceSupervisor): Promise<void> {
 }
 
 describe("Slack runtime foundation", () => {
+  test("renders the Brain-branded Slack manifest with the Brain Events URL", async () => {
+    const result = await renderSlackManifest({
+      rootDir: process.cwd(),
+      baseUrl: "https://brain.decisive-outcomes.com",
+      eventsPath: "/api/slack/events"
+    });
+
+    expect(result.validation).toEqual({ ok: true, errors: [] });
+    expect(result.requestUrl).toBe("https://brain.decisive-outcomes.com/api/slack/events");
+    expect(result.manifest).toMatchObject({
+      display_information: {
+        name: "Brain",
+        description: "Company-brain Slack surface for Brain."
+      },
+      features: { bot_user: { display_name: "Brain" } }
+    });
+  });
+
   test("verifies Slack request signatures and rejects tampering", () => {
     const body = JSON.stringify({ type: "event_callback" });
     const timestamp = 1_782_000_000;

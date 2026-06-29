@@ -1,4 +1,4 @@
-# Codex Chat Slack app runtime contract
+# Brain Slack app runtime contract
 
 This directory contains the codex-chat-owned, no-secret Slack runtime contract:
 the Slack manifest template, non-secret metadata schema, adapter config
@@ -76,3 +76,28 @@ belong in the private runtime service environment. Brain may write those values
 as write-only env entries and may call the no-secret renderer scripts from a
 selected codex-chat checkout, but codex-chat does not serve a human Slack
 administration UI.
+
+## Updating or reinstalling the Brain Slack app
+
+Use Brain admin or this repo's renderer to produce the no-secret manifest, then
+update Slack from that JSON:
+
+1. Render the manifest with the Brain Events URL, for example:
+   `node slack-app/scripts/render-manifest.mjs --base-url https://brain.decisive-outcomes.com --output brain.slack.manifest.json`.
+2. In Slack, open <https://api.slack.com/apps>, choose the Brain app, then open
+   **App Manifest**.
+3. Paste or upload the rendered JSON, confirm the app display name is **Brain**
+   and the request URL is exactly
+   `https://brain.decisive-outcomes.com/api/slack/events`, then save changes.
+4. Open **OAuth & Permissions** and click **Reinstall to Workspace** if Slack
+   reports changed scopes/events.
+5. Open **Event Subscriptions**, ensure events are enabled, verify the same
+   Brain request URL, and save changes.
+
+If an older **Codex Chat** Slack app still exists, leave it installed until the
+Brain app has passed a live canary if you need rollback. Then remove it from
+Slack under <https://api.slack.com/apps> → old **Codex Chat** app → **App Home**
+or **OAuth & Permissions** → uninstall/remove from workspace, or delete/archive
+that old app if it is no longer needed. Do not copy old tokens into git or docs;
+write any new Brain app signing secret and bot token only to the private runtime
+environment.

@@ -5,14 +5,14 @@ usage() {
   cat <<'USAGE'
 Usage: slack-app/scripts/render-remote-manifest.sh [options]
 
-Remote codex-chat host helper for rendering the deploy-ready Slack app manifest.
+Remote runtime host helper for rendering the deploy-ready Brain Slack app manifest.
 By default it updates the checked-out repo, validates the rendered manifest, and
 prints JSON only to stdout so it is safe to redirect over ssh.
 
 Options:
   --no-pull          Do not run git pull --ff-only origin main before rendering
   --output FILE      Write JSON to a server-side FILE instead of stdout
-  --output-dir DIR   Write codex-chat.slack.manifest.json under a server-side DIR
+  --output-dir DIR   Write brain.slack.manifest.json under a server-side DIR
   -h, --help         Show this help
 
 All other options are passed through to render-manifest.mjs, including
@@ -34,7 +34,7 @@ resolve_manifest_path() {
       path = join(process.env.HOME, path.slice(2));
     }
     const resolved = isAbsolute(path) ? path : resolve(process.cwd(), path);
-    console.log(kind === "dir" ? join(resolved, "codex-chat.slack.manifest.json") : resolved);
+    console.log(kind === "dir" ? join(resolved, "brain.slack.manifest.json") : resolved);
   ' "$1" "$2"
 }
 
@@ -105,7 +105,7 @@ if [[ -n "$output_path" || -n "$output_dir" ]]; then
   node "$validate_script" "$rendered_path" >&2
   printf 'Rendered and validated Slack manifest at %s\n' "$rendered_path" >&2
 else
-  tmp="$(mktemp "${TMPDIR:-/tmp}/codex-chat.slack.manifest.XXXXXX.json")"
+  tmp="$(mktemp "${TMPDIR:-/tmp}/brain.slack.manifest.XXXXXX.json")"
   trap 'rm -f "$tmp"' EXIT
   node "$render_script" "${render_args[@]}" --output "$tmp" >&2
   node "$validate_script" "$tmp" >&2

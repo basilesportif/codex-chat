@@ -30,5 +30,9 @@ https://brain.decisive-outcomes.com/api/slack/events
 
 Brain/Caddy reverse-proxies that raw request to codex-chat's internal
 `/api/slack/events` handler so codex-chat can verify Slack signatures and own
-runtime behavior. Do not reintroduce codex-chat-hosted `/admin`,
+runtime behavior. Basic inbound Slack Events delivery through this Brain URL to
+codex-chat is confirmed as of 2026-06-29. An outbound reply directive was
+attempted; final proof still needs a Slack canary showing the reply in the
+expected source thread/DM/channel, so keep any outbound scope/membership/routing
+caveat visible until then. Do not reintroduce codex-chat-hosted `/admin`,
 `/admin/codex-chat`, or `/api/admin/codex-chat/*` surfaces.

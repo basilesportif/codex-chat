@@ -24,12 +24,33 @@ Scope: planning only; no runtime code changes in this commit.
 - Config precedence is CLI flags/`-c`, trusted project `.codex/config.toml`, selected profile file, user config, system config, then defaults. Source: `/tmp/openai-docs-cache/codex-manual.md:2714-2739`.
 - Project `.codex/config.toml` cannot override provider/profile/auth-sensitive keys. Codex ignores project-local `openai_base_url`, `model_provider`, `model_providers`, `profile`, `profiles`, telemetry, and notification keys; provider settings must live in user/system config/profile files. Source: `/tmp/openai-docs-cache/codex-manual.md:2175-2190`.
 - Custom Codex model providers define base URL, wire API, auth env key/headers, and optional command-backed auth. Reserved provider IDs are `openai`, `ollama`, and `lmstudio`; use `openai_base_url` only when redirecting the built-in OpenAI provider, otherwise use `[model_providers.<id>]` plus `model_provider = "<id>"`. Source: `/tmp/openai-docs-cache/codex-manual.md:2167-2169`, `/tmp/openai-docs-cache/codex-manual.md:2243-2291`, `/tmp/openai-docs-cache/codex-manual.md:2337-2359`.
-- App-server `thread/start` and `thread/resume` support `modelProvider` as well as `model` and `serviceTier`, but generated Codex 0.142.0 schema shows `turn/start` supports `model`, `serviceTier`, and `effort` only; it does **not** include `modelProvider`. Command inspected: `codex app-server generate-json-schema --out <tmp>` and `ThreadStartParams` / `ThreadResumeParams` / `TurnStartParams` in `/tmp/tmp.1QosPfJRNq/codex_app_server_protocol.v2.schemas.json`.
+- App-server `thread/start` and `thread/resume` support `modelProvider` as well as `model` and `serviceTier`, but generated Codex 0.142.0 schema shows `turn/start` supports `model`, `serviceTier`, and `effort` only; it does **not** include `modelProvider`. Command inspected: `codex app-server generate-json-schema --out <tmp>` and `ThreadStartParams` / `ThreadResumeParams` / `TurnStartParams` in `<tmp>/codex_app_server_protocol.v2.schemas.json`.
 - App-server lifecycle docs confirm `thread/start`, `thread/resume`, `turn/start`, `turn/steer`, and `turn/interrupt`; turn optional fields override model/personality/cwd/sandbox policy and more for that turn/subsequent turns. Source: `/tmp/openai-docs-cache/codex-manual.md:8532-8540`.
 - `codex app-server` WebSocket transport is experimental/unsupported; local loopback listeners are appropriate, non-loopback listeners need auth. Source: `/tmp/openai-docs-cache/codex-manual.md:8382-8427`.
-- OpenRouter official docs say OpenRouter exposes OpenAI-compatible chat completions at `/api/v1/chat/completions`, authenticates with bearer API keys, and has a beta OpenAI-compatible Responses API. Its prompt-cache sticky routing can be account/model/conversation keyed, with optional `session_id`; current Codex provider config does not expose a first-class way in codex-chat to set OpenRouter `session_id`. Sources: OpenRouter Quickstart, Authentication, Responses API Beta, and Prompt Caching docs consulted 2026-06-29.
+- OpenRouter official docs say OpenRouter exposes an OpenAI-compatible API at `https://openrouter.ai/api/v1`, with Chat Completions at `/chat/completions`, API-key auth via `Authorization: Bearer <OPENROUTER_API_KEY>`, and optional attribution headers (`HTTP-Referer`, `X-OpenRouter-Title`, or SDK `appTitle`). Models are addressed by OpenRouter model slugs such as `openai/gpt-5.1`, `anthropic/claude-sonnet-4.5`, or provider-qualified variants from the model catalog. Sources: OpenRouter Quickstart, Authentication, and Models docs consulted 2026-06-29.
+- OpenRouter provider routing is request-body driven via `provider` preferences such as `order`, `only`, `ignore`, `allow_fallbacks`, `require_parameters`, `data_collection`, quantization/sort filters, and `zdr`; Codex provider profiles can choose OpenRouter as the upstream but codex-chat should not try to embed arbitrary per-request routing until the Codex wire layer exposes safe pass-through config for those fields. Sources: OpenRouter Provider Routing docs consulted 2026-06-29.
+- OpenRouter supports tool/function calling only for models that advertise the feature. Its model pages/API expose supported parameters; when routing across providers, `require_parameters` can force a provider that supports all requested parameters. MVP smoke tests must therefore use a model slug with tool support and verify at least one Codex tool command path, not only a plain text completion. Sources: OpenRouter Tool Calling, Supported Parameters, and Provider Routing docs consulted 2026-06-29.
+- OpenRouter has a beta OpenAI-compatible Responses API but documents it as stateless; each request must provide its full input context and tool-call outputs, so Codex's stateful app-server thread semantics should start with `wire_api = "chat"` unless a specific Responses-profile smoke test proves compatibility. Source: OpenRouter Responses API Beta docs consulted 2026-06-29.
+- OpenRouter prompt-cache/sticky routing can be account/model/conversation keyed, and docs describe optional `session_id` for sticky routing. Current Codex provider config and codex-chat dispatch state do not expose a first-class OpenRouter `session_id`, so MVP should not depend on sticky routing for correctness. Source: OpenRouter Prompt Caching docs consulted 2026-06-29.
+- OpenRouter service tiers are provider/model dependent top-level `service_tier` request values such as `flex` and `priority`, which do not map directly to codex-chat's current OpenAI Fast-tier behavior. MVP should default to omitting Codex `serviceTier`/`features.fast_mode` for explicit OpenRouter profiles unless an operator has verified and mapped the selected model/provider tier. Source: OpenRouter Service Tiers docs consulted 2026-06-29.
 
 ## Target design
+
+### First MVP goal (must be explicit)
+
+The first MVP is **not** full multi-provider support. It is the smallest docs-backed runtime refactor that lets codex-chat dispatch a single subagent on a different model through OpenRouter, using Codex App Server/Codex CLI profile selection, then lets the operator restart codex-chat and prove that dispatch succeeds.
+
+Concrete MVP outcome:
+
+1. Keep the main codex-chat loop on the existing OpenAI profile/model.
+2. Configure an operator-owned Codex profile, for example `~/.codex/openrouter.config.toml`, that uses OpenRouter's OpenAI-compatible Chat Completions endpoint.
+3. Extend only the subagent dispatch path enough to resolve `{codexProfile, modelProvider, model, effort, serviceTierMode}` per job.
+4. For `codex_app_server` subagents, spawn the child `codex app-server --profile openrouter`, pass the OpenRouter `modelProvider` at `thread/start`, pass model/effort on thread/turn as currently supported, and omit OpenAI Fast tier fields for the OpenRouter job.
+5. For `codex_exec` parity, pass `codex exec --profile openrouter --model <openrouter-model-slug>` and omit Fast tier fields unless explicitly allowed.
+6. Persist and display the selected Codex profile/provider/model in subagent job metadata and artifacts without logging secret values.
+7. After code is deployed, restart codex-chat and run one smoke dispatch that requests an OpenRouter model different from the main model.
+
+This MVP is complete only when a real subagent launched through codex-chat reports successful completion on an OpenRouter model slug and its artifacts/status make the selected model/profile/provider auditable.
 
 ### Principles
 
@@ -110,7 +131,7 @@ wire_api = "chat"
 env_key = "OPENROUTER_API_KEY"
 env_key_instructions = "Set OPENROUTER_API_KEY in the service environment."
 # Optional non-secret attribution headers if desired:
-# http_headers = { "HTTP-Referer" = "https://brain.decisive-outcomes.com", "X-Title" = "codex-chat" }
+# http_headers = { "HTTP-Referer" = "https://brain.decisive-outcomes.com", "X-OpenRouter-Title" = "codex-chat" }
 ```
 
 OpenRouter Responses beta, only after a real smoke test with the selected model/tooling:
@@ -131,6 +152,99 @@ Future direct Anthropic/open models:
 
 - Direct Anthropic should not be hardcoded into codex-chat unless Codex CLI grows a native Anthropic provider or the operator supplies an OpenAI-compatible proxy. Until then, use OpenRouter (model IDs such as `anthropic/...`) or a private proxy profile.
 - Local/open models should use Codex's OSS/local provider modes (`ollama`, `lmstudio`, or another OpenAI-compatible provider profile) and should usually omit service tier.
+
+## MVP implementation sequence
+
+This sequence intentionally stops before main-loop provider switching, Employee pools, Brain UI work, or arbitrary provider routing.
+
+1. **Codex profile prerequisite**
+   - Operator creates `~/.codex/openrouter.config.toml` on the service account, not in repo `.codex/config.toml`, because Codex ignores provider/profile/auth-sensitive keys from project config.
+   - Service environment contains `OPENROUTER_API_KEY`; docs/examples must show only the env var name, never a value.
+   - Manual preflight outside codex-chat:
+     ```bash
+     codex --profile openrouter exec --model anthropic/claude-sonnet-4.5 "Reply with: openrouter ok"
+     ```
+
+2. **Config/schema additions, default no-op**
+   - Add optional subagent config fields: `defaultCodexProfile`, `defaultModelProvider`, `serviceTierMode`, `allowProviderOverride`, `allowedCodexProfiles`, and `allowedModelProviders`.
+   - Add optional dispatch/job fields: `codexProfile`, `modelProvider`, and `serviceTierMode`. Existing dispatches must remain valid and unchanged.
+   - MVP config should set `allowedCodexProfiles = ["openrouter"]`, `allowedModelProviders = ["openrouter"]`, and `serviceTierMode = "omit"` for OpenRouter smoke jobs.
+
+3. **Resolver and validation**
+   - Implement a single `resolveSubagentModelSpec()` path used by both subagent backends. Precedence: directive/job override -> subagent defaults -> current codex defaults.
+   - Reject per-dispatch provider/profile overrides unless `allowProviderOverride` is enabled and the requested values pass allowlists.
+   - When `modelProvider` is a non-empty non-OpenAI value and `serviceTierMode = "auto"`, treat it like `omit` for MVP unless explicit config says otherwise.
+
+4. **Backend wiring**
+   - `codex_app_server`: add `--profile <job.codexProfile>` when spawning the child app-server; include `modelProvider` in `thread/start`; do not include `modelProvider` in `turn/start` because the generated schema lacks that field.
+   - `codex_exec`: add `--profile <job.codexProfile>` and keep `--model <job.model>`; prefer the profile's `model_provider` over `-c model_provider=...` unless an explicit override is needed and allowed.
+   - Both backends must suppress `features.fast_mode=true` and omit `serviceTier` for OpenRouter jobs under `serviceTierMode = "omit"`.
+
+5. **Observability**
+   - Write `codexProfile`, `modelProvider`, `model`, `effort`, and effective service-tier mode to subagent `events.jsonl`, status/detail output, and state metadata.
+   - Add redaction coverage for `OPENROUTER_API_KEY` by name if any env/log scrubbing code enumerates provider keys.
+
+6. **Tests**
+   - Unit tests prove default behavior is unchanged.
+   - Resolver tests cover override allowed/rejected cases and service-tier omission for OpenRouter.
+   - App-server backend tests assert spawn args include `--profile openrouter`, `thread/start` includes `modelProvider`, `turn/start` does not, and no Fast tier config is emitted.
+   - Exec backend tests assert `--profile openrouter` and `--model <slug>` are passed and no Fast tier config is emitted.
+
+7. **Deploy/restart/test (operator step after merge; do not run from this subagent)**
+   - Restart command to run only after code changes are deployed by the main process/operator:
+     ```bash
+     systemctl --user restart codex-chat.service
+     ```
+   - Smoke dispatch request should use `subagents.backend = "codex_app_server"`, `codexProfile = "openrouter"`, `modelProvider = "openrouter"`, `model = "anthropic/claude-sonnet-4.5"` or another verified OpenRouter slug, `serviceTierMode = "omit"`, and a trivial task such as writing a short final answer plus running one safe read-only command.
+
+### MVP config example (no secrets)
+
+```toml
+# ~/.codex/openrouter.config.toml -- service account user-level profile
+model = "anthropic/claude-sonnet-4.5"
+model_provider = "openrouter"
+model_reasoning_effort = "medium"
+
+[model_providers.openrouter]
+name = "OpenRouter"
+base_url = "https://openrouter.ai/api/v1"
+wire_api = "chat"
+env_key = "OPENROUTER_API_KEY"
+env_key_instructions = "Set OPENROUTER_API_KEY in the codex-chat service environment."
+# Optional non-secret attribution headers, if the operator wants OpenRouter rankings/analytics:
+# http_headers = { "HTTP-Referer" = "https://brain.decisive-outcomes.com", "X-OpenRouter-Title" = "codex-chat" }
+```
+
+```toml
+# codex-chat config example after runtime support exists
+[subagents]
+backend = "codex_app_server"
+defaultEffort = "medium"
+defaultServiceTier = ""
+defaultCodexProfile = ""
+defaultModelProvider = ""
+serviceTierMode = "auto"
+allowProviderOverride = true
+allowedCodexProfiles = ["openrouter"]
+allowedModelProviders = ["openrouter"]
+```
+
+### MVP pass/fail criteria
+
+Pass:
+
+- `codex --profile openrouter exec --model <slug> "Reply ok"` succeeds under the same service account/environment.
+- After restart, codex-chat can dispatch a `codex_app_server` subagent with `codexProfile=openrouter`, `modelProvider=openrouter`, and an OpenRouter model slug different from the main model.
+- The child app-server command line includes `--profile openrouter`; `thread/start` includes `modelProvider: "openrouter"`; `turn/start` omits `modelProvider`; Fast tier config and `serviceTier` are omitted for the job.
+- The subagent completes and artifacts/status show the selected profile/provider/model without exposing `OPENROUTER_API_KEY` or other secret values.
+
+Fail/block:
+
+- The service account cannot see `OPENROUTER_API_KEY` or the Codex profile file.
+- The chosen OpenRouter slug lacks tool calling or rejects required Codex parameters.
+- OpenRouter Responses beta is required for a selected model but fails Codex state/tool semantics; switch back to `wire_api = "chat"` or a different slug.
+- codex-chat resumes an old OpenAI child thread instead of creating an OpenRouter-profile child thread.
+- Any runtime log/artifact prints provider API key material.
 
 ## Implementation phases
 

@@ -48,6 +48,42 @@ present in authorizations, message timestamp, and thread timestamp. These fields
 feed `ActorContext`, `OutputTarget`, `ConversationKey`, temporary
 source-conversation grants, and audit/correlation IDs.
 
+## Multi-channel and thread coherence requirements
+
+The canonical requirements live in Brain's
+`plans/slack-company-brain-runtime.md`; the runtime contract here must preserve
+these adapter-owned behaviors:
+
+- Channel context and thread conversations are distinct. Ambient Slack channel
+  memory/summaries are keyed by `{enterpriseId?, teamId, channelId}` while live
+  reply-thread sessions are keyed by `{enterpriseId?, teamId, channelId,
+  threadTs}`. DMs key continuity by the DM conversation ID.
+- A root channel app mention creates or resumes a thread by using
+  `event.thread_ts ?? event.ts`; follow-up messages in that Slack thread resume
+  the same `ConversationSession`.
+- Thread replies use thread history by default. Bounded channel history or
+  channel summaries are fetched only when the request needs channel context and
+  effective grants permit it.
+- DMs, MPIMs, public channels, and private channels must not share prompt
+  history, summaries, subagent callbacks, or output targets unless an explicit
+  capability-checked retrieval/export route authorizes that crossing.
+- Every Slack-derived message, summary, artifact, subagent job, and callback
+  needs source labels for team/channel/channel type/thread/message IDs so
+  retrieval filters and outbound routing can prevent cross-channel leakage.
+- `return_to_main`, `send_to_user`, progress, failure, and direct-fallback
+  callbacks from Slack-originated work must carry the originating channel/thread
+  or DM output target. Late callbacks after hibernation/restart must still land
+  in the originating Slack thread/DM, not a global channel.
+- Runtime telemetry should expose redacted channel/thread counters, session
+  create/resume/hibernate/archive events, selected context source, capability
+  denials, Slack Web API send result classes, and subagent callback routing for
+  Brain's admin rollups.
+
+Live canaries must cover public-channel root-to-thread continuity, follow-up
+thread continuity, second-channel isolation, private-channel continuity and
+private-to-public denial, DM continuity, MPIM/group DM continuity, subagent
+callback routing to the originating thread/DM, and telemetry/audit linkage.
+
 ## Manifest contract
 
 Required bot scopes for the current adapter:

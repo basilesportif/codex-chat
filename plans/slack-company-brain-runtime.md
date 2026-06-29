@@ -32,7 +32,18 @@ Brain/Caddy reverse-proxies that raw request to codex-chat's internal
 `/api/slack/events` handler so codex-chat can verify Slack signatures and own
 runtime behavior. Basic inbound Slack Events delivery through this Brain URL to
 codex-chat is confirmed as of 2026-06-29. An outbound reply directive was
-attempted; final proof still needs a Slack canary showing the reply in the
-expected source thread/DM/channel, so keep any outbound scope/membership/routing
-caveat visible until then. Do not reintroduce codex-chat-hosted `/admin`,
-`/admin/codex-chat`, or `/api/admin/codex-chat/*` surfaces.
+attempted; final proof still needs Slack canaries showing replies and later
+subagent callbacks land in the expected source thread/DM/channel, so keep any
+outbound scope/membership/routing caveat visible until then. Do not reintroduce
+codex-chat-hosted `/admin`, `/admin/codex-chat`, or
+`/api/admin/codex-chat/*` surfaces.
+
+Major Slack runtime requirement: Slack must support multiple public channels,
+private channels, DMs, MPIMs, and reply threads coherently. The canonical Brain
+plan now requires distinct channel-scoped ambient context and thread-scoped
+conversation sessions, explicit rules for when channel context may augment a
+thread, cross-channel/private-channel leakage guards, subagent/callback routing
+back to the originating Slack output target, per-channel/thread telemetry, and
+canaries covering public/private/DM/MPIM/thread replies. This repo owns the
+runtime implementation contract for those semantics; see `slack-app/README.md`
+for the local adapter checklist and Brain's plan for the full roadmap.

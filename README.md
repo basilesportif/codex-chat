@@ -74,6 +74,12 @@ administration such as env writes, restart guidance, and live verification.
 Brain may call the checked-in no-secret manifest scripts from the selected
 checkout.
 
+Slack conversation continuity is a runtime requirement, not just an install
+check. Channel-scoped ambient context, thread-scoped reply sessions, DMs/MPIMs,
+private-channel isolation, subagent callback targets, and redacted
+channel/thread telemetry are planned in Brain's canonical Slack roadmap and
+summarized in `slack-app/README.md`.
+
 ## Audio Ingestion API
 
 `POST /api/ingest/audio` accepts authenticated `multipart/form-data` uploads

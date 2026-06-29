@@ -2,6 +2,7 @@ import { z } from "zod";
 
 const routeSchema = z.enum(["return_to_main", "send_to_user", "send_progress_and_return", "send_to_admins", "store_only", "silent"]);
 const serviceTierSchema = z.enum(["standard", "fast"]);
+const serviceTierModeSchema = z.enum(["auto", "always", "omit"]);
 
 const baseAction = z.object({
   type: z.string(),
@@ -45,6 +46,9 @@ const dispatchSubagentAction = baseAction.extend({
   model: z.string().min(1),
   effort: z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]),
   serviceTier: serviceTierSchema,
+  codexProfile: z.string().min(1).optional(),
+  modelProvider: z.string().min(1).optional(),
+  serviceTierMode: serviceTierModeSchema.optional(),
   images: z.array(z.string()).optional()
 });
 

@@ -27,6 +27,7 @@ const approvalSchema = z.enum([
 const telegramUserIdSchema = z.union([z.number().int(), z.string().min(1)]);
 const subagentBackendSchema = z.enum(["codex_exec", "codex_app_server"]);
 const serviceTierSchema = z.enum(["standard", "fast"]);
+const serviceTierModeSchema = z.enum(["auto", "always", "omit"]);
 const employeeStartupSchema = z.enum(["on_demand", "always"]);
 const employeeIdSchema = z
   .string()
@@ -81,6 +82,10 @@ const employeeDefinitionSchema = z
     purpose: z.string().default(""),
     directory: z.string().default(""),
     profile: z.string().default(""),
+    codexProfile: z.string().default(""),
+    modelProvider: z.string().default(""),
+    serviceTier: serviceTierSchema.optional(),
+    serviceTierMode: serviceTierModeSchema.optional(),
     model: z.string().default(""),
     effort: effortSchema.optional(),
     startup: employeeStartupSchema.default("on_demand"),
@@ -115,7 +120,10 @@ const configSchema = z.object({
     model: z.string().default("gpt-5.5"),
     effort: effortSchema.default("medium"),
     serviceTier: serviceTierSchema.default("fast"),
+    serviceTierMode: serviceTierModeSchema.default("auto"),
     profile: z.string().default(""),
+    modelProvider: z.string().default(""),
+    providerApiKeyEnvNames: z.array(z.string()).default(["OPENROUTER_API_KEY"]),
     sandbox: sandboxSchema.default("danger-full-access"),
     approvalPolicy: approvalSchema.default("never"),
     mainSessionName: z.string().default("codex-chat-main"),
@@ -187,6 +195,12 @@ const configSchema = z.object({
     defaultModel: z.string().default(""),
     defaultEffort: effortSchema.default("medium"),
     defaultServiceTier: serviceTierSchema.default("fast"),
+    defaultCodexProfile: z.string().default(""),
+    defaultModelProvider: z.string().default(""),
+    serviceTierMode: serviceTierModeSchema.default("auto"),
+    allowProviderOverride: z.boolean().default(false),
+    allowedCodexProfiles: z.array(z.string()).default([]),
+    allowedModelProviders: z.array(z.string()).default([]),
     defaultTimeoutSec: z.number().int().positive().default(1800),
     maxTimeoutSec: z.number().int().positive().default(7200),
     maxPromptBytes: z.number().int().positive().default(262_144),
@@ -276,7 +290,10 @@ const defaultConfig = configSchema.parse({
     model: "gpt-5.5",
     effort: "medium",
     serviceTier: "fast",
+    serviceTierMode: "auto",
     profile: "",
+    modelProvider: "",
+    providerApiKeyEnvNames: ["OPENROUTER_API_KEY"],
     sandbox: "danger-full-access",
     approvalPolicy: "never",
     mainSessionName: "codex-chat-main",
@@ -325,6 +342,12 @@ const defaultConfig = configSchema.parse({
     defaultModel: "",
     defaultEffort: "medium",
     defaultServiceTier: "fast",
+    defaultCodexProfile: "",
+    defaultModelProvider: "",
+    serviceTierMode: "auto",
+    allowProviderOverride: false,
+    allowedCodexProfiles: [],
+    allowedModelProviders: [],
     defaultTimeoutSec: 1800,
     maxTimeoutSec: 7200,
     maxPromptBytes: 262_144,
@@ -431,6 +454,10 @@ function parseNumberEnv(value: string): number {
   return parsed;
 }
 
+function splitCsvEnv(value: string): string[] {
+  return Array.from(new Set(value.split(/[\s,]+/).map((part) => part.trim()).filter(Boolean)));
+}
+
 function parseTelegramUserIdEnvList(value: string): Array<number | string> {
   return value
     .split(",")
@@ -517,6 +544,16 @@ function collectEnvOverrides(
     { name: "CODEX_CHAT_CODEX_MODEL", path: ["codex", "model"] },
     { name: "CODEX_CHAT_CODEX_EFFORT", path: ["codex", "effort"] },
     { name: "CODEX_CHAT_CODEX_SERVICE_TIER", path: ["codex", "serviceTier"] },
+    { name: "CODEX_CHAT_CODEX_SERVICE_TIER_MODE", path: ["codex", "serviceTierMode"] },
+    { name: "CODEX_CHAT_CODEX_PROFILE", path: ["codex", "profile"] },
+    { name: "CODEX_CHAT_CODEX_MODEL_PROVIDER", path: ["codex", "modelProvider"] },
+    { name: "CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL", path: ["subagents", "defaultModel"] },
+    { name: "CODEX_CHAT_SUBAGENTS_DEFAULT_CODEX_PROFILE", path: ["subagents", "defaultCodexProfile"] },
+    { name: "CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL_PROVIDER", path: ["subagents", "defaultModelProvider"] },
+    { name: "CODEX_CHAT_SUBAGENTS_SERVICE_TIER_MODE", path: ["subagents", "serviceTierMode"] },
+    { name: "CODEX_CHAT_SUBAGENTS_ALLOW_PROVIDER_OVERRIDE", path: ["subagents", "allowProviderOverride"], parse: parseBooleanEnv },
+    { name: "CODEX_CHAT_SUBAGENTS_ALLOWED_CODEX_PROFILES", path: ["subagents", "allowedCodexProfiles"], parse: splitCsvEnv },
+    { name: "CODEX_CHAT_SUBAGENTS_ALLOWED_MODEL_PROVIDERS", path: ["subagents", "allowedModelProviders"], parse: splitCsvEnv },
     { name: "CODEX_CHAT_CODEX_SANDBOX", path: ["codex", "sandbox"] },
     {
       name: "CODEX_CHAT_CODEX_APPROVAL_POLICY",

@@ -20,7 +20,14 @@ model = "gpt-5.5"
 effort = "medium"
 # Main-loop Codex service tier. Current default is Fast; set "standard" here or via CODEX_CHAT_CODEX_SERVICE_TIER to opt back to standard/slow mode.
 serviceTier = "fast"
+# auto = omit serviceTier for non-openai modelProvider; always = force; omit = never send.
+serviceTierMode = "auto"
+# Codex CLI profile from user-level $CODEX_HOME/<name>.config.toml. Do not put provider auth in repo config.
 profile = ""
+# Optional app-server thread/start modelProvider override. Usually empty unless a Codex profile requires explicit provider selection.
+modelProvider = ""
+# Provider API key env names allowed through only to Codex child processes. Values stay in local env files, never TOML.
+providerApiKeyEnvNames = ["OPENROUTER_API_KEY"]
 sandbox = "danger-full-access"
 approvalPolicy = "never"
 mainSessionName = "codex-chat-main"
@@ -85,6 +92,14 @@ defaultModel = ""
 defaultEffort = "medium"
 # Subagents default to Fast mode; set "standard" only for an explicit standard/slow-mode override. Behavior prompts should still include serviceTier per dispatch.
 defaultServiceTier = "fast"
+# Optional defaults for Codex CLI profile/provider used by child subagent processes.
+defaultCodexProfile = ""
+defaultModelProvider = ""
+serviceTierMode = "auto"
+# Per-dispatch codexProfile/modelProvider overrides are rejected unless enabled and allowlisted.
+allowProviderOverride = false
+allowedCodexProfiles = []
+allowedModelProviders = []
 defaultTimeoutSec = 1800
 maxTimeoutSec = 7200
 maxPromptBytes = 262144
@@ -114,6 +129,10 @@ description = "Triage email/calendar context and draft recommendations without m
 # May be absolute; relative paths resolve from the codex-chat repo root.
 directory = "data/employees/email-calendar"
 profile = "email-calendar"
+codexProfile = ""
+modelProvider = ""
+# Leave serviceTierMode unset for defaults; set "omit" for non-OpenAI provider profiles.
+# serviceTierMode = "omit"
 model = "gpt-5.5"
 effort = "high"
 startup = "on_demand"

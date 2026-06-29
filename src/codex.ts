@@ -6,7 +6,7 @@ import type { Logger } from "pino";
 import { AppConfig } from "./config.js";
 import { BehaviorPack } from "./behavior.js";
 import type { EmployeeRuntimeClient, EmployeeThreadResumeInput, EmployeeThreadSpec, EmployeeThreadStartResult, EmployeeTurnInput } from "./employee-runtime.js";
-import { sanitizeChildProcessEnv } from "./env.js";
+import { sanitizeCodexChildProcessEnv } from "./env.js";
 import { LogBuffer, scrubSecrets } from "./log-buffer.js";
 import { StateStore } from "./state.js";
 import { CodexClient, CodexEvent, CodexHealth, CodexTurnInput } from "./types.js";
@@ -186,9 +186,10 @@ export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient 
     await this.assertAppServerListenAddressAvailable();
     const args = ["app-server", "--listen", listenUrl];
     for (const item of this.config.codex.extraConfig) args.push("-c", item);
-    if (this.config.codex.serviceTier === "fast") args.push("-c", "features.fast_mode=true");
+    if (this.config.codex.profile) args.push("--profile", this.config.codex.profile);
+    if (this.shouldSendServiceTier() && this.config.codex.serviceTier === "fast") args.push("-c", "features.fast_mode=true");
     this.logger.info({ component: "codex", event: "spawn_app_server", args }, "starting codex app-server");
-    const safeEnv = sanitizeChildProcessEnv(this.config);
+    const safeEnv = sanitizeCodexChildProcessEnv(this.config);
     const child = spawn(this.config.codex.binary, args, {
       cwd: this.config.service.workspace,
       env: safeEnv,
@@ -461,15 +462,16 @@ export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient 
   }
 
   private turnStartParams(userInput: unknown[]): Record<string, unknown> {
-    return {
+    const params: Record<string, unknown> = {
       threadId: this.sessionId,
       input: userInput,
       cwd: this.config.service.workspace,
       approvalPolicy: this.config.codex.approvalPolicy,
       model: this.config.codex.model,
-      serviceTier: this.config.codex.serviceTier,
       effort: this.config.codex.effort
     };
+    if (this.shouldSendServiceTier()) params.serviceTier = this.config.codex.serviceTier;
+    return params;
   }
 
   private async ensureThread(options: { forceNew?: boolean; verifyExisting?: boolean } = {}): Promise<void> {
@@ -497,8 +499,7 @@ export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient 
     const bootstrap = await this.behavior.loadBootstrapPrompt();
     const hash = await this.behavior.hash();
     const response = await this.request<Record<string, unknown>>("thread/start", {
-      model: this.config.codex.model,
-      serviceTier: this.config.codex.serviceTier,
+      ...this.mainThreadModelParams(),
       cwd: this.config.service.workspace,
       approvalPolicy: this.config.codex.approvalPolicy,
       sandbox: this.config.codex.sandbox,
@@ -524,6 +525,21 @@ export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient 
     });
   }
 
+
+  private mainThreadModelParams(): Record<string, unknown> {
+    const params: Record<string, unknown> = { model: this.config.codex.model };
+    if (this.config.codex.modelProvider) params.modelProvider = this.config.codex.modelProvider;
+    if (this.shouldSendServiceTier()) params.serviceTier = this.config.codex.serviceTier;
+    return params;
+  }
+
+  private shouldSendServiceTier(): boolean {
+    if (this.config.codex.serviceTierMode === "omit") return false;
+    if (this.config.codex.serviceTierMode === "always") return true;
+    const provider = this.config.codex.modelProvider.trim().toLowerCase();
+    return !provider || provider === "openai";
+  }
+
   private async recoverThread(event: string, error: unknown): Promise<void> {
     this.logger.warn({ component: "codex", event, error, sessionId: this.sessionId }, "Codex thread was missing; starting a new thread");
     this.sessionId = undefined;
@@ -541,8 +557,7 @@ export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient 
     const hash = await this.behavior.hash();
     await this.request("thread/resume", {
       threadId: sessionId,
-      model: this.config.codex.model,
-      serviceTier: this.config.codex.serviceTier,
+      ...this.mainThreadModelParams(),
       cwd: this.config.service.workspace,
       approvalPolicy: this.config.codex.approvalPolicy,
       sandbox: this.config.codex.sandbox,

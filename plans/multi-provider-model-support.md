@@ -165,7 +165,7 @@ This sequence intentionally stops before main-loop provider switching, Employee 
      codex --profile openrouter exec --model anthropic/claude-sonnet-4.5 "Reply with: openrouter ok"
      ```
 
-2. **Config/schema additions, default no-op**
+2. **Config/schema additions, default no-op** — implemented 2026-06-29 in codex-chat/Brain for subagent profile/provider plumbing; live OpenRouter smoke still requires key entry and codex-chat restart.
    - Add optional subagent config fields: `defaultCodexProfile`, `defaultModelProvider`, `serviceTierMode`, `allowProviderOverride`, `allowedCodexProfiles`, and `allowedModelProviders`.
    - Add optional dispatch/job fields: `codexProfile`, `modelProvider`, and `serviceTierMode`. Existing dispatches must remain valid and unchanged.
    - MVP config should set `allowedCodexProfiles = ["openrouter"]`, `allowedModelProviders = ["openrouter"]`, and `serviceTierMode = "omit"` for OpenRouter smoke jobs.
@@ -405,3 +405,17 @@ Manual smoke:
 1. Provider/model selection must be overridable per individual dispatch, not just per subagent profile. This is critical for the first runtime design.
 2. The main loop stays on OpenAI for now. The first implementation should pilot subagents on different models/providers, while keeping startup-time configurable main-loop provider/model switching as a later planned phase.
 3. Brain should become the UI/control plane for model-provider defaults and policies for the main loop and subagents, because Brain can already edit codex-chat config/env and restart codex-chat. codex-chat remains responsible for runtime validation, allowlist enforcement, dispatch metadata, and status/detail reporting.
+
+
+## Step 1 implementation notes (2026-06-29)
+
+Implemented the default-no-op infrastructure/config plumbing for OpenRouter-backed subagents:
+
+- codex-chat now accepts per-dispatch `codexProfile`, `modelProvider`, and `serviceTierMode` on `dispatch_subagent` directives. Provider/profile overrides are rejected unless `subagents.allowProviderOverride` is true and requested values pass `allowedCodexProfiles` / `allowedModelProviders`.
+- Both subagent backends receive the resolved Codex profile/provider/model spec per job. `codex_app_server` spawns with `--profile`, sends `modelProvider` only on `thread/start`, and omits `serviceTier` / Fast config when `serviceTierMode = "omit"`. `codex_exec` spawns with `--profile` and omits Fast config under the same mode.
+- The main app-server launch now honors `[codex].profile`, optional `modelProvider`, and `serviceTierMode` for future startup-time provider switching while preserving current defaults.
+- Generic child processes strip `OPENROUTER_API_KEY`; Codex child processes pass only configured provider API key env names through, so provider auth reaches Codex without being logged or embedded in repo config.
+- Brain admin has an OpenRouter settings panel and API. It writes the OpenRouter key as a write-only env secret, writes non-secret codex-chat subagent defaults/allowlists, and creates the user-level `$CODEX_HOME/openrouter.config.toml` profile.
+- Operator workflow is documented in `docs/openrouter-subagents.md`.
+
+Not done in this step: no real OpenRouter key was required, no live OpenRouter subagent was launched, and codex-chat was not restarted by this subagent.

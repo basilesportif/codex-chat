@@ -35,7 +35,8 @@ const SECRET_PATTERNS: Array<{ regex: RegExp; replacement: string }> = [
   { regex: /(authorization\s*[:=]\s*"?(?:bearer\s+)?)[A-Za-z0-9._-]{20,}/gi, replacement: "$1[REDACTED]" },
   { regex: /(api[_-]?key\s*[:=]\s*"?)[A-Za-z0-9._-]{20,}/gi, replacement: "$1[REDACTED]" },
   { regex: /(CODEXCHAT_INGEST_API_KEYS\s*=\s*)[^\s]+/g, replacement: "$1[REDACTED]" },
-  { regex: /(SLACK_(?:SIGNING_SECRET|BOT_TOKEN|APP_TOKEN)\s*=\s*)[^\s]+/g, replacement: "$1[REDACTED]" }
+  { regex: /(SLACK_(?:SIGNING_SECRET|BOT_TOKEN|APP_TOKEN)\s*=\s*)[^\s]+/g, replacement: "$1[REDACTED]" },
+  { regex: /(OPENROUTER_API_KEY\s*=\s*)[^\s]+/g, replacement: "$1[REDACTED]" }
 ];
 
 export function scrubSecrets(line: string): string {

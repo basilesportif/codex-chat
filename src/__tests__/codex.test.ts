@@ -56,6 +56,9 @@ function testConfig(rootDir: string): AppConfig {
       model: "gpt-test",
       effort: "medium",
       profile: "",
+      modelProvider: "",
+      serviceTierMode: "auto",
+      providerApiKeyEnvNames: ["OPENROUTER_API_KEY"],
       sandbox: "danger-full-access",
       approvalPolicy: "never",
       mainSessionName: "codex-chat-main",
@@ -201,6 +204,59 @@ describe("codex clients", () => {
 
     const args = spawn.mock.calls[0]?.[1] as string[];
     expect(args).toContain("features.fast_mode=true");
+    await client.stop();
+  });
+
+
+
+  test("passes configured Codex profile and model provider while omitting service tier when requested", async () => {
+    vi.resetModules();
+    const spawn = vi.fn(() => fakeChild());
+    const sent: Array<{ method: string; params: Record<string, unknown> }> = [];
+    vi.doMock("node:child_process", async () => {
+      const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+      return { ...actual, spawn };
+    });
+    vi.doMock("ws", () => {
+      class FakeWebSocket extends EventEmitter {
+        static OPEN = 1;
+        readyState = 1;
+        constructor(readonly url: string) {
+          super();
+          queueMicrotask(() => this.emit("open"));
+        }
+        send(raw: string): void {
+          const message = JSON.parse(raw) as { id: number; method: string; params: Record<string, unknown> };
+          sent.push({ method: message.method, params: message.params });
+          const result = message.method === "thread/start" ? { thread: { id: "thread-provider" } } : {};
+          queueMicrotask(() => this.emit("message", JSON.stringify({ id: message.id, result })));
+        }
+        close(): void {
+          this.readyState = 3;
+        }
+      }
+      return { default: FakeWebSocket };
+    });
+    const { AppServerCodexClient } = await import("../codex.js");
+    const state = { getCodexSession: vi.fn().mockResolvedValue(undefined), setCodexSession: vi.fn().mockResolvedValue(undefined) };
+    const behavior = { loadBootstrapPrompt: vi.fn().mockResolvedValue("bootstrap"), hash: vi.fn().mockResolvedValue("hash") };
+    const config = testConfig("/tmp/codex-chat-test");
+    config.codex.profile = "openrouter";
+    config.codex.modelProvider = "openrouter";
+    config.codex.model = "anthropic/claude-sonnet-4.5";
+    config.codex.serviceTier = "fast";
+    config.codex.serviceTierMode = "omit";
+    const client = new AppServerCodexClient(config, state as never, behavior as never, fakeLogger() as never);
+
+    await client.start();
+
+    const args = spawn.mock.calls[0]?.[1] as string[];
+    expect(args).toContain("--profile");
+    expect(args).toContain("openrouter");
+    expect(args).not.toContain("features.fast_mode=true");
+    const threadStart = sent.find((message) => message.method === "thread/start");
+    expect(threadStart?.params).toMatchObject({ model: "anthropic/claude-sonnet-4.5", modelProvider: "openrouter" });
+    expect(threadStart?.params).not.toHaveProperty("serviceTier");
     await client.stop();
   });
 

@@ -16,9 +16,19 @@ const overrideEnvNames = [
   "CODEX_CHAT_CODEX_MODEL",
   "CODEX_CHAT_CODEX_EFFORT",
   "CODEX_CHAT_CODEX_SERVICE_TIER",
+  "CODEX_CHAT_CODEX_SERVICE_TIER_MODE",
+  "CODEX_CHAT_CODEX_PROFILE",
+  "CODEX_CHAT_CODEX_MODEL_PROVIDER",
   "CODEX_CHAT_CODEX_SANDBOX",
   "CODEX_CHAT_CODEX_APPROVAL_POLICY",
   "CODEX_CHAT_SUBAGENTS_BACKEND",
+  "CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL",
+  "CODEX_CHAT_SUBAGENTS_DEFAULT_CODEX_PROFILE",
+  "CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL_PROVIDER",
+  "CODEX_CHAT_SUBAGENTS_SERVICE_TIER_MODE",
+  "CODEX_CHAT_SUBAGENTS_ALLOW_PROVIDER_OVERRIDE",
+  "CODEX_CHAT_SUBAGENTS_ALLOWED_CODEX_PROFILES",
+  "CODEX_CHAT_SUBAGENTS_ALLOWED_MODEL_PROVIDERS",
   "CODEX_CHAT_API_ENABLED",
   "CODEX_CHAT_API_HOST",
   "CODEX_CHAT_API_PORT",
@@ -84,6 +94,8 @@ userIds = [12345]
     expect(config.codex.model).toBe("gpt-test");
     expect(config.codex.sandbox).toBe("danger-full-access");
     expect(config.codex.serviceTier).toBe("fast");
+    expect(config.codex.serviceTierMode).toBe("auto");
+    expect(config.codex.modelProvider).toBe("");
     expect(config.subagents.defaultServiceTier).toBe("fast");
     expect(config.subagents.backend).toBe("codex_exec");
     expect(config.api.enabled).toBe(false);
@@ -152,6 +164,35 @@ botTokenEnv = "CUSTOM_SLACK_BOT_TOKEN"
     expect(config.transcription.diarizeModel).toBe(
       "gpt-4o-transcribe-diarize-custom",
     );
+  });
+
+
+
+  test("loads provider/profile config fields and environment overrides", async () => {
+    process.env.CODEX_CHAT_CODEX_PROFILE = "main-profile";
+    process.env.CODEX_CHAT_CODEX_MODEL_PROVIDER = "openrouter";
+    process.env.CODEX_CHAT_CODEX_SERVICE_TIER_MODE = "omit";
+    process.env.CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL = "anthropic/claude-sonnet-4.5";
+    process.env.CODEX_CHAT_SUBAGENTS_DEFAULT_CODEX_PROFILE = "openrouter";
+    process.env.CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL_PROVIDER = "openrouter";
+    process.env.CODEX_CHAT_SUBAGENTS_SERVICE_TIER_MODE = "omit";
+    process.env.CODEX_CHAT_SUBAGENTS_ALLOW_PROVIDER_OVERRIDE = "true";
+    process.env.CODEX_CHAT_SUBAGENTS_ALLOWED_CODEX_PROFILES = "openrouter, local";
+    process.env.CODEX_CHAT_SUBAGENTS_ALLOWED_MODEL_PROVIDERS = "openrouter";
+    const path = await tempConfig("version = 1\n");
+
+    const config = await loadConfig(path);
+
+    expect(config.codex.profile).toBe("main-profile");
+    expect(config.codex.modelProvider).toBe("openrouter");
+    expect(config.codex.serviceTierMode).toBe("omit");
+    expect(config.subagents.defaultModel).toBe("anthropic/claude-sonnet-4.5");
+    expect(config.subagents.defaultCodexProfile).toBe("openrouter");
+    expect(config.subagents.defaultModelProvider).toBe("openrouter");
+    expect(config.subagents.serviceTierMode).toBe("omit");
+    expect(config.subagents.allowProviderOverride).toBe(true);
+    expect(config.subagents.allowedCodexProfiles).toEqual(["openrouter", "local"]);
+    expect(config.subagents.allowedModelProviders).toEqual(["openrouter"]);
   });
 
   test("allows app-server subagent backend opt-in from config and env", async () => {

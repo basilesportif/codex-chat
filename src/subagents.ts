@@ -1,11 +1,11 @@
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Logger } from "pino";
 import { AppConfig, resolveConfigPath } from "./config.js";
 import { BehaviorPack } from "./behavior.js";
 import { DirectiveAction } from "./directives.js";
 import { StateStore } from "./state.js";
-import { OutputTarget, Route, ServiceTier, SubagentBackendKind, SubagentJob, SubagentOwnerType, SubagentResultTarget } from "./types.js";
+import { OutputTarget, Route, ServiceTier, ServiceTierMode, SubagentBackendKind, SubagentJob, SubagentOwnerType, SubagentResultTarget } from "./types.js";
 import {
   ChildAgentBackend,
   ChildAgentFinish,
@@ -50,6 +50,9 @@ interface DispatchInput {
   model?: string;
   effort?: string;
   serviceTier?: ServiceTier;
+  serviceTierMode?: ServiceTierMode;
+  codexProfile?: string;
+  modelProvider?: string;
   summary?: string;
   images?: string[];
   originChatId?: number;
@@ -141,6 +144,9 @@ export interface ActiveSubagentJobSnapshot {
   model?: string;
   effort?: string;
   serviceTier?: ServiceTier;
+  serviceTierMode?: ServiceTierMode;
+  codexProfile?: string;
+  modelProvider?: string;
   ownerType: SubagentOwnerType;
   ownerId?: string;
   ownerRequestId?: string;
@@ -221,6 +227,9 @@ export class SubagentManager {
       model: action.model,
       effort: action.effort,
       serviceTier: action.serviceTier,
+      serviceTierMode: action.serviceTierMode,
+      codexProfile: action.codexProfile,
+      modelProvider: action.modelProvider,
       summary: action.summary,
       images: action.images,
       originChatId: origin?.chatId,
@@ -244,10 +253,9 @@ export class SubagentManager {
     }
     input.id = makeId("job");
     const artifactDir = resolveConfigPath(this.config, join(this.config.subagents.artifactDir, input.id));
-    const model = this.resolveModel(input.model);
-    const effort = this.resolveEffort(input.effort);
+    const modelSpec = this.resolveSubagentModelSpec(input);
+    const { model, effort, serviceTier, serviceTierMode, codexProfile, modelProvider } = modelSpec;
     const ownerType = this.normalizeOwnerType(input.ownerType);
-    const serviceTier = this.resolveServiceTier(input.serviceTier);
     const ownerId = input.ownerId ?? this.defaultOwnerId(ownerType);
     const resultTarget = input.resultTarget ?? this.resultTargetForRoute(input.route);
     const queuedJob: SubagentJob = {
@@ -269,6 +277,9 @@ export class SubagentManager {
       model,
       effort,
       serviceTier,
+      serviceTierMode,
+      codexProfile,
+      modelProvider,
       backend: this.effectiveBackend(),
       summary: input.summary,
       enqueuedAt: nowIso(),
@@ -647,10 +658,9 @@ export class SubagentManager {
     const stderrPath = join(artifactDir, "stderr.log");
     const appServerLogPath = join(artifactDir, "app-server.log");
     const timeoutSec = Math.min(input.timeoutSec ?? this.config.subagents.defaultTimeoutSec, this.config.subagents.maxTimeoutSec);
-    const model = this.resolveModel(input.model);
-    const effort = this.resolveEffort(input.effort);
+    const modelSpec = this.resolveSubagentModelSpec(input, this.jobs.get(id));
+    const { model, effort, serviceTier, serviceTierMode, codexProfile, modelProvider } = modelSpec;
     const backendKind = this.backendForJob(id);
-    const serviceTier = this.resolveServiceTier(input.serviceTier ?? this.jobs.get(id)?.serviceTier);
     const ownerType = this.normalizeOwnerType(input.ownerType ?? this.jobs.get(id)?.ownerType);
     const ownerId = input.ownerId ?? this.jobs.get(id)?.ownerId ?? this.defaultOwnerId(ownerType);
     const resultTarget = input.resultTarget ?? this.jobs.get(id)?.resultTarget ?? this.resultTargetForRoute(input.route);
@@ -673,6 +683,9 @@ export class SubagentManager {
       model,
       effort,
       serviceTier,
+      serviceTierMode,
+      codexProfile,
+      modelProvider,
       backend: backendKind,
       summary: input.summary,
       enqueuedAt: nowIso(),
@@ -699,6 +712,9 @@ export class SubagentManager {
       model,
       effort,
       serviceTier,
+      serviceTierMode,
+      codexProfile,
+      modelProvider,
       backend: backendKind,
       summary: input.summary,
       originChatId: input.originChatId,
@@ -706,6 +722,18 @@ export class SubagentManager {
     });
     this.jobs.set(id, job);
     await this.state.saveJob(job);
+    await appendFile(stdoutPath, `${JSON.stringify({
+      event: "subagent_launch_config",
+      at: nowIso(),
+      backend: backendKind,
+      profile: job.profile,
+      codexProfile: job.codexProfile || undefined,
+      modelProvider: job.modelProvider || undefined,
+      model: job.model,
+      effort: job.effort,
+      serviceTier: job.serviceTier,
+      serviceTierMode: job.serviceTierMode
+    })}\n`, { mode: 0o600 });
     const backend = this.backends[backendKind];
     const child = await backend.start({
       job,
@@ -717,6 +745,9 @@ export class SubagentManager {
       model,
       effort,
       serviceTier,
+      serviceTierMode,
+      codexProfile,
+      modelProvider,
       images: input.images ?? [],
       onJobUpdated: (updatedJob) => this.state.saveJob(updatedJob)
     });
@@ -838,6 +869,9 @@ export class SubagentManager {
       model: job.model,
       effort: job.effort,
       serviceTier: job.serviceTier,
+      serviceTierMode: job.serviceTierMode,
+      codexProfile: job.codexProfile,
+      modelProvider: job.modelProvider,
       ownerType: this.jobOwnerType(job),
       ownerId: job.ownerId,
       ownerRequestId: job.ownerRequestId,
@@ -894,6 +928,46 @@ export class SubagentManager {
 
   resolveServiceTier(serviceTier?: ServiceTier): ServiceTier {
     return serviceTier ?? this.config.subagents.defaultServiceTier ?? "fast";
+  }
+
+  resolveServiceTierMode(serviceTierMode?: ServiceTierMode, modelProvider?: string): ServiceTierMode {
+    const requested = serviceTierMode ?? this.config.subagents.serviceTierMode ?? "auto";
+    if (requested !== "auto") return requested;
+    const provider = (modelProvider ?? "").trim().toLowerCase();
+    if (provider && provider !== "openai") return "omit";
+    return "auto";
+  }
+
+  resolveCodexProfile(codexProfile?: string): string {
+    return codexProfile || this.config.subagents.defaultCodexProfile || this.config.codex.profile || "";
+  }
+
+  resolveModelProvider(modelProvider?: string): string {
+    return modelProvider || this.config.subagents.defaultModelProvider || this.config.codex.modelProvider || "";
+  }
+
+  private resolveSubagentModelSpec(input: Pick<DispatchInput, "model" | "effort" | "serviceTier" | "serviceTierMode" | "codexProfile" | "modelProvider">, existing?: SubagentJob): { model: string; effort: string; serviceTier: ServiceTier; serviceTierMode: ServiceTierMode; codexProfile: string; modelProvider: string } {
+    const defaultCodexProfile = existing?.codexProfile || this.config.subagents.defaultCodexProfile || this.config.codex.profile || "";
+    const defaultModelProvider = existing?.modelProvider || this.config.subagents.defaultModelProvider || this.config.codex.modelProvider || "";
+    const codexProfile = input.codexProfile || defaultCodexProfile;
+    const modelProvider = input.modelProvider || defaultModelProvider;
+
+    if (input.codexProfile && input.codexProfile !== defaultCodexProfile) this.assertProviderOverrideAllowed("codexProfile", input.codexProfile, this.config.subagents.allowedCodexProfiles);
+    if (input.modelProvider && input.modelProvider !== defaultModelProvider) this.assertProviderOverrideAllowed("modelProvider", input.modelProvider, this.config.subagents.allowedModelProviders);
+
+    return {
+      model: input.model || existing?.model || this.resolveModel(),
+      effort: input.effort || existing?.effort || this.resolveEffort(),
+      serviceTier: input.serviceTier ?? existing?.serviceTier ?? this.resolveServiceTier(),
+      serviceTierMode: this.resolveServiceTierMode(input.serviceTierMode ?? existing?.serviceTierMode, modelProvider),
+      codexProfile,
+      modelProvider
+    };
+  }
+
+  private assertProviderOverrideAllowed(kind: "codexProfile" | "modelProvider", value: string, allowedValues: readonly string[]): void {
+    if (!this.config.subagents.allowProviderOverride) throw new Error(`Subagent ${kind} override is not enabled`);
+    if (allowedValues.length > 0 && !allowedValues.includes(value)) throw new Error(`Subagent ${kind} is not allowed: ${value}`);
   }
 
   private configuredBackend(): SubagentBackendKind {

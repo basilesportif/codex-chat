@@ -999,7 +999,7 @@ export class ServiceSupervisor {
   }
 
   private formatJobModelEffort(job: SubagentJob): string {
-    const parts = [job.model ? `model=${job.model}` : "", job.effort ? `effort=${job.effort}` : "", job.serviceTier ? `tier=${job.serviceTier}` : ""].filter(Boolean);
+    const parts = [job.model ? `model=${job.model}` : "", job.effort ? `effort=${job.effort}` : "", job.serviceTier ? `tier=${job.serviceTier}` : "", job.serviceTierMode ? `tierMode=${job.serviceTierMode}` : "", job.codexProfile ? `codexProfile=${job.codexProfile}` : "", job.modelProvider ? `provider=${job.modelProvider}` : ""].filter(Boolean);
     return parts.length > 0 ? ` (${parts.join(" ")})` : "";
   }
 
@@ -1057,7 +1057,8 @@ export class ServiceSupervisor {
       `elapsed: ${elapsed}`,
       `pid: ${job.pid ?? "unknown"}`
     ];
-    if (job.model || job.effort || job.serviceTier) lines.push(`model/effort/tier: ${job.model ?? "default"} / ${job.effort ?? "default"} / ${job.serviceTier ?? "default"}`);
+    if (job.model || job.effort || job.serviceTier || job.serviceTierMode || job.codexProfile || job.modelProvider) lines.push(`model/effort/tier: ${job.model ?? "default"} / ${job.effort ?? "default"} / ${job.serviceTier ?? "default"} (${job.serviceTierMode ?? "auto"})`);
+    if (job.codexProfile || job.modelProvider) lines.push(`codex profile/provider: ${job.codexProfile || "default"} / ${job.modelProvider || "default"}`);
     const summary = this.compactJobText(job.summary);
     if (summary) lines.push(`summary: ${summary}`);
     if (job.ownerRequestId) lines.push(`ownerRequestId: ${job.ownerRequestId}`);
@@ -1077,7 +1078,15 @@ export class ServiceSupervisor {
     const model = action.model || this.subagents.resolveModel(action.model);
     const effort = action.effort || this.subagents.resolveEffort(action.effort);
     const tier = action.serviceTier || this.subagents.resolveServiceTier(action.serviceTier);
-    const lines = [`Sub: ${summary}`, `${action.profile} · ${model} · ${effort} · ${tier}`];
+    const provider = action.modelProvider || this.subagents.resolveModelProvider(action.modelProvider);
+    const codexProfile = action.codexProfile || this.subagents.resolveCodexProfile(action.codexProfile);
+    const tierMode = this.subagents.resolveServiceTierMode(action.serviceTierMode, provider);
+    const providerText = [
+      codexProfile ? `profile ${codexProfile}` : "",
+      provider ? `provider ${provider}` : "",
+      (codexProfile || provider || tierMode !== "auto" || action.serviceTierMode) ? `tierMode ${tierMode}` : ""
+    ].filter(Boolean).join(" · ");
+    const lines = [`Sub: ${summary}`, `${action.profile} · ${model} · ${effort} · ${tier}${providerText ? ` · ${providerText}` : ""}`];
     if (followupText) lines.push("", followupText);
     return lines.join("\n");
   }

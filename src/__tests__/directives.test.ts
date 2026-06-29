@@ -18,7 +18,10 @@ describe("directive parsing", () => {
       "summary": "Inspect logs",
       "model": "gpt-5.5",
       "effort": "high",
-      "serviceTier": "fast"
+      "serviceTier": "fast",
+      "codexProfile": "openrouter",
+      "modelProvider": "openrouter",
+      "serviceTierMode": "omit"
     }
   ]
 }
@@ -36,6 +39,9 @@ After`);
       expect(action.model).toBe("gpt-5.5");
       expect(action.effort).toBe("high");
       expect(action.serviceTier).toBe("fast");
+      expect(action.codexProfile).toBe("openrouter");
+      expect(action.modelProvider).toBe("openrouter");
+      expect(action.serviceTierMode).toBe("omit");
     }
   });
 

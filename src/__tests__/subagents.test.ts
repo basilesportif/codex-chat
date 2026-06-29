@@ -49,6 +49,9 @@ function makeConfig(rootDir: string, maxConcurrent = 2): AppConfig {
       sandbox: "danger-full-access",
       approvalPolicy: "never",
       profile: "",
+      modelProvider: "",
+      serviceTierMode: "auto",
+      providerApiKeyEnvNames: ["OPENROUTER_API_KEY"],
       model: "gpt-test",
       extraConfig: [],
       serviceTier: "fast"
@@ -60,6 +63,12 @@ function makeConfig(rootDir: string, maxConcurrent = 2): AppConfig {
       defaultModel: "",
       defaultEffort: "medium",
       defaultServiceTier: "fast",
+      defaultCodexProfile: "",
+      defaultModelProvider: "",
+      serviceTierMode: "auto",
+      allowProviderOverride: false,
+      allowedCodexProfiles: [],
+      allowedModelProviders: [],
       defaultTimeoutSec: 60,
       maxTimeoutSec: 60,
       maxPromptBytes: 1_000_000,
@@ -199,6 +208,68 @@ describe("subagents", () => {
     const saved = state.saveJob.mock.calls[0]?.[0];
     expect(saved).toMatchObject({ model: "gpt-5.5", effort: "xhigh", serviceTier: "fast", summary: "test task", status: "queued" });
     expect(manager.listJobs()[0]).toMatchObject({ model: "gpt-5.5", effort: "xhigh", serviceTier: "fast", summary: "test task" });
+  });
+
+
+
+  test("records allowed per-dispatch Codex profile and model provider overrides", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
+    tempDirs.push(root);
+    const { SubagentManager } = await import("../subagents.js");
+    const config = makeConfig(root, 0);
+    config.subagents.allowProviderOverride = true;
+    config.subagents.allowedCodexProfiles = ["openrouter"];
+    config.subagents.allowedModelProviders = ["openrouter"];
+    const state = { saveJob: vi.fn().mockResolvedValue(undefined) };
+    const manager = new SubagentManager(
+      config,
+      { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") } as never,
+      state as never,
+      fakeLogger() as never,
+      { onReturnToMain: vi.fn(), onSendToUser: vi.fn() }
+    );
+
+    await manager.dispatch({
+      profile: "x",
+      prompt: "a",
+      route: "return_to_main",
+      model: "anthropic/claude-sonnet-4.5",
+      effort: "medium",
+      serviceTier: "fast",
+      serviceTierMode: "omit",
+      codexProfile: "openrouter",
+      modelProvider: "openrouter",
+      summary: "openrouter task"
+    });
+
+    expect(state.saveJob.mock.calls[0]?.[0]).toMatchObject({
+      codexProfile: "openrouter",
+      modelProvider: "openrouter",
+      serviceTierMode: "omit",
+      model: "anthropic/claude-sonnet-4.5",
+      status: "queued"
+    });
+  });
+
+  test("rejects per-dispatch provider overrides unless enabled", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
+    tempDirs.push(root);
+    const { SubagentManager } = await import("../subagents.js");
+    const config = makeConfig(root, 0);
+    const manager = new SubagentManager(
+      config,
+      { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") } as never,
+      { saveJob: vi.fn().mockResolvedValue(undefined) } as never,
+      fakeLogger() as never,
+      { onReturnToMain: vi.fn(), onSendToUser: vi.fn() }
+    );
+
+    await expect(manager.dispatch({
+      profile: "x",
+      prompt: "a",
+      route: "return_to_main",
+      codexProfile: "openrouter"
+    })).rejects.toThrow(/codexProfile override is not enabled/);
   });
 
   test("records owner and result metadata with compatible main defaults", async () => {

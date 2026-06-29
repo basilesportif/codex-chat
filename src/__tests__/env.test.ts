@@ -1,8 +1,8 @@
 import { describe, expect, test } from "vitest";
 import type { AppConfig } from "../config.js";
-import { childSecretEnvNames, sanitizeChildProcessEnv } from "../env.js";
+import { childSecretEnvNames, sanitizeChildProcessEnv, sanitizeCodexChildProcessEnv } from "../env.js";
 
-function config(apiKeyEnv = "TRANSCRIPTION_API_KEY", ingestKeysEnv?: string): Pick<AppConfig, "transcription"> & Partial<Pick<AppConfig, "ingest" | "slack">> {
+function config(apiKeyEnv = "TRANSCRIPTION_API_KEY", ingestKeysEnv?: string): Pick<AppConfig, "transcription"> & Partial<Pick<AppConfig, "ingest" | "slack" | "codex">> {
   return {
     transcription: { apiKeyEnv },
     ingest: ingestKeysEnv ? { apiKeysEnv: ingestKeysEnv } : undefined,
@@ -10,8 +10,9 @@ function config(apiKeyEnv = "TRANSCRIPTION_API_KEY", ingestKeysEnv?: string): Pi
       signingSecretEnv: "SLACK_SIGNING_SECRET",
       botTokenEnv: "SLACK_BOT_TOKEN",
       appTokenEnv: "SLACK_APP_TOKEN"
-    }
-  } as Pick<AppConfig, "transcription"> & Partial<Pick<AppConfig, "ingest" | "slack">>;
+    },
+    codex: { providerApiKeyEnvNames: ["OPENROUTER_API_KEY"] }
+  } as Pick<AppConfig, "transcription"> & Partial<Pick<AppConfig, "ingest" | "slack" | "codex">>;
 }
 
 describe("child process environment sanitizer", () => {
@@ -46,6 +47,7 @@ describe("child process environment sanitizer", () => {
   test("reports the literal and configured secret env names", () => {
     expect(new Set(childSecretEnvNames(config("CUSTOM_TRANSCRIPTION_KEY")))).toEqual(new Set([
       "OPENAI_API_KEY",
+      "OPENROUTER_API_KEY",
       "CUSTOM_TRANSCRIPTION_KEY",
       "SLACK_SIGNING_SECRET",
       "SLACK_BOT_TOKEN",
@@ -53,6 +55,7 @@ describe("child process environment sanitizer", () => {
     ]));
     expect(new Set(childSecretEnvNames(config("OPENAI_API_KEY")))).toEqual(new Set([
       "OPENAI_API_KEY",
+      "OPENROUTER_API_KEY",
       "SLACK_SIGNING_SECRET",
       "SLACK_BOT_TOKEN",
       "SLACK_APP_TOKEN"
@@ -67,6 +70,15 @@ describe("child process environment sanitizer", () => {
 
     expect(sanitized).not.toHaveProperty("CODEXCHAT_INGEST_API_KEYS");
     expect(sanitized.OTHER_VAR).toBe("keep");
+  });
+
+
+
+  test("passes provider API key env only to Codex child processes", () => {
+    const input = { OPENROUTER_API_KEY: "or-secret", OTHER_VAR: "keep" };
+
+    expect(sanitizeChildProcessEnv(config(), input)).not.toHaveProperty("OPENROUTER_API_KEY");
+    expect(sanitizeCodexChildProcessEnv(config(), input).OPENROUTER_API_KEY).toBe("or-secret");
   });
 
   test("strips configured Slack secrets", () => {

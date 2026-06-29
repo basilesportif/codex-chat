@@ -35,7 +35,7 @@ The adapter currently supports:
 
 | Slack app surface | codex-chat behavior |
 | --- | --- |
-| `app_mention` in public channels | Starts/resumes a thread-scoped Slack conversation and strips the bot mention. |
+| `app_mention` in public channels | Target behavior: root channel mentions start/resume the channel-visible Slack conversation and strip the bot mention; mentions already inside a reply thread start/resume that explicit thread. Current implementation still synthesizes a thread for root channel mentions and should be changed. |
 | `message.im` | Starts/resumes a DM conversation. |
 | `message.mpim` | Starts/resumes a MPIM conversation. |
 | `message.groups` | Starts/resumes a private-channel conversation/thread when the bot is a member. |
@@ -48,41 +48,65 @@ present in authorizations, message timestamp, and thread timestamp. These fields
 feed `ActorContext`, `OutputTarget`, `ConversationKey`, temporary
 source-conversation grants, and audit/correlation IDs.
 
-## Multi-channel and thread coherence requirements
+## Multi-channel, channel-first, and explicit-thread requirements
 
 The canonical requirements live in Brain's
 `plans/slack-company-brain-runtime.md`; the runtime contract here must preserve
 these adapter-owned behaviors:
 
-- Channel context and thread conversations are distinct. Ambient Slack channel
-  memory/summaries are keyed by `{enterpriseId?, teamId, channelId}` while live
-  reply-thread sessions are keyed by `{enterpriseId?, teamId, channelId,
-  threadTs}`. DMs key continuity by the DM conversation ID.
-- A root channel app mention creates or resumes a thread by using
-  `event.thread_ts ?? event.ts`; follow-up messages in that Slack thread resume
-  the same `ConversationSession`.
-- Thread replies use thread history by default. Bounded channel history or
-  channel summaries are fetched only when the request needs channel context and
-  effective grants permit it.
-- DMs, MPIMs, public channels, and private channels must not share prompt
-  history, summaries, subagent callbacks, or output targets unless an explicit
-  capability-checked retrieval/export route authorizes that crossing.
-- Every Slack-derived message, summary, artifact, subagent job, and callback
-  needs source labels for team/channel/channel type/thread/message IDs so
-  retrieval filters and outbound routing can prevent cross-channel leakage.
-- `return_to_main`, `send_to_user`, progress, failure, and direct-fallback
-  callbacks from Slack-originated work must carry the originating channel/thread
-  or DM output target. Late callbacks after hibernation/restart must still land
-  in the originating Slack thread/DM, not a global channel.
-- Runtime telemetry should expose redacted channel/thread counters, session
-  create/resume/hibernate/archive events, selected context source, capability
-  denials, Slack Web API send result classes, and subagent callback routing for
+- **Default channel replies.** A root `app_mention` in a public/private Slack
+  channel should create or resume a channel-visible conversation keyed by
+  `{enterpriseId?, teamId, channelId}` and send progress/final/error output to
+  that channel with no `thread_ts`. This is a planned correction to the current
+  foundation behavior, which still falls back to `threadTs = event.ts` for root
+  public-channel mentions.
+- **Explicit thread contexts.** A message that is already inside a Slack reply
+  chain (`thread_ts` present and different from the message `ts`) creates or
+  resumes a distinct thread session keyed by `{enterpriseId?, teamId, channelId,
+  threadTs}`. Thread-originated outputs and late callbacks stay in that thread
+  unless an explicit authorized reroute posts to the channel.
+- **Avoid fragmented context.** Do not create a fresh assistant session for each
+  root channel mention. Channel turns should share a bounded channel session
+  summary/event journal, while thread sessions remain side conversations whose
+  decisions enter channel memory only through attributed summaries or explicit
+  channel posts.
+- **Context hydration.** Channel-first answers need bounded Slack context. The
+  runtime should expose one safe hydrator over either Slack Web API reads
+  (`conversations.history` for channel windows, `conversations.replies` for
+  threads) or recorded event history for allowlisted channels. Public channel
+  API reads/event recording require adding public-channel scopes/events such as
+  `channels:history`, `channels:read`, and likely `message.channels`; the
+  current manifest only covers app mentions plus private-channel/DM/MPIM
+  history/read scopes.
+- **Source labels and privacy.** Every Slack-derived message, summary,
+  artifact, subagent job, and callback needs source labels for
+  `{teamId, channelId, channelType, threadTs?, messageTs?}` and inherited
+  capability labels. Retrieval must filter by labels and grants before text
+  reaches prompts, subagents, or callback composition.
+- **DMs/MPIMs/private channels.** DMs key continuity by DM conversation ID.
+  MPIMs and private channels use conversation-level continuity by default and
+  explicit thread continuity only when Slack supplies a source `thread_ts`.
+  They must not share prompt history, summaries, callbacks, or output targets
+  with public channels unless an explicit capability-checked export route allows
+  it.
+- **Subagent callback routing.** `return_to_main`, `send_to_user`, progress,
+  failure, and direct-fallback callbacks from Slack-originated work must carry
+  the stored originating output target. Channel-originated callbacks post back
+  to the channel; thread-originated callbacks post back to the thread; DM
+  callbacks post back to the DM. Late callbacks after hibernation/restart must
+  never fall back to a global Slack channel.
+- **Telemetry.** Runtime telemetry should expose redacted channel/thread
+  counters, session create/resume/hibernate/archive events, selected context
+  source, capability denials, whether outbound `thread_ts` was absent or
+  present, Slack Web API send result classes, and subagent callback routing for
   Brain's admin rollups.
 
-Live canaries must cover public-channel root-to-thread continuity, follow-up
-thread continuity, second-channel isolation, private-channel continuity and
+Live canaries must cover public-channel root mentions replying in the channel,
+root channel follow-up continuity, explicit thread continuity, bounded channel
+context hydration, second-channel isolation, private-channel continuity and
 private-to-public denial, DM continuity, MPIM/group DM continuity, subagent
-callback routing to the originating thread/DM, and telemetry/audit linkage.
+callback routing to the originating channel/thread/DM, and telemetry/audit
+linkage.
 
 ## Manifest contract
 

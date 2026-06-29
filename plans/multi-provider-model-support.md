@@ -34,10 +34,13 @@ Scope: planning only; no runtime code changes in this commit.
 ### Principles
 
 1. Keep codex-chat provider-agnostic. codex-chat should select a Codex CLI profile/provider/model; Codex CLI should own provider auth, wire API, model catalog, and per-provider request details.
-2. Treat provider selection as thread/process-level state, not a per-turn toggle. The current app-server schema supports provider at `thread/start`/`thread/resume`, not `turn/start`; switching providers mid-thread should start/resume a different thread or different app-server process.
-3. Prefer Codex profiles for non-OpenAI providers. Because project `.codex/config.toml` cannot define provider auth or select profiles, operator-owned `$CODEX_HOME/*.config.toml` files are the correct place for OpenRouter/Anthropic/open-model provider config.
-4. Preserve existing behavior by default: main remains OpenAI/Fast/gpt-5.5, subagents default to existing model resolution, `codex_exec` remains production-safe until explicitly changed.
-5. Never store provider API keys in codex-chat TOML/state/artifacts. Only store provider IDs, profile names, and env var names if necessary.
+2. Treat provider selection as dispatch/thread/process-level state, not a mid-turn toggle. The current app-server schema supports provider at `thread/start`/`thread/resume`, not `turn/start`; switching providers for app-server-backed work should start/resume a different thread or different app-server process.
+3. **Critical requirement:** provider/model selection must be overridable per individual subagent dispatch, not only per subagent profile/default. Profiles and defaults are convenience routing policy; the dispatch contract must still be able to request an allowed `codexProfile`, `modelProvider`, `model`, `effort`, and service-tier behavior for one specific job.
+4. Prefer Codex profiles for non-OpenAI providers. Because project `.codex/config.toml` cannot define provider auth or select profiles, operator-owned `$CODEX_HOME/*.config.toml` files are the correct place for OpenRouter/Anthropic/open-model provider config.
+5. Preserve existing behavior by default: the main loop remains OpenAI/Fast/gpt-5.5 for now. The first implementation should pilot alternate providers/models on subagents, where each dispatch is isolated and independently observable, before changing the main long-lived loop.
+6. Plan main-loop provider/model switching as a later startup-time configuration feature. Main-loop provider/model changes should be explicit config/env changes followed by a codex-chat restart/new main app-server thread, not an ad hoc runtime toggle inside the current thread.
+7. Brain should become the UI/control plane for model-provider defaults and overrides for both the main loop and subagents because it can already edit codex-chat config/env and orchestrate restarts. codex-chat remains the runtime enforcement layer for allowlists and per-dispatch resolution.
+8. Never store provider API keys in codex-chat TOML/state/artifacts. Only store provider IDs, profile names, and env var names if necessary.
 
 ### Proposed codex-chat config shape
 
@@ -63,6 +66,9 @@ defaultServiceTier = "fast"
 defaultProfile = ""       # Codex CLI profile for child backend process; empty => codex.profile
 defaultModelProvider = "" # app-server thread provider override; empty => selected profile/default
 allowProviderOverride = false
+# Critical: these defaults are not the only selection surface. An individual
+# dispatch may request codexProfile/modelProvider/model/serviceTierMode when
+# overrides are enabled and the requested values pass the allowlists below.
 allowedProfiles = []       # existing behavior-profile allowlist; keep separate from Codex config profiles
 allowedCodexProfiles = []  # new optional allowlist for Codex CLI profiles
 allowedModelProviders = [] # new optional allowlist for provider IDs
@@ -133,15 +139,17 @@ Future direct Anthropic/open models:
 - Extend Zod schemas and types with `modelProvider`, `serviceTierMode`, `codexProfile`, and allowlists.
 - Add resolver helpers:
   - `resolveMainModelSpec()` => `{ model, effort, serviceTier?, modelProvider?, codexProfile? }`
-  - `resolveSubagentModelSpec(input)` => merges directive/job override, subagent defaults, main defaults.
+  - `resolveSubagentModelSpec(input)` => merges per-dispatch directive/job overrides, subagent defaults, main defaults. Per-dispatch override support is required for `model`, `effort`, `serviceTier`, `serviceTierMode`, `codexProfile`, and `modelProvider`, subject to allowlists.
   - `resolveEmployeeModelSpec(definition)` => merges Employee definition/defaults.
 - Validate allowlists before dispatch/start. If `allowProviderOverride = false`, reject directive-supplied provider/profile overrides and only use configured defaults.
 - Persist `modelProvider` and `codexProfile` in `SubagentJob` and Employee thread state metadata so status/debug output and abandoned jobs remain explainable.
 - Keep migration non-breaking: absent new fields parse as empty strings and behave exactly like today.
 
-### Phase 2: Main app-server process and thread provider
+### Phase 2: Main app-server process and thread provider (planned after subagent pilot)
 
-- In `AppServerCodexClient.start()`, append `--profile <codex.profile>` when non-empty. This is the missing piece for provider/profile config to affect the main app-server process.
+The main loop stays on OpenAI for the first implementation. This phase is a planned startup-time configuration path for later, after alternate-provider subagents have been piloted successfully.
+
+- In `AppServerCodexClient.start()`, append `--profile <codex.profile>` when non-empty. This is the missing piece for provider/profile config to affect the main app-server process, but it should be enabled only as an explicit startup-time main-loop setting.
 - Include `modelProvider` in main `thread/start`, `thread/resume`, and stored session metadata when configured.
 - Include `serviceTier` only when `serviceTierMode` says to include it. Suggested behavior:
   - `always`: always send configured tier.
@@ -153,7 +161,7 @@ Future direct Anthropic/open models:
 
 `codex_exec` backend:
 
-- Add per-job `codexProfile` to `StartChildAgentInput`.
+- Add per-job/per-dispatch `codexProfile`, `modelProvider`, and `serviceTierMode` to `StartChildAgentInput`; do not limit provider/model selection to static subagent profiles.
 - Build args as:
   - `codex exec --profile <job.codexProfile> ...` when present.
   - `--model <job.model>` remains a dedicated override.
@@ -171,12 +179,12 @@ Launching subagents with different Codex profiles/models/providers:
 
 1. Operator creates `~/.codex/openrouter.config.toml` with provider auth and model defaults.
 2. codex-chat config sets either `subagents.defaultCodexProfile = "openrouter"` for all child jobs or a future route map/profile policy for selected behavior profiles.
-3. `dispatch_subagent` can keep specifying behavior `profile`, task `model`, `effort`, and `serviceTier`; if provider/profile override is enabled, extend the directive schema with `codexProfile` and/or `modelProvider`.
+3. `dispatch_subagent` can keep specifying behavior `profile`, task `model`, `effort`, and `serviceTier`; if provider/profile override is enabled, extend the directive schema with `codexProfile`, `modelProvider`, and `serviceTierMode`. This per-dispatch override path is critical and must not be deferred behind profile-only routing.
 4. For app-server subagents, codex-chat starts a separate child `codex app-server --profile openrouter` so the child process has the provider config, then starts an ephemeral thread with the requested model/provider.
 
 ### Phase 4: Directives, behavior prompts, and routing defaults
 
-- Extend `dispatch_subagent` directive schema with optional `codexProfile`, `modelProvider`, and perhaps `serviceTierMode`. Keep them optional so existing behavior prompts/tests remain valid.
+- Extend `dispatch_subagent` directive schema with optional `codexProfile`, `modelProvider`, and `serviceTierMode`. Keep them optional so existing behavior prompts/tests remain valid, but enforce allowlists before starting the job.
 - Update `behavior/AGENTS.md` to describe default model/provider policy only after runtime supports it. Avoid asking the main model to choose arbitrary provider IDs unless allowlists are configured.
 - Add safe routing defaults:
   - `researcher`/`reviewer`: default OpenAI or OpenRouter high-context profile if configured.
@@ -194,6 +202,7 @@ Launching subagents with different Codex profiles/models/providers:
 ### Phase 6: Documentation and operations
 
 - Update `config/codex-chat.example.toml` and README with provider/profile examples that reference `$CODEX_HOME` files but do not include secrets.
+- Coordinate with Brain so its admin UI becomes the operator-facing control plane for model-provider defaults: main-loop startup provider/model, subagent default provider/model/profile, per-dispatch override policy/allowlists, service-tier mode, env-key presence metadata, and the planned restart/apply flow. Brain may edit config/env and restart codex-chat; codex-chat should expose enough status/detail metadata for Brain to render the active selections and recent dispatch overrides.
 - Add an operator checklist:
   - set provider API key in service env file;
   - ensure the key env var survives `sanitizeChildProcessEnv` only for Codex children that need it;
@@ -205,12 +214,12 @@ Launching subagents with different Codex profiles/models/providers:
 ## Migration path
 
 1. Land schema with defaults only; no behavior change.
-2. Start using top-level `codex.profile` for main app-server launch. Existing empty default is no-op; non-empty users finally get intended profile behavior.
-3. Add `modelProvider` to app-server thread/resume requests only when configured.
-4. Add provider/profile metadata to state while remaining backwards-compatible with old state files.
-5. Add directive optional fields and behavior prompt updates.
-6. Pilot one OpenRouter subagent profile with `codex_app_server` backend and `serviceTierMode = "omit"`.
-7. After proof window, consider per-profile app-server pools for Employees/main alternate sessions.
+2. Add provider/profile metadata to state while remaining backwards-compatible with old state files.
+3. Add directive optional fields and behavior prompt updates for per-dispatch overrides, guarded by allowlists.
+4. Pilot one OpenRouter subagent path with `codex_app_server` backend and `serviceTierMode = "omit"`, proving both configured defaults and one-off per-dispatch overrides.
+5. Teach Brain to display/edit subagent provider defaults, override allowlists, and env-key presence, then apply via the existing config/env/restart control-plane workflow.
+6. After the subagent proof window, enable startup-time main-loop provider/model switching: use top-level `codex.profile`, add `modelProvider` to main app-server thread/resume requests only when configured, and start a new main thread when model/provider/profile metadata changes.
+7. After the main-loop startup path is proven, consider per-profile app-server pools for Employees/main alternate sessions.
 
 Rollback remains simple: clear new profile/provider config, set `subagents.backend = "codex_exec"` or `agent backend exec`, and restart the service after code deploy. Existing OpenAI defaults remain unchanged.
 
@@ -277,8 +286,8 @@ Manual smoke:
 - **Secret handling:** New provider API keys should not be printed or stored. If codex-chat begins stripping all provider env keys by default, it must selectively pass the key to Codex child processes that need provider auth.
 - **Model catalog:** Non-OpenAI provider model metadata may need `model_catalog_json` or manual config for context windows, reasoning effort, and service tiers.
 
-## Clarifying questions before implementation
+## Decisions from Tim on 2026-06-29
 
-1. Should the first implementation target only subagents on alternate providers, leaving the main long-lived codex-chat thread on OpenAI until subagent behavior is proven?
-2. For OpenRouter, do you prefer profile-only selection (`--profile openrouter`) or allowing per-directive `modelProvider` overrides after an allowlist is configured?
-3. Should Employees wait for per-profile app-server pools, or is the short-term "same main app-server profile only" limitation acceptable?
+1. Provider/model selection must be overridable per individual dispatch, not just per subagent profile. This is critical for the first runtime design.
+2. The main loop stays on OpenAI for now. The first implementation should pilot subagents on different models/providers, while keeping startup-time configurable main-loop provider/model switching as a later planned phase.
+3. Brain should become the UI/control plane for model-provider defaults and policies for the main loop and subagents, because Brain can already edit codex-chat config/env and restart codex-chat. codex-chat remains responsible for runtime validation, allowlist enforcement, dispatch metadata, and status/detail reporting.

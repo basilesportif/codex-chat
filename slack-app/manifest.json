@@ -22,7 +22,8 @@
         "im:history",
         "im:read",
         "mpim:history",
-        "mpim:read"
+        "mpim:read",
+        "reactions:write"
       ]
     }
   },

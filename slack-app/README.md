@@ -113,6 +113,7 @@ Required bot scopes for the current adapter:
 - `channels:history`, `channels:read`
 - `im:history`, `mpim:history`, `groups:history`
 - `im:read`, `mpim:read`, `groups:read`
+- `reactions:write` (best-effort immediate 👀 receipt reaction)
 
 Subscribed bot events:
 

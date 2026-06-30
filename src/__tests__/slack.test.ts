@@ -179,7 +179,12 @@ describe("Slack runtime foundation", () => {
         name: "Brain",
         description: "Company-brain Slack surface for Brain."
       },
-      features: { bot_user: { display_name: "Brain" } }
+      features: { bot_user: { display_name: "Brain" } },
+      oauth_config: {
+        scopes: {
+          bot: expect.arrayContaining(["reactions:write"])
+        }
+      }
     });
   });
 
@@ -361,6 +366,34 @@ describe("Slack runtime foundation", () => {
     const rawTelemetry = await readFile(state.path("slack_telemetry/summary.json"), "utf8");
     expect(rawTelemetry).not.toContain("please summarize this thread");
     expect(rawTelemetry).not.toContain("xoxb-test-token");
+  });
+
+  test("Slack Events API service hook adds an immediate eyes reaction without delaying ack", async () => {
+    const config = await slackConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    const enqueue = vi.spyOn(service, "enqueueUserEvent").mockResolvedValue(undefined);
+    const addReaction = vi.spyOn(service.slack, "addReaction").mockResolvedValue({ ok: true });
+    await service.api.start();
+    gateways.push(service.api);
+
+    const response = await postSlack(`http://127.0.0.1:${service.api.address()?.port}`, slackEnvelope());
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ ok: true });
+    await flush();
+
+    expect(addReaction).toHaveBeenCalledWith({
+      channel: "C345",
+      timestamp: "1782000000.000100",
+      name: "eyes"
+    });
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    await waitForSlackTelemetry(
+      service.state,
+      (value) => value.lastAcceptedEvent?.eventId === "Ev123",
+      "Slack immediate reaction hook telemetry",
+    );
   });
 
   test("Slack Events API rejects invalid signatures", async () => {
@@ -841,5 +874,42 @@ describe("Slack runtime foundation", () => {
 
     await expect(gateway.sendText(normalized.event.outputTarget, "hello")).resolves.toEqual([{ channel: "C345", ts: "1782000002.000100" }]);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  test("SlackGateway adds source-message reactions through reactions.add best-effort", async () => {
+    const config = await slackConfig();
+    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { channel?: string; timestamp?: string; name?: string };
+      expect(String(_url)).toBe("https://slack.com/api/reactions.add");
+      expect(init?.headers).toMatchObject({ authorization: "Bearer xoxb-test-token" });
+      expect(body).toEqual({ channel: "C345", timestamp: "1782000000.000100", name: "eyes" });
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
+    });
+    const gateway = new SlackGateway(config, createLogger("silent"), fetchImpl as unknown as typeof fetch);
+
+    await expect(gateway.addReaction({
+      channel: "C345",
+      timestamp: "1782000000.000100",
+      name: "eyes"
+    })).resolves.toEqual({ ok: true });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  test("SlackGateway reaction failures return structured best-effort errors", async () => {
+    const config = await slackConfig();
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ ok: false, error: "already_reacted" }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    }));
+    const gateway = new SlackGateway(config, createLogger("silent"), fetchImpl as unknown as typeof fetch);
+
+    await expect(gateway.addReaction({
+      channel: "C345",
+      timestamp: "1782000000.000100",
+      name: "eyes"
+    })).resolves.toEqual({ ok: false, error: "already_reacted", status: 200, retryAfterSec: undefined });
   });
 });

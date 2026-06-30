@@ -18,7 +18,8 @@ const requiredScopes = [
   "im:history",
   "im:read",
   "mpim:history",
-  "mpim:read"
+  "mpim:read",
+  "reactions:write"
 ];
 const requiredEvents = ["app_mention", "message.groups", "message.im", "message.mpim"];
 

@@ -11,7 +11,8 @@ const REQUIRED_BOT_SCOPES = [
   "im:history",
   "im:read",
   "mpim:history",
-  "mpim:read"
+  "mpim:read",
+  "reactions:write"
 ];
 const REQUIRED_BOT_EVENTS = ["app_mention", "message.groups", "message.im", "message.mpim"];
 const SECRET_PATTERNS = [/xox[abprs]-[A-Za-z0-9-]{12,}/, /xapp-[A-Za-z0-9-]{12,}/];

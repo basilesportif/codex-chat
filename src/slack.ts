@@ -65,6 +65,10 @@ export interface SlackSendTextResult {
   ts?: string;
 }
 
+export type SlackReactionResult =
+  | { ok: true }
+  | { ok: false; error: string; status?: number; retryAfterSec?: number };
+
 export interface SlackHistoryMessage {
   type?: string;
   subtype?: string;
@@ -230,6 +234,69 @@ export class SlackGateway {
       results.push({ channel: payload.channel, ts: payload.ts });
     }
     return results;
+  }
+
+  async addReaction(input: {
+    channel: string;
+    timestamp: string;
+    name: string;
+    timeoutMs?: number;
+  }): Promise<SlackReactionResult> {
+    if (!this.config.slackBotToken) return { ok: false, error: `${this.config.slack.botTokenEnv} is required to add Slack reactions` };
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), input.timeoutMs ?? 2_500);
+    try {
+      const response = await this.fetchImpl("https://slack.com/api/reactions.add", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${this.config.slackBotToken}`,
+          "content-type": "application/json; charset=utf-8"
+        },
+        body: JSON.stringify({
+          channel: input.channel,
+          timestamp: input.timestamp,
+          name: input.name
+        }),
+        signal: controller.signal
+      });
+      const retryAfterSec = parseRetryAfter(response.headers.get("retry-after"));
+      const payload = await response.json().catch(() => undefined) as { ok?: boolean; error?: string } | undefined;
+      if (!response.ok || payload?.ok !== true) {
+        const error = payload?.error ?? (response.status === 429 ? "rate_limited" : `http_${response.status}`);
+        const logPayload = {
+          component: "slack",
+          event: "reaction_add_failed",
+          channel: input.channel,
+          timestamp: input.timestamp,
+          name: input.name,
+          status: response.status,
+          retryAfterSec,
+          error
+        };
+        if (error === "already_reacted") {
+          this.logger.debug(logPayload, "Slack immediate reaction already exists");
+        } else {
+          this.logger.warn(logPayload, "Slack immediate reaction failed");
+        }
+        return { ok: false, error, status: response.status, retryAfterSec };
+      }
+      return { ok: true };
+    } catch (error) {
+      const reason = error instanceof Error && error.name === "AbortError"
+        ? "timeout"
+        : error instanceof Error ? error.message : String(error);
+      this.logger.warn({
+        component: "slack",
+        event: "reaction_add_failed",
+        channel: input.channel,
+        timestamp: input.timestamp,
+        name: input.name,
+        error: reason
+      }, "Slack immediate reaction failed");
+      return { ok: false, error: reason };
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
   async fetchConversationHistory(input: {

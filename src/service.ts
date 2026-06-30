@@ -278,9 +278,13 @@ export class ServiceSupervisor {
     this.behavior = new BehaviorPack(config);
     this.files = new FileStore(config, this.state);
     const transcriber = this.createTranscriber();
+    this.slack = new SlackGateway(config, logger);
     this.api = new ApiGateway(config, this.state, this.files, transcriber, logger, {
       onAudioIngestionCompleted: (event) => this.enqueueAudioIngestionForCodex(event),
-      onSlackUserEvent: (event) => this.enqueueUserEvent(event)
+      onSlackUserEvent: async (event) => {
+        this.addImmediateSlackReaction(event);
+        await this.enqueueUserEvent(event);
+      }
     });
     if (config.codex.transport !== "app-server") {
       throw new Error(DISABLED_EXEC_RESUME_MESSAGE);
@@ -345,7 +349,6 @@ export class ServiceSupervisor {
       onCancelCommand: async (_chatId, jobId) => this.cancelJob(jobId),
       onHealthCommand: async () => this.healthText()
     });
-    this.slack = new SlackGateway(config, logger);
     this.loops = new LoopManager(config, this.state, logger, {
       enqueueMain: (text, metadata) => this.enqueueSynthetic(text, metadata),
       sendAdmins: (text) => this.telegram.notifyOps(text),
@@ -440,6 +443,34 @@ export class ServiceSupervisor {
     this.heartbeat.stop();
     await this.subagents.shutdown().catch(() => undefined);
     await this.codex.stop().catch(() => undefined);
+  }
+
+  private addImmediateSlackReaction(event: UserEvent): void {
+    if (event.source !== "slack") return;
+    const channel = typeof event.metadata?.slackChannelId === "string"
+      ? event.metadata.slackChannelId
+      : event.outputTarget?.surfaceKind === "slack" ? event.outputTarget.channelId : undefined;
+    const timestamp = typeof event.metadata?.slackMessageTs === "string"
+      ? event.metadata.slackMessageTs
+      : event.outputTarget?.surfaceKind === "slack" ? event.outputTarget.messageId : undefined;
+    if (!channel || !timestamp) {
+      this.logger.debug({
+        component: "slack",
+        event: "immediate_reaction_skipped",
+        reason: "missing_source_message",
+        eventId: event.metadata?.slackEventId
+      }, "Slack immediate reaction skipped");
+      return;
+    }
+    void this.slack.addReaction({ channel, timestamp, name: "eyes" }).catch((error) => {
+      this.logger.warn({
+        component: "slack",
+        event: "immediate_reaction_failed",
+        channel,
+        timestamp,
+        error
+      }, "Slack immediate reaction failed");
+    });
   }
 
   async enqueueUserEvent(event: UserEvent): Promise<void> {

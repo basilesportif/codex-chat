@@ -69,3 +69,15 @@ fields that Brain's manual canary rollup displays (`lastContextDecision`,
 `lastSubagentRouting`, inbound/outbound counters, output channel/thread target,
 and recent errors); see `slack-app/README.md` for the local adapter checklist and
 Brain's plan for the full roadmap.
+
+
+## 2026-06-30 Phase 5 capability-control-plane update
+
+The canonical Brain plan now marks the Phase 4 Slack visibility/manual canary
+slice complete enough for Phase 5 capability-control-plane work to start. Brain
+should expose capabilities as a separate `/admin` tab/section with a read-only
+capability catalog plus grant/audit vocabulary before enforcement. `codex-chat`
+keeps current Slack behavior unchanged and remains the future runtime enforcement
+point for adapter reads, output sends, tools, and subagent dispatch; do not add
+live capability enforcement here until Brain's model, audit shape, and explicit
+fail-closed semantics are validated.

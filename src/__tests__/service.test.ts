@@ -1162,7 +1162,8 @@ describe("service supervisor", () => {
     await waitForIdle(service);
 
     expect(dispatchFromDirective).toHaveBeenCalled();
-    expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("Sub: Research routing"), 502);
+    expect(sendText).toHaveBeenCalledWith(253768951, "Sub: Research routing\nresearcher · gpt-5.5 · high · fast", 502);
+    expect(sendText.mock.calls[0]?.[1]).not.toContain("tierMode");
   });
 
   test("ignores accidental subagent provider overrides unless the user explicitly requested them", async () => {
@@ -1194,7 +1195,7 @@ describe("service supervisor", () => {
     expect(sendText).toHaveBeenCalledWith(253768951, "Sub: Research routing\nresearcher · gpt-5.5 · high · fast", 507);
   });
 
-  test("preserves subagent provider overrides when the user explicitly requests OpenRouter GLM 5.2", async () => {
+  test("OpenRouter dispatch summary includes provider, profile, and tierMode", async () => {
     const config = await loadTestConfig();
     await configureOpenRouterSubagentOverrides(config);
     const logger = createLogger("silent");

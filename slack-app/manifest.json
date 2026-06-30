@@ -1,12 +1,12 @@
 {
   "display_information": {
-    "name": "Codex Chat",
-    "description": "Company-brain Slack surface for codex-chat.",
+    "name": "Brain",
+    "description": "Company-brain Slack surface for Brain.",
     "background_color": "#1d1c1d"
   },
   "features": {
     "bot_user": {
-      "display_name": "Codex Chat",
+      "display_name": "Brain",
       "always_online": false
     }
   },
@@ -26,7 +26,7 @@
   },
   "settings": {
     "event_subscriptions": {
-      "request_url": "https://YOUR-CODEX-CHAT-HOST.example.com/api/slack/events",
+      "request_url": "https://YOUR-BRAIN-HOST.example.com/api/slack/events",
       "bot_events": [
         "app_mention",
         "message.groups",

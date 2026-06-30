@@ -101,6 +101,8 @@ userIds = [12345]
     expect(config.api.enabled).toBe(false);
     expect(config.slack.enabled).toBe(false);
     expect(config.slack.eventsPath).toBe("/api/slack/events");
+    expect(config.slack.context.enabled).toBe(true);
+    expect(config.slack.context.maxChannelMessages).toBe(15);
     expect(config.ingest.audioMaxMb).toBe(100);
     expect(config.transcription.model).toBe("gpt-4o-transcribe");
     expect(config.transcription.diarizeModel).toBe("gpt-4o-transcribe-diarize");

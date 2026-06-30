@@ -5,14 +5,15 @@ import { fileURLToPath } from "node:url";
 
 const DEFAULT_BASE_URL = "https://brain.decisive-outcomes.com";
 const DEFAULT_EVENTS_PATH = "/api/slack/events";
-const DEFAULT_FILENAME = "codex-chat.slack.manifest.json";
+const DEFAULT_FILENAME = "brain.slack.manifest.json";
 const secretPatterns = [/xox[abprs]-[A-Za-z0-9-]{12,}/, /xapp-[A-Za-z0-9-]{12,}/];
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appDir = resolve(here, "..");
 
 function usage() {
-  return `Usage: node slack-app/scripts/render-manifest.mjs [options]\n\nRenders slack-app/manifest.json with a deploy-specific Events API URL.\nWithout --output or --output-dir, the rendered manifest is written to stdout.\n\nOptions:\n  --base-url URL       Public codex-chat origin (default: ${DEFAULT_BASE_URL})\n  --events-path PATH   Slack Events API path (default: ${DEFAULT_EVENTS_PATH})\n  --events-url URL     Full Slack Events API URL; overrides base/path\n  --output FILE        Write manifest to FILE (supports ~ and relative paths)\n  --output-dir DIR     Write ${DEFAULT_FILENAME} under DIR (supports ~ and relative paths)\n  --manifest FILE      Source manifest template (default: slack-app/manifest.json)\n  -h, --help           Show this help\n\nEnvironment overrides are also supported: SLACK_EVENTS_URL, CODEX_CHAT_BASE_URL,\nand SLACK_EVENTS_PATH. CLI flags take precedence over environment values.\n`;
+  return `Usage: node slack-app/scripts/render-manifest.mjs [options]\n\nRenders slack-app/manifest.json with a deploy-specific Events API URL.\nWithout --output or --output-dir, the rendered manifest is written to stdout.\n\nOptions:\n  --base-url URL       Public Brain origin (default: ${DEFAULT_BASE_URL})\n  --events-path PATH   Slack Events API path (default: ${DEFAULT_EVENTS_PATH})\n  --events-url URL     Full Slack Events API URL; overrides base/path\n  --output FILE        Write manifest to FILE (supports ~ and relative paths)\n  --output-dir DIR     Write ${DEFAULT_FILENAME} under DIR (supports ~ and relative paths)\n  --manifest FILE      Source manifest template (default: slack-app/manifest.json)\n  -h, --help           Show this help\n\nEnvironment overrides are also supported: SLACK_EVENTS_URL, CODEX_CHAT_BASE_URL,\nand SLACK_EVENTS_PATH. CODEX_CHAT_BASE_URL is the runtime env contract name.
+CLI flags take precedence over environment values.\n`;
 }
 
 function fail(message) {

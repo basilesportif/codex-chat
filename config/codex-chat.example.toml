@@ -64,6 +64,20 @@ signingSecretEnv = "SLACK_SIGNING_SECRET"
 botTokenEnv = "SLACK_BOT_TOKEN"
 appTokenEnv = "SLACK_APP_TOKEN"
 
+[slack.context]
+# Full Slack channel/thread context routing is enabled from the first runtime
+# implementation. Root channel app_mentions reply in a Slack thread attached to
+# the invoking message while hydrating a small recent channel window; existing
+# thread mentions hydrate/reply in that thread. If Slack history scopes or rate
+# budget are unavailable, the runtime falls back to the source message and tells
+# the model not to claim broader context.
+enabled = true
+maxChannelMessages = 15
+maxThreadMessages = 30
+maxMessageChars = 700
+maxTotalChars = 6000
+fetchTimeoutMs = 2500
+
 [api]
 # HTTP API for server-to-server integrations such as audio ingestion and Slack
 # Events API. This also auto-enables when CODEXCHAT_INGEST_API_KEYS is set or

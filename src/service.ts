@@ -45,6 +45,13 @@ import {
 import { DisabledTranscriber, OpenAITranscriber, Transcriber, type TranscriptionMode, type TranscriptionSpeakerSegment } from "./transcription.js";
 import { sanitizeChildProcessEnv } from "./env.js";
 import { SlackGateway } from "./slack.js";
+import { hydrateSlackContextForEvent } from "./slack-context.js";
+import {
+  slackContextTelemetryObservation,
+  slackOutboundTelemetryObservation,
+  slackSubagentRoutingTelemetryObservation,
+  type SlackTelemetryObservation
+} from "./slack-telemetry.js";
 import { isTelegramAdmin, TelegramGateway } from "./telegram.js";
 import { CodexClient, StoredAction, SubagentBackendKind, SubagentJob, SubagentOwnerType, SubagentResultTarget, UserEvent } from "./types.js";
 import { makeId, nowIso } from "./util.js";
@@ -1000,8 +1007,20 @@ export class ServiceSupervisor {
   }
 
   private formatJobModelEffort(job: SubagentJob): string {
-    const parts = [job.model ? `model=${job.model}` : "", job.effort ? `effort=${job.effort}` : "", job.serviceTier ? `tier=${job.serviceTier}` : "", job.serviceTierMode ? `tierMode=${job.serviceTierMode}` : "", job.codexProfile ? `codexProfile=${job.codexProfile}` : "", job.modelProvider ? `provider=${job.modelProvider}` : ""].filter(Boolean);
+    const showProviderDetails = this.shouldShowSubagentProviderDetails(job.codexProfile, job.modelProvider);
+    const parts = [
+      job.model ? `model=${job.model}` : "",
+      job.effort ? `effort=${job.effort}` : "",
+      job.serviceTier ? `tier=${job.serviceTier}` : "",
+      showProviderDetails && job.serviceTierMode ? `tierMode=${job.serviceTierMode}` : "",
+      showProviderDetails && job.codexProfile ? `codexProfile=${job.codexProfile}` : "",
+      showProviderDetails && job.modelProvider ? `provider=${job.modelProvider}` : ""
+    ].filter(Boolean);
     return parts.length > 0 ? ` (${parts.join(" ")})` : "";
+  }
+
+  private shouldShowSubagentProviderDetails(codexProfile?: string, modelProvider?: string): boolean {
+    return Boolean(codexProfile?.trim() || modelProvider?.trim());
   }
 
   private resultTargetForRoute(route: SubagentJob["route"]): SubagentResultTarget {
@@ -1058,8 +1077,12 @@ export class ServiceSupervisor {
       `elapsed: ${elapsed}`,
       `pid: ${job.pid ?? "unknown"}`
     ];
-    if (job.model || job.effort || job.serviceTier || job.serviceTierMode || job.codexProfile || job.modelProvider) lines.push(`model/effort/tier: ${job.model ?? "default"} / ${job.effort ?? "default"} / ${job.serviceTier ?? "default"} (${job.serviceTierMode ?? "auto"})`);
-    if (job.codexProfile || job.modelProvider) lines.push(`codex profile/provider: ${job.codexProfile || "default"} / ${job.modelProvider || "default"}`);
+    const showProviderDetails = this.shouldShowSubagentProviderDetails(job.codexProfile, job.modelProvider);
+    if (job.model || job.effort || job.serviceTier || (showProviderDetails && job.serviceTierMode)) {
+      const modeText = showProviderDetails ? ` (${job.serviceTierMode ?? "auto"})` : "";
+      lines.push(`model/effort/tier: ${job.model ?? "default"} / ${job.effort ?? "default"} / ${job.serviceTier ?? "default"}${modeText}`);
+    }
+    if (showProviderDetails) lines.push(`codex profile/provider: ${job.codexProfile || "default"} / ${job.modelProvider || "default"}`);
     const summary = this.compactJobText(job.summary);
     if (summary) lines.push(`summary: ${summary}`);
     if (job.ownerRequestId) lines.push(`ownerRequestId: ${job.ownerRequestId}`);
@@ -1082,11 +1105,12 @@ export class ServiceSupervisor {
     const provider = action.modelProvider || this.subagents.resolveModelProvider(action.modelProvider);
     const codexProfile = action.codexProfile || this.subagents.resolveCodexProfile(action.codexProfile);
     const tierMode = this.subagents.resolveServiceTierMode(action.serviceTierMode, provider);
-    const providerText = [
+    const showProviderDetails = this.shouldShowSubagentProviderDetails(codexProfile, provider);
+    const providerText = showProviderDetails ? [
       codexProfile ? `profile ${codexProfile}` : "",
       provider ? `provider ${provider}` : "",
-      (codexProfile || provider || tierMode !== "auto" || action.serviceTierMode) ? `tierMode ${tierMode}` : ""
-    ].filter(Boolean).join(" · ");
+      `tierMode ${tierMode}`
+    ].filter(Boolean).join(" · ") : "";
     const lines = [`Sub: ${summary}`, `${action.profile} · ${model} · ${effort} · ${tier}${providerText ? ` · ${providerText}` : ""}`];
     if (followupText) lines.push("", followupText);
     return lines.join("\n");
@@ -1262,7 +1286,8 @@ export class ServiceSupervisor {
       runContext,
       status: "running"
     }));
-    const prompt = this.formatEventForCodex(event);
+    const slackContextPrompt = await this.hydrateSlackContextPrompt(event);
+    const prompt = this.formatEventForCodex(event, slackContextPrompt);
     let turnClosed = false;
     const closeTurn = async (value: Record<string, unknown>): Promise<boolean> => {
       if (this.isStaleTurnToken(turnToken)) {
@@ -1486,6 +1511,7 @@ export class ServiceSupervisor {
       await this.deliverDirectTerminalSubagent(job, result);
       return;
     }
+    this.recordSlackSubagentRoutingIfNeeded(job);
     await this.enqueueSynthetic(this.formatSubagentCallbackText(job, result), {
       source: "subagent",
       jobId: job.id,
@@ -1508,6 +1534,7 @@ export class ServiceSupervisor {
   private async deliverDirectTerminalSubagent(job: SubagentJob, result: string): Promise<void> {
     const text = this.formatDirectTerminalSubagentText(job, result);
     if (job.defaultOutputTarget || job.originChatId !== undefined) {
+      this.recordSlackSubagentRoutingIfNeeded(job);
       await this.sendTextToOutputTarget(
         job.defaultOutputTarget ?? telegramOutputTarget({ chatId: job.originChatId!, messageId: job.originMessageId }),
         text
@@ -1515,6 +1542,17 @@ export class ServiceSupervisor {
       return;
     }
     await this.telegram.notifyOps(text);
+  }
+
+  private recordSlackSubagentRoutingIfNeeded(job: SubagentJob): void {
+    const target = job.defaultOutputTarget ?? job.originTarget;
+    if (target?.surfaceKind !== "slack") return;
+    this.recordSlackTelemetry(slackSubagentRoutingTelemetryObservation({
+      target,
+      jobId: job.id,
+      conversationSessionId: job.conversationSessionId,
+      correlationId: job.correlationId
+    }));
   }
 
   private formatDirectTerminalSubagentText(job: SubagentJob, result: string): string {
@@ -2211,7 +2249,23 @@ export class ServiceSupervisor {
     }
   }
 
-  private formatEventForCodex(event: UserEvent): string {
+  private async hydrateSlackContextPrompt(event: UserEvent): Promise<string | undefined> {
+    if (event.source !== "slack") return undefined;
+    try {
+      const context = await hydrateSlackContextForEvent(event, {
+        gateway: this.slack,
+        contextConfig: this.config.slack.context
+      });
+      if (!context) return undefined;
+      this.recordSlackTelemetry(slackContextTelemetryObservation({ event, context, promptExposed: this.config.slack.context.enabled }));
+      return context.promptText;
+    } catch (error) {
+      this.logger.warn({ component: "slack", event: "context_hydration_failed", error }, "Slack context hydration failed; continuing with source event only");
+      return "Slack context hydration failed before prompt assembly. Do not claim to have read recent Slack channel/thread history; answer from the source request only or ask for more context.";
+    }
+  }
+
+  private formatEventForCodex(event: UserEvent, hydratedContext?: string): string {
     ensureEventRuntimeContext(event);
     const header = [
       `codex-chat event source: ${event.source}`,
@@ -2227,6 +2281,9 @@ export class ServiceSupervisor {
       event.source === "slack" && typeof event.metadata?.slackChannelId === "string" ? `slack channel_id: ${event.metadata.slackChannelId}` : "",
       event.source === "slack" && typeof event.metadata?.slackChannelType === "string" ? `slack channel_type: ${event.metadata.slackChannelType}` : "",
       event.source === "slack" && typeof event.metadata?.slackUserId === "string" ? `slack user_id: ${event.metadata.slackUserId}` : "",
+      event.source === "slack" && typeof event.metadata?.slackSourceKind === "string" ? `slack source_kind: ${event.metadata.slackSourceKind}` : "",
+      event.source === "slack" && typeof event.metadata?.slackSourceThreadTs === "string" ? `slack source_thread_ts: ${event.metadata.slackSourceThreadTs}` : "",
+      event.source === "slack" && typeof event.metadata?.slackReplyThreadTs === "string" ? `slack reply_thread_ts: ${event.metadata.slackReplyThreadTs}` : "",
       event.source === "slack" && typeof event.metadata?.slackThreadTs === "string" ? `slack thread_ts: ${event.metadata.slackThreadTs}` : "",
       event.source === "slack" && typeof event.metadata?.slackMessageTs === "string" ? `slack message_ts: ${event.metadata.slackMessageTs}` : "",
       `received_at: ${event.receivedAt}`
@@ -2243,7 +2300,7 @@ export class ServiceSupervisor {
       : "";
     const activeSubagents = this.formatActiveSubagentSnapshot();
     const employeeRuntimes = this.formatEmployeeRuntimeSnapshot();
-    return `${header}${replyContext ? `\n\n${replyContext}` : ""}${employeeRuntimes ? `\n\n${employeeRuntimes}` : ""}${activeSubagents ? `\n\n${activeSubagents}` : ""}\n\nUser content:\n${event.text}${attachments}`;
+    return `${header}${replyContext ? `\n\n${replyContext}` : ""}${hydratedContext ? `\n\n${hydratedContext}` : ""}${employeeRuntimes ? `\n\n${employeeRuntimes}` : ""}${activeSubagents ? `\n\n${activeSubagents}` : ""}\n\nUser content:\n${event.text}${attachments}`;
   }
 
   private formatAttachmentForCodex(item: UserEvent["attachments"][number]): string {
@@ -2346,7 +2403,18 @@ export class ServiceSupervisor {
 
   private async sendTextToOutputTarget(target: UserEvent["outputTarget"], text: string, format?: "text" | "markdown" | "markdownv2", preserveFormatArgument = false): Promise<void> {
     if (target?.surfaceKind === "slack") {
-      await this.slack.sendText(target, text);
+      this.recordSlackTelemetry(slackOutboundTelemetryObservation({ target, outcome: "attempt" }));
+      try {
+        const results = await this.slack.sendText(target, text);
+        this.recordSlackTelemetry(slackOutboundTelemetryObservation({ target, outcome: "success", results }));
+      } catch (error) {
+        this.recordSlackTelemetry(slackOutboundTelemetryObservation({
+          target,
+          outcome: "failure",
+          reason: error instanceof Error ? error.message : String(error),
+        }));
+        throw error;
+      }
       return;
     }
     const chatId = telegramTargetChatId(target);
@@ -2366,6 +2434,12 @@ export class ServiceSupervisor {
     const chatId = telegramTargetChatId(target);
     if (chatId === undefined) throw new Error(`Unsupported or missing document output target: ${target?.surfaceKind ?? "none"}`);
     await this.telegram.sendDocument(chatId, { ...input, replyToMessageId: telegramTargetMessageId(target) });
+  }
+
+  private recordSlackTelemetry(observation: SlackTelemetryObservation): void {
+    void this.state.recordSlackTelemetryObservation(observation).catch((error) => {
+      this.logger.warn({ component: "slack", event: "telemetry_record_failed", error }, "Slack telemetry observation was dropped");
+    });
   }
 
   private directiveReplyToMessageId(chatId: number, explicitReplyToMessageId: number | undefined, origin: UserEvent): number | undefined {

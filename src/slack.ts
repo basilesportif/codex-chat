@@ -261,21 +261,32 @@ export class SlackGateway {
       latest: input.latest,
       inclusive: input.inclusive ?? true,
       limit: input.limit
-    }, input.timeoutMs);
+    }, input.timeoutMs, "GET");
   }
 
-  private async fetchMessages(method: "conversations.history" | "conversations.replies", body: Record<string, unknown>, timeoutMs = 2_500): Promise<SlackHistoryFetchResult> {
+  private async fetchMessages(
+    method: "conversations.history" | "conversations.replies",
+    body: Record<string, unknown>,
+    timeoutMs = 2_500,
+    httpMethod: "GET" | "POST" = "POST",
+  ): Promise<SlackHistoryFetchResult> {
     if (!this.config.slackBotToken) return { ok: false, error: `${this.config.slack.botTokenEnv} is required for Slack context hydration` };
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await this.fetchImpl(`https://slack.com/api/${method}`, {
-        method: "POST",
-        headers: {
+      const requestBody = pruneUndefined(body);
+      const url = httpMethod === "GET"
+        ? slackApiUrlWithQuery(method, requestBody)
+        : `https://slack.com/api/${method}`;
+      const response = await this.fetchImpl(url, {
+        method: httpMethod,
+        headers: httpMethod === "GET" ? {
+          authorization: `Bearer ${this.config.slackBotToken}`
+        } : {
           authorization: `Bearer ${this.config.slackBotToken}`,
           "content-type": "application/json; charset=utf-8"
         },
-        body: JSON.stringify(pruneUndefined(body)),
+        body: httpMethod === "POST" ? JSON.stringify(requestBody) : undefined,
         signal: controller.signal
       });
       const retryAfterSec = parseRetryAfter(response.headers.get("retry-after"));
@@ -380,6 +391,14 @@ function escapeRegExp(value: string): string {
 
 function pruneUndefined(input: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined));
+}
+
+function slackApiUrlWithQuery(method: string, query: Record<string, unknown>): string {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) {
+    params.set(key, String(value));
+  }
+  return `https://slack.com/api/${method}?${params.toString()}`;
 }
 
 function parseRetryAfter(value: string | null): number | undefined {

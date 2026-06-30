@@ -643,6 +643,78 @@ describe("Slack runtime foundation", () => {
     );
   });
 
+  test("guava thread canary hydrates Slack replies instead of falling back to channel/root context", async () => {
+    const config = await slackConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    let prompt = "";
+    vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (input): AsyncIterable<CodexEvent> {
+      prompt = input.text;
+      yield { type: "final", text: "guava" };
+    });
+    const slackSend = vi.spyOn(service.slack, "sendText").mockResolvedValue([{ channel: "C345", ts: "1782000060.000100" }]);
+    const history = vi.spyOn(service.slack, "fetchConversationHistory").mockResolvedValue({ ok: true, messages: [] });
+    const replies = vi.spyOn(service.slack, "fetchConversationReplies").mockResolvedValue({
+      ok: true,
+      messages: [
+        { type: "message", user: "U234", text: "<@UBOT> what is the secret fruit from recent channel context?", channel: "C345", ts: "1782000040.000100", thread_ts: "1782000040.000100" },
+        { type: "message", bot_id: "BBRAIN", username: "Brain", text: "The secret fruit is mango.", channel: "C345", ts: "1782000045.000100", thread_ts: "1782000040.000100" },
+        { type: "message", user: "U234", text: "Actually the secret fruit is guava", channel: "C345", ts: "1782000050.000100", thread_ts: "1782000040.000100" },
+        { type: "message", user: "U234", text: "<@UBOT> what is the secret fruit now?", channel: "C345", ts: "1782000055.000100", thread_ts: "1782000040.000100" }
+      ]
+    });
+    const normalized = normalizeSlackEventCallback(slackEnvelope({
+      event_id: "EvGuavaThreadCanary",
+      event: {
+        type: "app_mention",
+        user: "U234",
+        text: "<@UBOT> what is the secret fruit now?",
+        channel: "C345",
+        channel_type: "channel",
+        ts: "1782000055.000100",
+        thread_ts: "1782000040.000100",
+        event_ts: "1782000055.000100"
+      }
+    }), "2026-06-26T00:00:00.000Z");
+    if (normalized.status !== "event") throw new Error("expected event");
+
+    await service.enqueueUserEvent(normalized.event);
+    await waitForIdle(service);
+
+    expect(history).not.toHaveBeenCalled();
+    expect(replies).toHaveBeenCalledWith(expect.objectContaining({
+      channel: "C345",
+      threadTs: "1782000040.000100",
+      latest: "1782000055.000100",
+      inclusive: true,
+      limit: 30
+    }));
+    const contextBlock = prompt.slice(
+      prompt.indexOf("Slack context hydration"),
+      prompt.indexOf("\n\nAvailable employees"),
+    );
+    expect(contextBlock).toContain("source_kind: thread");
+    expect(contextBlock).toContain("selected_sources: thread_replies");
+    expect(contextBlock).not.toContain("fallbacks: no_thread_history");
+    expect(contextBlock).toContain("The secret fruit is mango.");
+    expect(contextBlock).toContain("Actually the secret fruit is guava");
+    expect(contextBlock.indexOf("The secret fruit is mango.")).toBeLessThan(contextBlock.indexOf("Actually the secret fruit is guava"));
+    expect(prompt).toContain("User content:\nwhat is the secret fruit now?");
+    expect(slackSend).toHaveBeenCalledWith(normalized.event.outputTarget, "guava");
+    const summary = await waitForSlackTelemetry(
+      service.state,
+      (value) => value.lastContextDecision?.eventId === "EvGuavaThreadCanary" && value.lastOutboundSuccess?.channelId === "C345",
+      "Slack guava thread canary telemetry",
+    );
+    expect(summary.lastContextDecision).toMatchObject({
+      outcome: "hydrated",
+      sourceKind: "thread",
+      selectedSources: ["thread_replies"],
+      messagesIncluded: 4,
+    });
+  });
+
   test("does not leak Slack context across channels", async () => {
     const config = await slackConfig();
     const logger = createLogger("silent");
@@ -713,6 +785,43 @@ describe("Slack runtime foundation", () => {
     });
     const rawTelemetry = await readFile(service.state.path("slack_telemetry/summary.json"), "utf8");
     expect(rawTelemetry).not.toContain("Do not store this Slack reply body");
+  });
+
+  test("SlackGateway fetches thread replies with GET query arguments", async () => {
+    const config = await slackConfig();
+    const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      expect(String(url)).toMatch(/^https:\/\/slack\.com\/api\/conversations\.replies\?/);
+      expect(init?.method).toBe("GET");
+      expect(init?.body).toBeUndefined();
+      expect(init?.headers).toMatchObject({ authorization: "Bearer xoxb-test-token" });
+      const parsed = new URL(String(url));
+      expect(parsed.searchParams.get("channel")).toBe("C345");
+      expect(parsed.searchParams.get("ts")).toBe("1782000040.000100");
+      expect(parsed.searchParams.get("latest")).toBe("1782000055.000100");
+      expect(parsed.searchParams.get("inclusive")).toBe("true");
+      expect(parsed.searchParams.get("limit")).toBe("30");
+      return new Response(JSON.stringify({
+        ok: true,
+        messages: [{ type: "message", user: "U234", text: "Actually the secret fruit is guava", ts: "1782000050.000100", thread_ts: "1782000040.000100" }]
+      }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
+    });
+    const gateway = new SlackGateway(config, createLogger("silent"), fetchImpl as unknown as typeof fetch);
+
+    await expect(gateway.fetchConversationReplies({
+      channel: "C345",
+      threadTs: "1782000040.000100",
+      latest: "1782000055.000100",
+      inclusive: true,
+      limit: 30
+    })).resolves.toEqual({
+      ok: true,
+      messages: [{ type: "message", user: "U234", text: "Actually the secret fruit is guava", ts: "1782000050.000100", thread_ts: "1782000040.000100" }],
+      responseMetadata: undefined,
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   test("SlackGateway posts source-thread text through chat.postMessage without exposing tokens to tests", async () => {

@@ -3,6 +3,8 @@ import { resolve } from "node:path";
 
 const REQUIRED_BOT_SCOPES = [
   "app_mentions:read",
+  "channels:history",
+  "channels:read",
   "chat:write",
   "groups:history",
   "groups:read",

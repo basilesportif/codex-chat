@@ -10,6 +10,8 @@ const metadataPath = process.argv[3] ? resolve(process.argv[3]) : resolve(appDir
 
 const requiredScopes = [
   "app_mentions:read",
+  "channels:history",
+  "channels:read",
   "chat:write",
   "groups:history",
   "groups:read",

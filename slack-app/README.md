@@ -110,6 +110,7 @@ Required bot scopes for the current adapter:
 
 - `app_mentions:read`
 - `chat:write`
+- `channels:history`, `channels:read`
 - `im:history`, `mpim:history`, `groups:history`
 - `im:read`, `mpim:read`, `groups:read`
 

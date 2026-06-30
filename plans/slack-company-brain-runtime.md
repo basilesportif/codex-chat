@@ -47,7 +47,10 @@ runtime behavior. Basic inbound Slack Events delivery through this Brain URL to
 codex-chat is confirmed as of 2026-06-29. An outbound reply directive was
 attempted; final proof still needs Slack canaries showing replies and later
 subagent callbacks land in the expected source channel/thread/DM, so keep any
-outbound scope/membership/routing caveat visible until then. Do not reintroduce
+outbound scope/membership/routing caveat visible until then. As of 2026-06-30,
+Brain admin provides a read-only/manual Slack Canary panel that records operator
+outcomes and correlates them with codex-chat redacted telemetry; codex-chat still
+does not expose human admin pages or receive canary commands from Brain. Do not reintroduce
 codex-chat-hosted `/admin`, `/admin/codex-chat`, or
 `/api/admin/codex-chat/*` surfaces.
 
@@ -61,5 +64,8 @@ channel/thread context hydration through Slack API reads and/or recorded event
 history, leakage guards, subagent/callback routing back to the stored Slack
 output target, per-channel/thread/context telemetry, and canaries covering
 public/private/DM/MPIM/channel/thread replies. This repo owns the runtime
-implementation contract for those semantics; see `slack-app/README.md` for the
-local adapter checklist and Brain's plan for the full roadmap.
+implementation contract for those semantics and emits the redacted telemetry
+fields that Brain's manual canary rollup displays (`lastContextDecision`,
+`lastSubagentRouting`, inbound/outbound counters, output channel/thread target,
+and recent errors); see `slack-app/README.md` for the local adapter checklist and
+Brain's plan for the full roadmap.

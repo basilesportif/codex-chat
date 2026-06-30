@@ -153,7 +153,10 @@ update Slack from that JSON:
    Brain request URL, and save changes.
 
 If an older **Codex Chat** Slack app still exists, leave it installed until the
-Brain app has passed a live canary if you need rollback. Then remove it from
+Brain app has passed a live canary if you need rollback. Record live canary
+outcomes in Brain admin's Slack Canary panel; it is read-only/manual, stores
+redacted operator notes in Brain private state, and correlates them with this
+runtime's Slack telemetry without making Brain send Slack messages. Then remove it from
 Slack under <https://api.slack.com/apps> → old **Codex Chat** app → **App Home**
 or **OAuth & Permissions** → uninstall/remove from workspace, or delete/archive
 that old app if it is no longer needed. Do not copy old tokens into git or docs;

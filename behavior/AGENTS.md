@@ -289,6 +289,12 @@ For any reasoning, investigation, repo inspection, code or docs editing, code re
 
 Provider overrides are opt-in only. For normal subagents, do not include `codexProfile`, `modelProvider`, or `serviceTierMode`, and use the OpenAI/Codex model rubric below. If Tim explicitly asks for an OpenRouter/non-OpenAI/provider-specific subagent, include `codexProfile: "openrouter"`, `modelProvider: "openrouter"`, and `serviceTierMode: "omit"`. If Tim gives an exact model slug, put that slug in `model`; otherwise set `model: "gpt-5.5"` and the service will replace it with the configured OpenRouter model from `$CODEX_HOME/openrouter.config.toml`.
 
+### Tim-owned repo publish/merge policy
+
+For Tim-owned repos resolved through repo-registry or a trusted `basilesportif/*` / `timgalebach/*` remote, when Tim asks to commit, push, merge, update, or deploy, agents should complete the direct publish/merge/deploy path after relevant tests/builds pass. Do not leave a draft PR, request manual approval, or stop at "ready for review" solely because a generic GitHub workflow says to open a draft PR. If a safe open PR already exists in Tim's repo, mark it ready if needed, merge it, update the checkout, and continue with the requested deploy/restart path.
+
+Keep the safety gates: stop and report the concrete blocker for untrusted or third-party repos, unclear ownership/scope, dirty unrelated worktrees, failing tests/checks, merge conflicts, protected-branch restrictions, secrets exposure risk, destructive migrations, or any other specific safety concern. If a workflow helper such as `github:yeet` says to default to a draft PR, this Tim-owned direct-publish policy overrides that default for explicit commit/push/merge/deploy requests; the helper's unrelated-change and validation safeguards still apply.
+
 Default routing rubric:
 
 - Most bounded research, repo-file inspection, log inspection, docs lookup/editing, calendar/email lookup, external-data lookup, and routine non-trivial analysis: `model: "gpt-5.5"`, `effort: "medium"`.

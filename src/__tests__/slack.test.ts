@@ -494,9 +494,101 @@ describe("Slack runtime foundation", () => {
       outcome: "hydrated",
       sourceKind: "public_channel_root",
       selectedSources: ["channel_history"],
-      messagesIncluded: 2,
+      messagesIncluded: 1,
       outputThreadTsPresent: true
     });
+  });
+
+  test("mango/pineapple canary hydrates pre-invocation top-level channel context only", async () => {
+    const config = await slackConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    let prompt = "";
+    vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (input): AsyncIterable<CodexEvent> {
+      prompt = input.text;
+      yield { type: "final", text: "mango" };
+    });
+    vi.spyOn(service.slack, "sendText").mockResolvedValue([{ channel: "C345", ts: "1782000045.000100" }]);
+    const history = vi.spyOn(service.slack, "fetchConversationHistory").mockResolvedValue({
+      ok: true,
+      messages: [
+        { type: "message", user: "U234", text: "<@UBOT> what is the secret fruit from recent channel context?", channel: "C345", ts: "1782000040.000100" },
+        { type: "message", user: "U111", text: "Context test: remember this for Brain.", channel: "C345", ts: "1782000030.000100" },
+        { type: "message", user: "U111", text: "Context test: the secret fruit is mango.", channel: "C345", ts: "1782000020.000100" },
+        { type: "message", bot_id: "BBRAIN", subtype: "bot_message", text: "pineapple bot-thread reply must stay out", channel: "C345", ts: "1782000010.000100", thread_ts: "1782000000.000100" },
+        { type: "message", user: "U234", text: "<@UBOT> say pineapple", channel: "C345", ts: "1782000000.000100" }
+      ]
+    });
+    const replies = vi.spyOn(service.slack, "fetchConversationReplies").mockResolvedValue({ ok: true, messages: [] });
+    const normalized = normalizeSlackEventCallback(slackEnvelope({
+      event_id: "EvMangoCanary",
+      event: {
+        type: "app_mention",
+        user: "U234",
+        text: "<@UBOT> what is the secret fruit from recent channel context?",
+        channel: "C345",
+        channel_type: "channel",
+        ts: "1782000040.000100",
+        event_ts: "1782000040.000100"
+      }
+    }), "2026-06-26T00:00:00.000Z");
+    if (normalized.status !== "event") throw new Error("expected event");
+
+    await service.enqueueUserEvent(normalized.event);
+    await waitForIdle(service);
+
+    expect(history).toHaveBeenCalledWith(expect.objectContaining({ channel: "C345", latest: "1782000040.000100", inclusive: false, limit: 15 }));
+    expect(replies).not.toHaveBeenCalled();
+    const contextBlock = prompt.slice(
+      prompt.indexOf("Slack context hydration"),
+      prompt.indexOf("\n\nAvailable employees"),
+    );
+    expect(contextBlock).toContain("Slack history boundary:");
+    expect(contextBlock).toContain("selected_sources: channel_history");
+    expect(contextBlock).toContain("<@UBOT> say pineapple");
+    expect(contextBlock).toContain("Context test: the secret fruit is mango.");
+    expect(contextBlock).toContain("Context test: remember this for Brain.");
+    expect(contextBlock).not.toContain("pineapple bot-thread reply must stay out");
+    expect(contextBlock).not.toContain("what is the secret fruit from recent channel context?");
+    expect(contextBlock.indexOf("<@UBOT> say pineapple")).toBeLessThan(contextBlock.indexOf("Context test: the secret fruit is mango."));
+    expect(contextBlock.indexOf("Context test: the secret fruit is mango.")).toBeLessThan(contextBlock.indexOf("Context test: remember this for Brain."));
+    expect(prompt).toContain("User content:\nwhat is the secret fruit from recent channel context?");
+  });
+
+  test("Slack context fallback tells the model not to infer history from prior turns", async () => {
+    const config = await slackConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    let prompt = "";
+    vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (input): AsyncIterable<CodexEvent> {
+      prompt = input.text;
+      yield { type: "final", text: "I do not have recent channel history." };
+    });
+    vi.spyOn(service.slack, "sendText").mockResolvedValue([{ channel: "C345", ts: "1782000045.000100" }]);
+    vi.spyOn(service.slack, "fetchConversationHistory").mockResolvedValue({ ok: false, error: "missing_scope" });
+    const normalized = normalizeSlackEventCallback(slackEnvelope({
+      event_id: "EvMissingScopeContext",
+      event: {
+        type: "app_mention",
+        user: "U234",
+        text: "<@UBOT> what is the secret fruit from recent channel context?",
+        channel: "C345",
+        channel_type: "channel",
+        ts: "1782000040.000100",
+        event_ts: "1782000040.000100"
+      }
+    }), "2026-06-26T00:00:00.000Z");
+    if (normalized.status !== "event") throw new Error("expected event");
+
+    await service.enqueueUserEvent(normalized.event);
+    await waitForIdle(service);
+
+    expect(prompt).toContain("selected_sources: source_event_only");
+    expect(prompt).toContain("fallbacks: no_channel_history:missing_scope");
+    expect(prompt).toContain("Slack history boundary:");
+    expect(prompt).toContain("do not infer Slack history from prior Codex turns");
   });
 
   test("hydrates recent thread context for thread mentions without channel history", async () => {

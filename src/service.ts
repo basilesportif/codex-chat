@@ -6,6 +6,12 @@ import { ApiGateway, type AudioIngestionCompletedEvent } from "./api.js";
 import type { AudioIngestMetadata } from "./audio-ingest.js";
 import { AppConfig, ensureConfiguredDirectories, resolveConfigPath } from "./config.js";
 import { BehaviorPack } from "./behavior.js";
+import {
+  annotateEventWithBrainCapabilityDecision,
+  resolveSlackBrainCapabilityForEvent,
+  SLACK_BRAIN_PERMISSION_DENIED_MESSAGE,
+  type SlackBrainCapabilityDecision
+} from "./brain-capabilities.js";
 import { AppServerCodexClient, CodexCrashInfo } from "./codex.js";
 import {
   consumeDeployMarker,
@@ -47,6 +53,7 @@ import { sanitizeChildProcessEnv } from "./env.js";
 import { SlackGateway } from "./slack.js";
 import { hydrateSlackContextForEvent } from "./slack-context.js";
 import {
+  slackCapabilityTelemetryObservation,
   slackContextTelemetryObservation,
   slackOutboundTelemetryObservation,
   slackSubagentRoutingTelemetryObservation,
@@ -475,6 +482,7 @@ export class ServiceSupervisor {
 
   async enqueueUserEvent(event: UserEvent): Promise<void> {
     ensureEventRuntimeContext(event);
+    if (!await this.enforceSlackBrainCapability(event, "enqueue")) return;
     await this.createOrResumeConversationSession(event);
     // Intercept "logs [N]" and "introspect [N]" commands before they reach Codex.
     // Reply directly from the service — no turn, no tokens consumed.
@@ -1307,6 +1315,7 @@ export class ServiceSupervisor {
 
   private async processEvent(event: UserEvent, turnToken: number): Promise<void> {
     ensureEventRuntimeContext(event);
+    if (!await this.enforceSlackBrainCapability(event, "run")) return;
     const turnId = makeId("turn");
     const runContext = buildRunContext({ event, runId: turnId });
     event.runContext = runContext;
@@ -1944,6 +1953,69 @@ export class ServiceSupervisor {
     }
   }
 
+  private async enforceSlackBrainCapability(event: UserEvent, stage: "enqueue" | "run" | "context"): Promise<boolean> {
+    if (event.source !== "slack") return true;
+    const decision = await resolveSlackBrainCapabilityForEvent(event);
+    annotateEventWithBrainCapabilityDecision(event, decision);
+    await this.recordSlackCapabilityDecision(event, decision, stage);
+    const logPayload = {
+      component: "slack",
+      event: "brain_capability_decision",
+      stage,
+      allowed: decision.allowed,
+      reason: decision.reason,
+      capabilityId: decision.capabilityId,
+      action: decision.action,
+      teamId: typeof event.metadata?.slackTeamId === "string" ? event.metadata.slackTeamId : event.outputTarget?.teamId,
+      channelId: typeof event.metadata?.slackChannelId === "string" ? event.metadata.slackChannelId : event.outputTarget?.channelId,
+      userId: typeof event.metadata?.slackUserId === "string" ? event.metadata.slackUserId : event.actor?.surfaceUserId,
+      eventId: typeof event.metadata?.slackEventId === "string" ? event.metadata.slackEventId : undefined,
+      personId: decision.personId,
+      identityId: decision.identityId,
+      grantIds: decision.grantIds,
+    };
+    if (decision.allowed) {
+      this.logger.info(logPayload, "Slack Brain capability check allowed");
+      return true;
+    }
+
+    this.logger.warn(logPayload, "Slack Brain capability check denied");
+    if (this.canSendTextToOutputTarget(event.outputTarget)) {
+      try {
+        await this.sendTextToOutputTarget(event.outputTarget, SLACK_BRAIN_PERMISSION_DENIED_MESSAGE);
+      } catch (sendError) {
+        this.logger.error({
+          component: "slack",
+          event: "brain_capability_denial_reply_failed",
+          stage,
+          teamId: logPayload.teamId,
+          channelId: logPayload.channelId,
+          userId: logPayload.userId,
+          eventId: logPayload.eventId,
+          reason: decision.reason,
+          sendError
+        }, "Failed to send Slack Brain capability denial reply");
+      }
+    }
+    return false;
+  }
+
+  private async recordSlackCapabilityDecision(event: UserEvent, decision: SlackBrainCapabilityDecision, stage: "enqueue" | "run" | "context"): Promise<void> {
+    await this.state.recordSlackTelemetryObservation(slackCapabilityTelemetryObservation({
+      event,
+      allowed: decision.allowed,
+      reason: decision.reason,
+      capabilityId: decision.capabilityId,
+      action: decision.action,
+      decisionStage: stage,
+      grantIds: decision.grantIds,
+      personId: decision.personId,
+      identityId: decision.identityId
+    })).catch((error) => {
+      this.logger.warn({ component: "slack", event: "telemetry_record_failed", error }, "Slack capability telemetry observation was dropped");
+    });
+  }
+
   private isStaleTurnToken(turnToken: number): boolean {
     return this.activeTurnToken !== turnToken;
   }
@@ -2282,6 +2354,9 @@ export class ServiceSupervisor {
 
   private async hydrateSlackContextPrompt(event: UserEvent): Promise<string | undefined> {
     if (event.source !== "slack") return undefined;
+    if ((event.metadata?.brainCapability as { allowed?: unknown } | undefined)?.allowed !== true) {
+      if (!await this.enforceSlackBrainCapability(event, "context")) return undefined;
+    }
     try {
       const context = await hydrateSlackContextForEvent(event, {
         gateway: this.slack,

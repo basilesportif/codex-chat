@@ -74,6 +74,15 @@ administration such as env writes, restart guidance, and live verification.
 Brain may call the checked-in no-secret manifest scripts from the selected
 checkout.
 
+Slack inbound runs are now fail-closed against Brain's read-only capability
+identity store (`BRAIN_CAPABILITY_STORE_PATH`, default
+`/home/tim/.brain/control-plane/capabilities.json`) before context hydration or
+Codex execution. The first gate resolves `team_id + user_id` to a linked Brain
+person and requires the broad run capability available in the current catalog:
+`assistant.run` when present, otherwise the existing `slack.source.read` grant.
+Unknown or ungranted Slack identities receive a short source-thread permission
+reply; Telegram remains on the existing allowlist/runtime path for now.
+
 Slack conversation continuity is a runtime requirement, not just an install
 check. Root channel mentions reply in a Slack thread attached to the invoking
 message while hydrating a bounded recent source-channel window; existing thread

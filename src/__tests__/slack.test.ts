@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { ApiGateway, type ApiGatewayHooks } from "../api.js";
+import { SLACK_BRAIN_PERMISSION_DENIED_MESSAGE } from "../brain-capabilities.js";
 import { loadConfig, type AppConfig } from "../config.js";
 import { FileStore } from "../file-store.js";
 import { createLogger } from "../logger.js";
@@ -32,6 +33,7 @@ beforeEach(() => {
 
 afterEach(async () => {
   await Promise.all(gateways.splice(0).map((gateway) => gateway.stop()));
+  await new Promise((resolve) => setTimeout(resolve, 25));
   process.env = { ...originalEnv };
   vi.restoreAllMocks();
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
@@ -49,6 +51,9 @@ async function tempRoot(prefix = "codex-chat-slack-"): Promise<string> {
 
 async function slackConfig(extraToml = ""): Promise<AppConfig> {
   const root = await tempRoot();
+  const capabilityStorePath = join(root, "capabilities.json");
+  await writeBrainCapabilityStore(capabilityStorePath);
+  process.env.BRAIN_CAPABILITY_STORE_PATH = capabilityStorePath;
   const configPath = join(root, "config", "codex-chat.toml");
   await writeFile(configPath, `
 version = 1
@@ -88,6 +93,88 @@ enabled = true
 ${extraToml}
 `);
   return loadConfig(configPath);
+}
+
+async function writeBrainCapabilityStore(path: string): Promise<void> {
+  await writeFile(path, JSON.stringify({
+    schemaVersion: 2,
+    storeId: "test-brain-capabilities",
+    mode: "identity_capability_foundation",
+    writesEnabled: false,
+    enforcementEnabled: false,
+    people: [{
+      id: "person_tim",
+      displayName: "Tim",
+      status: "active",
+      personType: "human",
+      primarySubjectId: "person:person_tim",
+      identityIds: [
+        "identity_slack_T123_U234",
+        "identity_slack_T0BCF7LBNNB_U0BDR0E1KJL"
+      ],
+      subjectIds: ["person:person_tim"],
+      notes: [],
+      source: "admin_seed",
+      createdAt: "2026-06-30T00:00:00.000Z",
+      updatedAt: "2026-06-30T00:00:00.000Z"
+    }],
+    externalIdentities: [
+      {
+        id: "identity_slack_T123_U234",
+        provider: "slack",
+        providerUserId: "U234",
+        providerTeamId: "T123",
+        personId: "person_tim",
+        label: "Test Tim Slack",
+        status: "linked",
+        channelKinds: ["slack_workspace"],
+        communicationChannelIds: [],
+        proofIds: [],
+        metadata: { teamId: "T123" },
+        createdAt: "2026-06-30T00:00:00.000Z",
+        updatedAt: "2026-06-30T00:00:00.000Z"
+      },
+      {
+        id: "identity_slack_T0BCF7LBNNB_U0BDR0E1KJL",
+        provider: "slack",
+        providerUserId: "U0BDR0E1KJL",
+        providerTeamId: "T0BCF7LBNNB",
+        personId: "person_tim",
+        label: "Tim Slack (T0BCF7LBNNB/U0BDR0E1KJL)",
+        status: "linked",
+        channelKinds: ["slack_workspace"],
+        communicationChannelIds: [],
+        proofIds: [],
+        metadata: { teamId: "T0BCF7LBNNB" },
+        createdAt: "2026-06-30T00:00:00.000Z",
+        updatedAt: "2026-06-30T00:00:00.000Z"
+      }
+    ],
+    identityProofs: [],
+    communicationChannels: [],
+    subjects: [
+      { id: "person:person_tim", kind: "person", label: "Tim", description: "Test Tim", source: "admin_seed", personId: "person_tim" },
+      { id: "identity:identity_slack_T123_U234", kind: "external_identity", label: "Test Tim Slack", description: "Test Tim Slack", source: "identity_link", personId: "person_tim", identityId: "identity_slack_T123_U234", externalIds: { teamId: "T123", userId: "U234" } },
+      { id: "identity:identity_slack_T0BCF7LBNNB_U0BDR0E1KJL", kind: "external_identity", label: "Tim Slack", description: "Tim Slack", source: "identity_link", personId: "person_tim", identityId: "identity_slack_T0BCF7LBNNB_U0BDR0E1KJL", externalIds: { teamId: "T0BCF7LBNNB", userId: "U0BDR0E1KJL" } }
+    ],
+    grantBundles: [],
+    grants: [{
+      id: "grant_seed_tim_owner_slack_source_read",
+      subjectId: "person:person_tim",
+      capabilityId: "slack.source.read",
+      grantKind: "capability",
+      resource: { kind: "global", id: "*", selectors: { scope: "owner_all", teamId: "*", channelId: "*", threadTs: "*" } },
+      actions: ["read"],
+      source: { kind: "seed", id: "test" },
+      grantedBy: "system:test",
+      grantedAt: "2026-06-30T00:00:00.000Z",
+      status: "active",
+      reason: "Test Tim owner Slack source read grant.",
+      enforcement: "non_enforcing"
+    }],
+    audit: { appendOnly: true, writesEnabled: false, path: "", values: "", requiredFields: [], eventTypes: [], sampleEvent: {} },
+    notes: []
+  }, null, 2));
 }
 
 async function apiHarness(hooks: ApiGatewayHooks = {}): Promise<{ config: AppConfig; gateway: ApiGateway; baseUrl: string; state: StateStore }> {
@@ -394,6 +481,158 @@ describe("Slack runtime foundation", () => {
       (value) => value.lastAcceptedEvent?.eventId === "Ev123",
       "Slack immediate reaction hook telemetry",
     );
+  });
+
+  test("allows Tim's linked Slack identity through Brain capability enforcement", async () => {
+    const config = await slackConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    const codexTurn = vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
+      yield { type: "final", text: "Tim Slack answer." };
+    });
+    vi.spyOn(service.slack, "fetchConversationHistory").mockResolvedValue({ ok: false, error: "test_disabled" });
+    const slackSend = vi.spyOn(service.slack, "sendText").mockResolvedValue([{ channel: "C0BDR0ECSAC", ts: "1782000002.000100" }]);
+    const normalized = normalizeSlackEventCallback(slackEnvelope({
+      team_id: "T0BCF7LBNNB",
+      event_id: "EvTimSlackAllowed",
+      authorizations: [{ team_id: "T0BCF7LBNNB", user_id: "UBOT", is_bot: true }],
+      event: {
+        type: "app_mention",
+        user: "U0BDR0E1KJL",
+        text: "<@UBOT> hello from Tim",
+        channel: "C0BDR0ECSAC",
+        channel_type: "channel",
+        team: "T0BCF7LBNNB",
+        ts: "1782000000.000100",
+        event_ts: "1782000000.000100"
+      }
+    }), "2026-07-01T00:00:00.000Z");
+    if (normalized.status !== "event") throw new Error("expected event");
+
+    await service.enqueueUserEvent(normalized.event);
+    await waitForIdle(service);
+
+    expect(codexTurn).toHaveBeenCalledTimes(1);
+    expect(slackSend).toHaveBeenCalledWith(normalized.event.outputTarget, "Tim Slack answer.");
+    const summary = await waitForSlackTelemetry(
+      service.state,
+      (value) => value.lastCapabilityDecision?.eventId === "EvTimSlackAllowed" && value.lastCapabilityDecision?.outcome === "allowed",
+      "Slack Brain capability allow telemetry",
+    );
+    expect(summary.lastCapabilityDecision).toMatchObject({
+      direction: "capability",
+      outcome: "allowed",
+      capabilityId: "slack.source.read",
+      personId: "person_tim",
+      identityId: "identity_slack_T0BCF7LBNNB_U0BDR0E1KJL",
+    });
+  });
+
+  test("denies unknown Slack identities before context hydration, Codex, or subagents", async () => {
+    const config = await slackConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    const codexTurn = vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
+      yield { type: "final", text: "must not run" };
+    });
+    const history = vi.spyOn(service.slack, "fetchConversationHistory").mockResolvedValue({ ok: true, messages: [] });
+    const replies = vi.spyOn(service.slack, "fetchConversationReplies").mockResolvedValue({ ok: true, messages: [] });
+    const slackSend = vi.spyOn(service.slack, "sendText").mockResolvedValue([{ channel: "C345", ts: "1782000002.000100" }]);
+    const dispatch = vi.spyOn((service as unknown as { subagents: { dispatch: (input: unknown) => Promise<string> } }).subagents, "dispatch");
+    const normalized = normalizeSlackEventCallback(slackEnvelope({
+      event_id: "EvUnknownSlackDenied",
+      event: {
+        type: "app_mention",
+        user: "U999",
+        text: "<@UBOT> should be denied",
+        channel: "C345",
+        channel_type: "channel",
+        ts: "1782000000.000100",
+        event_ts: "1782000000.000100"
+      }
+    }), "2026-07-01T00:00:00.000Z");
+    if (normalized.status !== "event") throw new Error("expected event");
+
+    await service.enqueueUserEvent(normalized.event);
+    await waitForIdle(service);
+
+    expect(slackSend).toHaveBeenCalledWith(normalized.event.outputTarget, SLACK_BRAIN_PERMISSION_DENIED_MESSAGE);
+    expect(codexTurn).not.toHaveBeenCalled();
+    expect(history).not.toHaveBeenCalled();
+    expect(replies).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalled();
+    const summary = await waitForSlackTelemetry(
+      service.state,
+      (value) => value.lastCapabilityDecision?.eventId === "EvUnknownSlackDenied" && value.lastCapabilityDecision?.outcome === "denied",
+      "Slack Brain capability deny telemetry",
+    );
+    expect(summary.lastCapabilityDecision).toMatchObject({
+      direction: "capability",
+      outcome: "denied",
+      reason: "identity_not_linked",
+      capabilityId: "slack.source.read",
+    });
+  });
+
+  test.each([
+    ["missing", "missing-capabilities.json", undefined],
+    ["invalid", "invalid-capabilities.json", "{not-json"],
+  ])("denies Slack fail-closed when Brain capability store is %s", async (_label, fileName, contents) => {
+    const config = await slackConfig();
+    const storePath = join(config.rootDir, fileName);
+    if (contents !== undefined) await writeFile(storePath, contents);
+    process.env.BRAIN_CAPABILITY_STORE_PATH = storePath;
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    const codexTurn = vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
+      yield { type: "final", text: "must not run" };
+    });
+    const slackSend = vi.spyOn(service.slack, "sendText").mockResolvedValue([{ channel: "C345", ts: "1782000002.000100" }]);
+    const history = vi.spyOn(service.slack, "fetchConversationHistory").mockResolvedValue({ ok: true, messages: [] });
+    const normalized = normalizeSlackEventCallback(slackEnvelope({ event_id: `EvStore${_label}` }), "2026-07-01T00:00:00.000Z");
+    if (normalized.status !== "event") throw new Error("expected event");
+
+    await service.enqueueUserEvent(normalized.event);
+    await waitForIdle(service);
+
+    expect(slackSend).toHaveBeenCalledWith(normalized.event.outputTarget, SLACK_BRAIN_PERMISSION_DENIED_MESSAGE);
+    expect(codexTurn).not.toHaveBeenCalled();
+    expect(history).not.toHaveBeenCalled();
+    await waitForSlackTelemetry(
+      service.state,
+      (value) => value.lastCapabilityDecision?.eventId === `EvStore${_label}` && value.lastCapabilityDecision?.outcome === "denied",
+      "Slack Brain capability store fail-closed telemetry",
+    );
+  });
+
+  test("Telegram path is unaffected by missing Brain capability store", async () => {
+    const config = await slackConfig();
+    process.env.BRAIN_CAPABILITY_STORE_PATH = join(config.rootDir, "missing-capabilities.json");
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    const codexTurn = vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
+      yield { type: "final", text: "Telegram answer." };
+    });
+    const telegramSend = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+
+    await service.enqueueUserEvent({
+      source: "telegram",
+      chatId: 253768951,
+      userId: 253768951,
+      username: "tim",
+      messageId: 123,
+      text: "telegram should still work",
+      attachments: [],
+      receivedAt: "2026-07-01T00:00:00.000Z",
+    });
+    await waitForIdle(service);
+
+    expect(codexTurn).toHaveBeenCalledTimes(1);
+    expect(telegramSend).toHaveBeenCalledWith(253768951, "Telegram answer.", 123);
   });
 
   test("Slack Events API rejects invalid signatures", async () => {

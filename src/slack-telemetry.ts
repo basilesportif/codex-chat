@@ -4,7 +4,7 @@ import { slackTargetChannelId, slackTargetThreadTs } from "./runtime.js";
 import type { HydratedSlackContext, SlackSourceKind } from "./slack-context.js";
 import { nowIso } from "./util.js";
 
-export type SlackTelemetryDirection = "inbound" | "outbound" | "context" | "subagent";
+export type SlackTelemetryDirection = "inbound" | "outbound" | "context" | "subagent" | "capability";
 export type SlackTelemetryOutcome =
   | "accepted"
   | "ignored"
@@ -16,7 +16,9 @@ export type SlackTelemetryOutcome =
   | "failure"
   | "hydrated"
   | "fallback"
-  | "callback_routed";
+  | "callback_routed"
+  | "allowed"
+  | "denied";
 
 export interface SlackTelemetryObservation {
   schemaVersion: 1;
@@ -52,6 +54,12 @@ export interface SlackTelemetryObservation {
   conversationSessionId?: string;
   correlationId?: string;
   jobId?: string;
+  capabilityId?: string;
+  capabilityAction?: string;
+  decisionStage?: string;
+  grantIds?: string[];
+  personId?: string;
+  identityId?: string;
 }
 
 export interface SlackTelemetrySummary {
@@ -66,6 +74,7 @@ export interface SlackTelemetrySummary {
   lastOutboundFailure?: SlackTelemetryObservation;
   lastContextDecision?: SlackTelemetryObservation;
   lastSubagentRouting?: SlackTelemetryObservation;
+  lastCapabilityDecision?: SlackTelemetryObservation;
 }
 
 export interface SlackTelemetryStatus extends SlackTelemetrySummary {
@@ -109,6 +118,7 @@ export function updateSlackTelemetrySummary(
   if (observation.direction === "outbound" && observation.outcome === "failure") summary.lastOutboundFailure = observation;
   if (observation.direction === "context") summary.lastContextDecision = observation;
   if (observation.direction === "subagent") summary.lastSubagentRouting = observation;
+  if (observation.direction === "capability") summary.lastCapabilityDecision = observation;
   return summary;
 }
 
@@ -274,6 +284,48 @@ export function slackSubagentRoutingTelemetryObservation(input: {
   });
 }
 
+export function slackCapabilityTelemetryObservation(input: {
+  event: {
+    outputTarget?: OutputTarget;
+    conversationSessionId?: string;
+    correlationId?: string;
+    metadata?: Record<string, unknown>;
+  };
+  allowed: boolean;
+  reason: string;
+  capabilityId?: string;
+  action?: string;
+  decisionStage: string;
+  grantIds?: string[];
+  personId?: string;
+  identityId?: string;
+  observedAt?: string;
+}): SlackTelemetryObservation {
+  return sanitizeSlackTelemetryObservation({
+    schemaVersion: 1,
+    observedAt: input.observedAt ?? nowIso(),
+    direction: "capability",
+    outcome: input.allowed ? "allowed" : "denied",
+    reason: input.reason,
+    teamId: stringValue(input.event.metadata?.slackTeamId) ?? input.event.outputTarget?.teamId,
+    enterpriseId: stringValue(input.event.metadata?.slackEnterpriseId),
+    channelId: stringValue(input.event.metadata?.slackChannelId) ?? input.event.outputTarget?.channelId,
+    channelType: stringValue(input.event.metadata?.slackChannelType),
+    userId: stringValue(input.event.metadata?.slackUserId),
+    messageTs: stringValue(input.event.metadata?.slackMessageTs) ?? input.event.outputTarget?.messageId,
+    threadTs: stringValue(input.event.metadata?.slackReplyThreadTs) ?? slackTargetThreadTs(input.event.outputTarget),
+    eventId: stringValue(input.event.metadata?.slackEventId),
+    conversationSessionId: input.event.conversationSessionId,
+    correlationId: input.event.correlationId,
+    capabilityId: input.capabilityId,
+    capabilityAction: input.action,
+    decisionStage: input.decisionStage,
+    grantIds: input.grantIds,
+    personId: input.personId,
+    identityId: input.identityId,
+  });
+}
+
 export function sanitizeSlackTelemetryObservation(observation: SlackTelemetryObservation): SlackTelemetryObservation {
   return {
     schemaVersion: 1,
@@ -309,6 +361,12 @@ export function sanitizeSlackTelemetryObservation(observation: SlackTelemetryObs
     ...(observation.conversationSessionId ? { conversationSessionId: boundedString(observation.conversationSessionId) } : {}),
     ...(observation.correlationId ? { correlationId: boundedString(observation.correlationId) } : {}),
     ...(observation.jobId ? { jobId: boundedString(observation.jobId) } : {}),
+    ...(observation.capabilityId ? { capabilityId: boundedString(observation.capabilityId) } : {}),
+    ...(observation.capabilityAction ? { capabilityAction: boundedString(observation.capabilityAction) } : {}),
+    ...(observation.decisionStage ? { decisionStage: boundedString(observation.decisionStage) } : {}),
+    ...(observation.grantIds?.length ? { grantIds: observation.grantIds.map(boundedString).slice(0, 20) } : {}),
+    ...(observation.personId ? { personId: boundedString(observation.personId) } : {}),
+    ...(observation.identityId ? { identityId: boundedString(observation.identityId) } : {}),
   };
 }
 

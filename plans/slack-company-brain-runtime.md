@@ -71,13 +71,30 @@ and recent errors); see `slack-app/README.md` for the local adapter checklist an
 Brain's plan for the full roadmap.
 
 
+## 2026-07-01 first Slack capability enforcement update
+
+`codex-chat` now enforces the first fail-closed Slack runtime gate using Brain's
+read-only capability identity store before Slack context hydration, Codex
+execution, or subagent dispatch. The resolver maps Slack `team_id + user_id` to
+a linked Brain person/external identity and requires `assistant.run` when that
+capability appears in the store, otherwise the current catalog's
+`slack.source.read` grant. Tim's seeded Slack identity
+(`T0BCF7LBNNB` / `U0BDR0E1KJL`) remains allowed via `person_tim`; unknown Slack
+users receive the source-thread permission reply instead of a Brain run.
+
+Remaining work is still the granular model: canonical `assistant.run` catalog
+entry/bundles, project/resource selectors, temporary channel/thread approvals,
+output/tool-level checks, admin grant write flows, and durable non-JSON
+capability storage. Telegram behavior is intentionally unchanged in this first
+Slack enforcement slice.
+
 ## 2026-06-30 Phase 5 capability-control-plane update
 
 The canonical Brain plan now marks the Phase 4 Slack visibility/manual canary
 slice complete enough for Phase 5 capability-control-plane work to start. Brain
 should expose capabilities as a separate `/admin` tab/section with a read-only
 capability catalog plus grant/audit vocabulary before enforcement. `codex-chat`
-keeps current Slack behavior unchanged and remains the future runtime enforcement
-point for adapter reads, output sends, tools, and subagent dispatch; do not add
-live capability enforcement here until Brain's model, audit shape, and explicit
-fail-closed semantics are validated.
+now owns the first Slack fail-closed run gate and remains the runtime
+enforcement point for future adapter reads, output sends, tools, and subagent
+dispatch once Brain's granular model, audit shape, and explicit semantics are
+validated.

@@ -482,7 +482,7 @@ export class ServiceSupervisor {
 
   async enqueueUserEvent(event: UserEvent): Promise<void> {
     ensureEventRuntimeContext(event);
-    if (!await this.enforceSlackBrainCapability(event, "enqueue")) return;
+    if (!await this.enforceSlackBrainCapability(event, "enqueue", { recordAllowed: false })) return;
     await this.createOrResumeConversationSession(event);
     // Intercept "logs [N]" and "introspect [N]" commands before they reach Codex.
     // Reply directly from the service — no turn, no tokens consumed.
@@ -1953,11 +1953,12 @@ export class ServiceSupervisor {
     }
   }
 
-  private async enforceSlackBrainCapability(event: UserEvent, stage: "enqueue" | "run" | "context"): Promise<boolean> {
+  private async enforceSlackBrainCapability(event: UserEvent, stage: "enqueue" | "run" | "context", options: { recordAllowed?: boolean } = {}): Promise<boolean> {
     if (event.source !== "slack") return true;
     const decision = await resolveSlackBrainCapabilityForEvent(event);
     annotateEventWithBrainCapabilityDecision(event, decision);
-    await this.recordSlackCapabilityDecision(event, decision, stage);
+    const shouldRecord = !decision.allowed || options.recordAllowed !== false;
+    if (shouldRecord) await this.recordSlackCapabilityDecision(event, decision, stage);
     const logPayload = {
       component: "slack",
       event: "brain_capability_decision",
@@ -1975,7 +1976,7 @@ export class ServiceSupervisor {
       grantIds: decision.grantIds,
     };
     if (decision.allowed) {
-      this.logger.info(logPayload, "Slack Brain capability check allowed");
+      if (shouldRecord) this.logger.info(logPayload, "Slack Brain capability check allowed");
       return true;
     }
 

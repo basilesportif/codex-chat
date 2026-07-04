@@ -392,6 +392,13 @@ class ClaudeAgentSdkSession {
    * result instead.
    */
   private settleGraceTimer?: NodeJS.Timeout;
+  /**
+   * Bumped on every SDK message. settleFromGrace snapshots it before its
+   * awaits and aborts if it moved — SDK activity arriving after the timer has
+   * fired (but before the settle completes) means a steered turn is live and
+   * must not be killed by a stale grace-settle.
+   */
+  private sdkActivityGeneration = 0;
   private assistantText = "";
   private partialText = "";
   private finalMessage = "";
@@ -671,7 +678,9 @@ class ClaudeAgentSdkSession {
   private async handleSdkMessage(message: ClaudeSdkMessage): Promise<void> {
     // Any SDK activity after a deferred result means the steered turn really
     // is running as a separate turn — wait for its result instead of the
-    // grace timer.
+    // grace timer. The generation bump also aborts an in-flight
+    // settleFromGrace whose timer already fired.
+    this.sdkActivityGeneration += 1;
     this.clearSettleGraceTimer();
     await this.appendEvent({ event: "claude_sdk_message", at: nowIso(), backend: "claude_agent_sdk", raw: message });
     if (message.type === "system" && message.subtype === "init") {
@@ -815,6 +824,8 @@ class ClaudeAgentSdkSession {
    */
   private async settleFromGrace(): Promise<void> {
     if (this.settled || this.closed) return;
+    const generation = this.sdkActivityGeneration;
+    const abandoned = (): boolean => this.settled || this.closed || this.sdkActivityGeneration !== generation;
     await this.appendEvent({
       event: "claude_steer_settle_grace_elapsed",
       at: nowIso(),
@@ -822,9 +833,11 @@ class ClaudeAgentSdkSession {
       jobId: this.input.job.id,
       pendingUserTurns: this.pendingUserTurns
     }).catch(() => undefined);
+    if (abandoned()) return;
+    await this.writeFinalMessage(this.finalMessage || this.assistantText || this.partialText).catch(() => undefined);
+    if (abandoned()) return;
     this.pendingUserTurns = 0;
     this.input.job.activeTurnId = undefined;
-    await this.writeFinalMessage(this.finalMessage || this.assistantText || this.partialText).catch(() => undefined);
     this.settle({ code: 0, signal: null });
     this.queue.close();
     this.query?.close();

@@ -638,6 +638,102 @@ describe("Claude Agent SDK subagent backend", () => {
     await backend.shutdown();
   });
 
+  test("SDK activity during an in-flight grace settle aborts it and the steered turn's result wins", async () => {
+    vi.resetModules();
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-subagent-claude-"));
+    tempDirs.push(root);
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "oauth-secret-value";
+
+    // Gate the events.jsonl append so settleFromGrace blocks mid-await while
+    // we inject the steered turn's messages.
+    const fsActual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    let gateNextEventAppend = false;
+    let releaseAppend!: () => void;
+    const appendGate = new Promise<void>((resolve) => {
+      releaseAppend = resolve;
+    });
+    vi.doMock("node:fs/promises", () => ({
+      ...fsActual,
+      appendFile: vi.fn(async (path: unknown, ...rest: unknown[]) => {
+        if (gateNextEventAppend && String(path).endsWith("events.jsonl")) {
+          gateNextEventAppend = false;
+          await appendGate;
+        }
+        return (fsActual.appendFile as (...args: unknown[]) => Promise<void>)(path, ...rest);
+      })
+    }));
+
+    // Push-driven fake SDK stream so the test controls emission timing.
+    const sdkMessages: unknown[] = [];
+    let wakeSdk: (() => void) | undefined;
+    const pushSdk = (message: unknown) => {
+      sdkMessages.push(message);
+      wakeSdk?.();
+    };
+    const queryMock = vi.fn((params: { prompt: AsyncIterable<unknown> }) => {
+      async function* messages() {
+        void params.prompt[Symbol.asyncIterator]().next();
+        while (true) {
+          while (sdkMessages.length === 0) {
+            await new Promise<void>((resolve) => {
+              wakeSdk = resolve;
+            });
+          }
+          const next = sdkMessages.shift();
+          if (next === null) return;
+          yield next;
+        }
+      }
+      return Object.assign(messages(), {
+        initializationResult: vi.fn().mockResolvedValue({
+          account: { apiKeySource: "oauth", apiProvider: "firstParty", tokenSource: "oauth", subscriptionType: "max" }
+        }),
+        interrupt: vi.fn().mockResolvedValue(undefined),
+        close: vi.fn()
+      });
+    });
+    vi.doMock("@anthropic-ai/claude-agent-sdk", () => ({ query: queryMock }));
+
+    const { ClaudeAgentSdkChildAgentBackend } = await import("../subagent-backends.js");
+    const config = enableClaude(testConfig(root));
+    config.subagents.claude!.steerSettleGraceMs = 30;
+    const backend = new ClaudeAgentSdkChildAgentBackend(config, fakeLogger() as never);
+    const job = subagentJob(root, "job_claudegracerace00000000000000000");
+    const started = await backend.start({
+      job,
+      assembledPrompt: "long task",
+      lastMessagePath: join(root, "last-message.md"),
+      stdoutPath: join(root, "events.jsonl"),
+      stderrPath: join(root, "stderr.log"),
+      appServerLogPath: join(root, "app-server.log"),
+      model: "claude-opus-4-8",
+      effort: "medium",
+      serviceTier: "fast",
+      serviceTierMode: "auto",
+      images: [],
+      onJobUpdated: vi.fn().mockResolvedValue(undefined)
+    });
+
+    pushSdk(fakeClaudeInitMessage());
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await backend.steer(job.id, "end with PINEAPPLE");
+    // Turn 1's result arrives with the steer outstanding → deferred + timer.
+    gateNextEventAppend = true;
+    pushSdk({ type: "result", subtype: "success", result: "turn one answer", errors: [], uuid: "00000000-0000-4000-8000-000000000041", session_id: "claude-session" });
+    // Let the 30ms grace timer fire; settleFromGrace blocks on the gated append.
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    // The steered turn now shows up while the grace settle is in flight…
+    pushSdk({ type: "result", subtype: "success", result: "steered final answer", errors: [], uuid: "00000000-0000-4000-8000-000000000042", session_id: "claude-session" });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // …then the blocked grace settle resumes and must abort.
+    releaseAppend();
+
+    await expect(started.finished).resolves.toMatchObject({ code: 0, signal: null });
+    await expect(readFile(join(root, "last-message.md"), "utf8")).resolves.toBe("steered final answer");
+    pushSdk(null); // end the fake SDK stream
+    await backend.shutdown();
+  });
+
   test("a steer queued mid-turn keeps the session open until the steered turn's result", async () => {
     vi.resetModules();
     const root = await mkdtemp(join(tmpdir(), "codex-chat-subagent-claude-"));

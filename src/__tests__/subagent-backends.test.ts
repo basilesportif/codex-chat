@@ -127,7 +127,8 @@ function enableClaude(config: AppConfig): AppConfig {
     disallowedTools: [],
     maxTurns: 100,
     settingSources: [],
-    fastMode: true
+    fastMode: true,
+    steerSettleGraceMs: 10_000
   };
   return config;
 }
@@ -568,6 +569,72 @@ describe("Claude Agent SDK subagent backend", () => {
     expect(options.settings).toBeUndefined();
     const events = await readFile(join(root, "events.jsonl"), "utf8");
     expect(events).toContain('"fastModeSettingApplied":false');
+    await backend.shutdown();
+  });
+
+  test("a steer absorbed into the running turn settles after the grace window with the combined result", async () => {
+    vi.resetModules();
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-subagent-claude-"));
+    tempDirs.push(root);
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "oauth-secret-value";
+    const prompts: unknown[] = [];
+    const queryMock = vi.fn((params: { prompt: AsyncIterable<unknown>; options: Record<string, unknown> }) => {
+      async function* messages() {
+        const iterator = params.prompt[Symbol.asyncIterator]();
+        prompts.push((await iterator.next()).value);
+        yield fakeClaudeInitMessage();
+        // The steer arrives early and is absorbed into the in-flight run:
+        // one combined result, and then the SDK goes quiet awaiting input.
+        prompts.push((await iterator.next()).value);
+        yield {
+          type: "result",
+          subtype: "success",
+          result: "summary text PINEAPPLE",
+          errors: [],
+          uuid: "00000000-0000-4000-8000-000000000031",
+          session_id: "claude-session"
+        };
+        // Stay alive like the real CLI does in streaming-input mode — block
+        // on the next input, which never comes.
+        await iterator.next();
+      }
+      return Object.assign(messages(), {
+        initializationResult: vi.fn().mockResolvedValue({
+          account: { apiKeySource: "oauth", apiProvider: "firstParty", tokenSource: "oauth", subscriptionType: "max" }
+        }),
+        interrupt: vi.fn().mockResolvedValue(undefined),
+        close: vi.fn()
+      });
+    });
+    vi.doMock("@anthropic-ai/claude-agent-sdk", () => ({ query: queryMock }));
+
+    const { ClaudeAgentSdkChildAgentBackend } = await import("../subagent-backends.js");
+    const config = enableClaude(testConfig(root));
+    config.subagents.claude!.steerSettleGraceMs = 100;
+    const backend = new ClaudeAgentSdkChildAgentBackend(config, fakeLogger() as never);
+    const job = subagentJob(root, "job_claudesteerabsorb000000000000000");
+    const started = await backend.start({
+      job,
+      assembledPrompt: "long task",
+      lastMessagePath: join(root, "last-message.md"),
+      stdoutPath: join(root, "events.jsonl"),
+      stderrPath: join(root, "stderr.log"),
+      appServerLogPath: join(root, "app-server.log"),
+      model: "claude-opus-4-8",
+      effort: "medium",
+      serviceTier: "fast",
+      serviceTierMode: "auto",
+      images: [],
+      onJobUpdated: vi.fn().mockResolvedValue(undefined)
+    });
+
+    await backend.steer(job.id, "end with the word PINEAPPLE");
+
+    await expect(started.finished).resolves.toMatchObject({ code: 0, signal: null });
+    await expect(readFile(join(root, "last-message.md"), "utf8")).resolves.toBe("summary text PINEAPPLE");
+    const events = await readFile(join(root, "events.jsonl"), "utf8");
+    expect(events).toContain("claude_turn_result_deferred");
+    expect(events).toContain("claude_steer_settle_grace_elapsed");
     await backend.shutdown();
   });
 

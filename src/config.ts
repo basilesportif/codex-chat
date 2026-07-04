@@ -250,6 +250,11 @@ const configSchema = z.object({
         // that could contain apiKeyHelper or other non-OAuth auth sources.
         settingSources: z.array(claudeSettingSourceSchema).default([]),
         fastMode: z.boolean().default(true),
+        // How long to wait after a turn result before settling a job that
+        // still has outstanding steers. A steer absorbed into the in-flight
+        // run produces no extra result message; if the SDK stays silent for
+        // this window, the recorded result is treated as final.
+        steerSettleGraceMs: z.number().int().positive().default(10_000),
       })
       .default({
         enabled: false,
@@ -261,6 +266,7 @@ const configSchema = z.object({
         maxTurns: 100,
         settingSources: [],
         fastMode: true,
+        steerSettleGraceMs: 10_000,
       }),
   }),
   employees: z.object({
@@ -427,6 +433,7 @@ const defaultConfig = configSchema.parse({
       maxTurns: 100,
       settingSources: [],
       fastMode: true,
+      steerSettleGraceMs: 10_000,
     },
   },
   employees: {

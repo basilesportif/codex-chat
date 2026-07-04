@@ -79,7 +79,8 @@ const DEFAULT_CLAUDE_SUBAGENT_CONFIG: ClaudeSubagentConfig = {
   disallowedTools: [],
   maxTurns: 100,
   settingSources: [],
-  fastMode: true
+  fastMode: true,
+  steerSettleGraceMs: 10_000
 };
 
 const CLAUDE_SYNTHETIC_ACTIVE_TURN_ID = "claude-agent-sdk-stream";
@@ -382,6 +383,15 @@ class ClaudeAgentSdkSession {
    * only when every pushed turn has resolved.
    */
   private pendingUserTurns = 0;
+  /**
+   * Armed when a turn result arrives while steers are still outstanding. A
+   * steer pushed mid-run may be absorbed into that run (one combined result,
+   * nothing more coming) or start a separate turn (more messages coming). If
+   * the SDK stays silent for the grace window, the recorded result is final;
+   * any further SDK activity cancels the timer and we wait for the next
+   * result instead.
+   */
+  private settleGraceTimer?: NodeJS.Timeout;
   private assistantText = "";
   private partialText = "";
   private finalMessage = "";
@@ -443,6 +453,7 @@ class ClaudeAgentSdkSession {
     if (!this.query || this.closed || !this.queue.isOpen() || !this.input.job.activeTurnId) {
       throw new Error(`Subagent ${this.input.job.id} is not currently steerable; Claude Agent SDK input stream is not accepting messages.`);
     }
+    this.clearSettleGraceTimer();
     this.pendingUserTurns += 1;
     this.queue.push(await this.buildUserMessage(text, []));
     await this.appendEvent({ event: "claude_steer_enqueued", at: nowIso(), backend: "claude_agent_sdk", jobId: this.input.job.id, pendingUserTurns: this.pendingUserTurns });
@@ -455,6 +466,7 @@ class ClaudeAgentSdkSession {
     }
     this.stopping = true;
     this.killSignal = "SIGTERM";
+    this.clearSettleGraceTimer();
     this.input.job.activeTurnId = undefined;
     this.queue.close();
     await this.appendEvent({ event: "claude_interrupt_requested", at: nowIso(), backend: "claude_agent_sdk", jobId: this.input.job.id, reason });
@@ -469,6 +481,7 @@ class ClaudeAgentSdkSession {
   async kill(signal: NodeJS.Signals = "SIGTERM"): Promise<void> {
     this.stopping = true;
     this.closed = true;
+    this.clearSettleGraceTimer();
     this.killSignal = signal;
     this.input.job.activeTurnId = undefined;
     this.queue.close();
@@ -656,6 +669,10 @@ class ClaudeAgentSdkSession {
   }
 
   private async handleSdkMessage(message: ClaudeSdkMessage): Promise<void> {
+    // Any SDK activity after a deferred result means the steered turn really
+    // is running as a separate turn — wait for its result instead of the
+    // grace timer.
+    this.clearSettleGraceTimer();
     await this.appendEvent({ event: "claude_sdk_message", at: nowIso(), backend: "claude_agent_sdk", raw: message });
     if (message.type === "system" && message.subtype === "init") {
       const apiKeySource = typeof message.apiKeySource === "string" ? message.apiKeySource : "";
@@ -683,16 +700,20 @@ class ClaudeAgentSdkSession {
       if (message.subtype === "success") {
         this.finalMessage = message.result || this.assistantText || this.partialText;
         if (this.pendingUserTurns > 0 && !this.stopping) {
-          // A steer was queued behind this turn — the SDK will run it as the
-          // next turn. Keep the session open (queue, query, activeTurnId) so
-          // the steered turn's result becomes the job's final output.
+          // A steer is still outstanding. Either it was absorbed into the run
+          // that just produced this result (no further messages coming — the
+          // grace timer settles with this result), or it will run as a
+          // separate turn (its messages cancel the timer and we settle on its
+          // result instead). Keep the session open either way.
           await this.appendEvent({
             event: "claude_turn_result_deferred",
             at: nowIso(),
             backend: "claude_agent_sdk",
             jobId: this.input.job.id,
-            pendingUserTurns: this.pendingUserTurns
+            pendingUserTurns: this.pendingUserTurns,
+            settleGraceMs: claudeSubagentConfig(this.config).steerSettleGraceMs
           });
+          this.armSettleGraceTimer();
           return;
         }
         this.input.job.activeTurnId = undefined;
@@ -767,8 +788,47 @@ class ClaudeAgentSdkSession {
     if (this.settled) return;
     this.settled = true;
     this.closed = true;
+    this.clearSettleGraceTimer();
     this.input.job.activeTurnId = undefined;
     this.resolveFinished(finish);
+  }
+
+  private armSettleGraceTimer(): void {
+    this.clearSettleGraceTimer();
+    const graceMs = claudeSubagentConfig(this.config).steerSettleGraceMs;
+    this.settleGraceTimer = setTimeout(() => {
+      this.settleGraceTimer = undefined;
+      void this.settleFromGrace();
+    }, graceMs);
+    this.settleGraceTimer.unref?.();
+  }
+
+  private clearSettleGraceTimer(): void {
+    if (!this.settleGraceTimer) return;
+    clearTimeout(this.settleGraceTimer);
+    this.settleGraceTimer = undefined;
+  }
+
+  /**
+   * The SDK went quiet after a deferred result: the outstanding steer was
+   * absorbed into the run that produced it, so that result is the final one.
+   */
+  private async settleFromGrace(): Promise<void> {
+    if (this.settled || this.closed) return;
+    await this.appendEvent({
+      event: "claude_steer_settle_grace_elapsed",
+      at: nowIso(),
+      backend: "claude_agent_sdk",
+      jobId: this.input.job.id,
+      pendingUserTurns: this.pendingUserTurns
+    }).catch(() => undefined);
+    this.pendingUserTurns = 0;
+    this.input.job.activeTurnId = undefined;
+    await this.writeFinalMessage(this.finalMessage || this.assistantText || this.partialText).catch(() => undefined);
+    this.settle({ code: 0, signal: null });
+    this.queue.close();
+    this.query?.close();
+    await this.input.onJobUpdated(this.input.job).catch(() => undefined);
   }
 }
 

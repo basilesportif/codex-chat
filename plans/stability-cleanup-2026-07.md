@@ -28,12 +28,12 @@ Source: four-way audit (codex-chat concurrency, codex-chat cleanliness, assistan
 - [x] **13. Fix stale refs in `behavior/assistant-claude.md`** — A: `todo-complete.js`, `calendar-today.js`, `calendar-week.js`, `whoop-today.js`, `docs/ASSISTANT_INTEGRATION_PLAN.md` don't exist. Replace the hand-copied script list with pointers to B's skill docs (source of truth per AGENTS.md Step 1).
 - [x] **14. Remove "read/write crm.json & bets.json directly via JSON"** — A `behavior/assistant-claude.md:19-20`: contradicts B's locking contract (`config/skills/crm.md`); route through B's scripts.
 - [x] **15. Behavior-pack reference validator** — A: add a vitest that greps `behavior/**/*.md` for `scripts/<name>.js` references and asserts each exists in B's `scripts/` (skip when B is absent, e.g. CI without the sibling checkout).
-- [ ] **16. Fork/dup reconciliation (bundle — may defer parts)**
+- [x] **16. Fork/dup reconciliation (bundle)**
   - [x] 16a. file-save: make A's `scripts/file-save.mjs`/`file-list.mjs` thin wrappers over B's scripts (B owns workspace conventions); collapse the two skill docs into one (A's SKILL.md points at B's).
   - [x] 16b. setup-server: reduce A's `behavior/skills/setup-server/SKILL.md` to codex-chat deltas + "read B's doc first".
   - [x] 16c. dispatch-rubric dedup (B commit 6b8c4d8): A `behavior/AGENTS.md` owns directive/tier mechanics; strip the restated rubric from B's `config/TELEGRAM.md`, `CLAUDE.md`, and per-skill boilerplate in `todo.md`/`projects.md`/`reminders.md`.
   - [x] 16d. drop blanket `source workspace/.env` guidance in A `behavior/assistant-claude.md` (B scripts load env via `runtime-env.js`).
-  - [ ] 16e. path parameterization: inject `{{LOGIC_REPO}}`/`{{WORKSPACE}}` in A's behavior loader from config instead of ~20 hardcoded absolute paths (incl. `src/subagents.ts:23` repo-registry path).
+  - [x] 16e. path parameterization (A commit 52afc05 + follow-up: tokens kept only in prompt-assembled files — AGENTS.md, subagents/*.md; disk-read docs keep real paths so agents never see raw tokens): inject `{{LOGIC_REPO}}`/`{{WORKSPACE}}` in A's behavior loader from config instead of ~20 hardcoded absolute paths (incl. `src/subagents.ts:23` repo-registry path).
 
 **Phase 3 boundary: commit + push both, restart service (behavior pack changed).**
 
@@ -57,7 +57,7 @@ Source: four-way audit (codex-chat concurrency, codex-chat cleanliness, assistan
   - [x] 18e. parameterize fenced-block parser in directives.ts; reuse in employees.ts.
   - [x] 18f. dead code: `SubagentManager.cancel()`, unexport `writeDefaultConfigIfMissing`, shared `normalizeRef`, mark `addJobs` test-only.
   - [x] 18g. structured terminal results through `SubagentCallbacks` (delete the header-stripping regex in service.ts).
-- [ ] **19. processEvent split + per-delta reparse fix** — `src/service.ts:1359-1511`: split into consumeCodexStream/executeParsedDirectives/closeTurn helpers; stop re-running `parseDirectives` on the full accumulated output per delta (scan appended tail for new complete fences).
+- [x] **19. processEvent split + per-delta reparse fix** (A commit 25b5728; FenceCloseScanner makes pre-execution O(delta)) — `src/service.ts:1359-1511`: split into consumeCodexStream/executeParsedDirectives/closeTurn helpers; stop re-running `parseDirectives` on the full accumulated output per delta (scan appended tail for new complete fences).
 
 **Phase 4 boundary: commit ticks, push A, restart service.**
 

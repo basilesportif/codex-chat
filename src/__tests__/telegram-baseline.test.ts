@@ -105,8 +105,11 @@ describe("Phase 0 Telegram baseline", () => {
       surfaceKind: "telegram"
     });
     expect(runtime.conversationSessionId).toMatch(/^session_[0-9a-f]{24}$/);
+    // Runtime no longer fabricates local grants; Brain decisions (Slack-scoped)
+    // are the only grant source, so a local capability check finds none.
+    expect(runtime.capabilityGrants).toEqual([]);
     expect(checkCapability(runtime.capabilityGrants, "service:deploy")).toMatchObject({
-      allowed: true,
+      allowed: false,
       operation: "service:deploy"
     });
   });

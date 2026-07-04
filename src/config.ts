@@ -204,6 +204,11 @@ const configSchema = z.object({
         fetchTimeoutMs: 2_500,
       },
     }),
+  brain: z.object({
+    enforcementEnabled: z.boolean().default(true),
+    storePath: z.string().default("/home/tim/.brain/control-plane/capabilities.json"),
+    decisionAuditDir: z.string().default("capability_decisions"),
+  }),
   api: z.object({
     enabled: z.boolean().default(false),
     host: z.string().default("127.0.0.1"),
@@ -389,6 +394,11 @@ const defaultConfig = configSchema.parse({
       maxTotalChars: 6_000,
       fetchTimeoutMs: 2_500,
     },
+  },
+  brain: {
+    enforcementEnabled: true,
+    storePath: "/home/tim/.brain/control-plane/capabilities.json",
+    decisionAuditDir: "capability_decisions",
   },
   api: {
     enabled: false,

@@ -21,6 +21,8 @@ async function loadTestConfig(transport = "app-server") {
   await writeFile(join(root, "AGENTS.md"), "test behavior\n");
   await writeFile(join(root, "loops.json"), JSON.stringify({ version: 1, defaults: {}, loops: [] }));
   await writeFile(join(root, "monitors.json"), JSON.stringify({ version: 1, monitors: [] }));
+  const brainStorePath = join(root, "capabilities.json");
+  await writeTestBrainCapabilityStore(brainStorePath);
   await writeFile(join(configDir, "codex-chat.toml"), `
 version = 1
 
@@ -48,8 +50,50 @@ path = "monitors.json"
 
 [transcription]
 enabled = false
+
+[brain]
+storePath = "${brainStorePath}"
 `);
   return loadConfig(join(configDir, "codex-chat.toml"));
+}
+
+async function writeTestBrainCapabilityStore(path: string): Promise<void> {
+  const operations = [
+    "telegram.event.receive", "slack.event.receive", "subagent.event.receive", "system.event.receive", "audio_ingest.event.receive",
+    "assistant.run", "assistant.context.read", "slack.history.read", "slack.source.react",
+    "service.command.logs", "service.command.help", "service.deploy", "runtime.status.read", "runtime.admin",
+    "subagents.dispatch", "subagents.control.cancel", "subagents.control.steer", "subagents.backend.set", "subagents.result.deliver",
+    "output.text.send", "output.image.send", "output.document.send", "output.reaction.add",
+    "directive.send_text.execute", "directive.send_image.execute", "directive.send_document.execute", "directive.dispatch_subagent.execute",
+    "directive.cancel_job.execute", "directive.steer_subagent.execute", "directive.notify_owner.execute", "directive.react.execute", "directive.enqueue_main.execute",
+    "audio_ingest.run", "system.callback.enqueue", "employees.manage.list", "employees.manage.status", "employees.manage.start", "employees.manage.stop", "employees.manage.steer"
+  ];
+  const selectors = {
+    source: "*", surfaceKind: "*", teamId: "*", channelId: "*", threadTs: "*", messageTs: "*", chatId: "*",
+    messageId: "*", conversationSessionId: "*", actorId: "*", targetId: "*", targetPolicy: "*", outputType: "*",
+    jobId: "*", ownerType: "*", ownerId: "*", resultTarget: "*"
+  };
+  await writeFile(path, JSON.stringify({
+    schemaVersion: 2,
+    people: [{ id: "person_tim", status: "active", primarySubjectId: "person:person_tim", subjectIds: ["person:person_tim"] }],
+    externalIdentities: [
+      { id: "identity_telegram_tim", provider: "telegram", providerUserId: "253768951", personId: "person_tim", status: "linked" },
+      { id: "identity_telegram_test", provider: "telegram", providerUserId: "9", personId: "person_tim", status: "linked" }
+    ],
+    subjects: [{ id: "person:person_tim", personId: "person_tim" }, { id: "system:system" }, { id: "subagent:test" }, { id: "api_key:test" }],
+    grantBundles: [],
+    grants: ["person:person_tim", "system:system", "api_key:test", "subagent:test"].flatMap((subjectId) => operations.map((operation) => ({
+      id: `grant_${subjectId.replace(/[^a-z0-9]+/gi, "_")}_${operation.replace(/[^a-z0-9]+/gi, "_")}`,
+      subjectId,
+      capabilityId: operation,
+      grantKind: "capability",
+      resource: { kind: "global", id: "*", selectors },
+      actions: ["*"],
+      status: "active",
+      enforcement: "enforcing",
+      grantedAt: "2026-07-04T00:00:00.000Z"
+    })))
+  }, null, 2));
 }
 
 function deferred<T = void>() {

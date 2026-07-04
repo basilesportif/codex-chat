@@ -74,7 +74,6 @@ export interface SlackTelemetrySummary {
   lastOutboundFailure?: SlackTelemetryObservation;
   lastContextDecision?: SlackTelemetryObservation;
   lastSubagentRouting?: SlackTelemetryObservation;
-  lastCapabilityDecision?: SlackTelemetryObservation;
 }
 
 export interface SlackTelemetryStatus extends SlackTelemetrySummary {
@@ -118,7 +117,6 @@ export function updateSlackTelemetrySummary(
   if (observation.direction === "outbound" && observation.outcome === "failure") summary.lastOutboundFailure = observation;
   if (observation.direction === "context") summary.lastContextDecision = observation;
   if (observation.direction === "subagent") summary.lastSubagentRouting = observation;
-  if (observation.direction === "capability") summary.lastCapabilityDecision = observation;
   return summary;
 }
 
@@ -281,48 +279,6 @@ export function slackSubagentRoutingTelemetryObservation(input: {
     conversationSessionId: input.conversationSessionId,
     correlationId: input.correlationId,
     jobId: input.jobId,
-  });
-}
-
-export function slackCapabilityTelemetryObservation(input: {
-  event: {
-    outputTarget?: OutputTarget;
-    conversationSessionId?: string;
-    correlationId?: string;
-    metadata?: Record<string, unknown>;
-  };
-  allowed: boolean;
-  reason: string;
-  capabilityId?: string;
-  action?: string;
-  decisionStage: string;
-  grantIds?: string[];
-  personId?: string;
-  identityId?: string;
-  observedAt?: string;
-}): SlackTelemetryObservation {
-  return sanitizeSlackTelemetryObservation({
-    schemaVersion: 1,
-    observedAt: input.observedAt ?? nowIso(),
-    direction: "capability",
-    outcome: input.allowed ? "allowed" : "denied",
-    reason: input.reason,
-    teamId: stringValue(input.event.metadata?.slackTeamId) ?? input.event.outputTarget?.teamId,
-    enterpriseId: stringValue(input.event.metadata?.slackEnterpriseId),
-    channelId: stringValue(input.event.metadata?.slackChannelId) ?? input.event.outputTarget?.channelId,
-    channelType: stringValue(input.event.metadata?.slackChannelType),
-    userId: stringValue(input.event.metadata?.slackUserId),
-    messageTs: stringValue(input.event.metadata?.slackMessageTs) ?? input.event.outputTarget?.messageId,
-    threadTs: stringValue(input.event.metadata?.slackReplyThreadTs) ?? slackTargetThreadTs(input.event.outputTarget),
-    eventId: stringValue(input.event.metadata?.slackEventId),
-    conversationSessionId: input.event.conversationSessionId,
-    correlationId: input.event.correlationId,
-    capabilityId: input.capabilityId,
-    capabilityAction: input.action,
-    decisionStage: input.decisionStage,
-    grantIds: input.grantIds,
-    personId: input.personId,
-    identityId: input.identityId,
   });
 }
 

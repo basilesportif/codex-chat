@@ -13,35 +13,6 @@ import type {
 } from "./types.js";
 import { makeId, nowIso } from "./util.js";
 
-const TELEGRAM_ADMIN_OPERATIONS = [
-  "telegram:read",
-  "telegram:write",
-  "telegram:react",
-  "service:commands",
-  "service:deploy",
-  "subagents:dispatch",
-  "subagents:control",
-  "runtime:admin",
-  "runtime:*",
-  "*"
-];
-
-const TELEGRAM_USER_OPERATIONS = [
-  "telegram:read",
-  "telegram:write",
-  "telegram:react",
-  "service:commands",
-  "subagents:dispatch"
-];
-
-const SLACK_SOURCE_OPERATIONS = [
-  "slack:read_source",
-  "slack:post_source",
-  "slack:post_source_thread",
-  "slack:progress_source",
-  "subagents:dispatch"
-];
-
 export interface TelegramRuntimeInput {
   chatId: number;
   userId: number;
@@ -91,13 +62,7 @@ export function buildTelegramRuntimeContext(input: TelegramRuntimeInput): {
   const conversationSessionId = conversationSessionIdForKey(conversationKey);
   const actor = buildTelegramActorContext({ ...input, correlationId });
   const outputTarget = buildTelegramOutputTarget(input);
-  const capabilityGrants = buildTelegramCapabilityGrants({
-    actor,
-    chatId: input.chatId,
-    conversationSessionId,
-    isAdmin: input.isAdmin === true,
-    createdAt: input.receivedAt
-  });
+  const capabilityGrants: CapabilityGrant[] = [];
   return { correlationId, actor, outputTarget, conversationKey, conversationSessionId, capabilityGrants };
 }
 
@@ -114,14 +79,7 @@ export function buildSlackRuntimeContext(input: SlackRuntimeInput): {
   const conversationSessionId = conversationSessionIdForKey(conversationKey);
   const actor = buildSlackActorContext({ ...input, correlationId });
   const outputTarget = buildSlackOutputTarget(input);
-  const capabilityGrants = buildSlackCapabilityGrants({
-    actor,
-    teamId: input.teamId,
-    channelId: input.channelId,
-    threadTs: outputTarget.threadId,
-    conversationSessionId,
-    createdAt: input.receivedAt
-  });
+  const capabilityGrants: CapabilityGrant[] = [];
   return { correlationId, actor, outputTarget, conversationKey, conversationSessionId, capabilityGrants };
 }
 
@@ -242,13 +200,62 @@ export function buildSyntheticRuntimeContext(event: UserEvent): {
       allowedOutputTypes: ["artifact"],
       metadata: event.metadata
     });
-  const grant = systemGrant(actor, conversationSessionId, event.receivedAt);
-  return { correlationId, actor, outputTarget, conversationKey: key, conversationSessionId, capabilityGrants: [grant] };
+  return { correlationId, actor, outputTarget, conversationKey: key, conversationSessionId, capabilityGrants: [] };
 }
 
 export function ensureEventRuntimeContext<T extends UserEvent>(event: T): T {
   if (event.actor && event.outputTarget && event.conversationKey && event.conversationSessionId && event.capabilityGrants) {
     return event;
+  }
+  if (event.source === "telegram" && event.chatId !== undefined && event.userId !== undefined) {
+    const runtime = buildTelegramRuntimeContext({
+      chatId: event.chatId,
+      userId: event.userId,
+      username: event.username,
+      messageId: event.messageId,
+      messageThreadId: telegramMessageThreadId(event),
+      receivedAt: event.receivedAt,
+      metadata: event.metadata
+    });
+    return Object.assign(event, runtime, {
+      metadata: {
+        ...event.metadata,
+        correlationId: runtime.correlationId,
+        conversationSessionId: runtime.conversationSessionId,
+        conversationKey: runtime.conversationKey.id
+      }
+    });
+  }
+  if (event.source === "slack") {
+    const metadata = event.metadata ?? {};
+    const teamId = stringMetadata(metadata, "slackTeamId") ?? event.outputTarget?.teamId;
+    const channelId = stringMetadata(metadata, "slackChannelId") ?? event.outputTarget?.channelId;
+    const userId = stringMetadata(metadata, "slackUserId") ?? event.actor?.surfaceUserId;
+    const messageTs = stringMetadata(metadata, "slackMessageTs") ?? event.outputTarget?.messageId;
+    if (teamId && channelId && userId && messageTs) {
+      const runtime = buildSlackRuntimeContext({
+        teamId,
+        enterpriseId: stringMetadata(metadata, "slackEnterpriseId"),
+        channelId,
+        channelType: stringMetadata(metadata, "slackChannelType"),
+        userId,
+        userName: stringMetadata(metadata, "slackUserName"),
+        botUserId: stringMetadata(metadata, "slackBotUserId"),
+        messageTs,
+        threadTs: stringMetadata(metadata, "slackThreadTs"),
+        eventId: stringMetadata(metadata, "slackEventId"),
+        receivedAt: event.receivedAt,
+        metadata: event.metadata
+      });
+      return Object.assign(event, runtime, {
+        metadata: {
+          ...event.metadata,
+          correlationId: runtime.correlationId,
+          conversationSessionId: runtime.conversationSessionId,
+          conversationKey: runtime.conversationKey.id
+        }
+      });
+    }
   }
   const runtime = buildSyntheticRuntimeContext(event);
   return Object.assign(event, runtime, {
@@ -349,14 +356,14 @@ export function createProgressEvent(input: {
 export function checkCapability(
   grants: CapabilityGrant[] | undefined,
   operation: string,
-  _resource: Record<string, unknown> = {}
+  resource: Record<string, unknown> = {}
 ): CapabilityCheckResult {
   const now = nowIso();
-  const matched = (grants ?? []).filter((grant) =>
-    grant.operations.includes("*") || grant.operations.includes(operation) || grant.operations.some((allowed) =>
-      allowed.endsWith(":*") && operation.startsWith(allowed.slice(0, -1))
-    )
-  );
+  const matched = (grants ?? []).filter((grant) => {
+    if (grant.expiresAt && Date.parse(grant.expiresAt) <= Date.now()) return false;
+    if (!grant.operations.includes(operation)) return false;
+    return resourceSelectorsMatch(grant.resourceSelectors, resource);
+  });
   if (matched.length > 0) {
     return { allowed: true, operation, grantIds: matched.map((grant) => grant.id), checkedAt: now };
   }
@@ -583,80 +590,21 @@ function buildSlackOutputTarget(input: SlackRuntimeInput): OutputTarget {
   };
 }
 
-function buildTelegramCapabilityGrants(input: {
-  actor: ActorContext;
-  chatId: number;
-  conversationSessionId: string;
-  isAdmin: boolean;
-  createdAt?: string;
-}): CapabilityGrant[] {
-  const createdAt = input.createdAt ?? nowIso();
-  const operations = input.isAdmin ? TELEGRAM_ADMIN_OPERATIONS : TELEGRAM_USER_OPERATIONS;
-  return [{
-    id: `grant:${input.actor.id}:${input.isAdmin ? "telegram-admin" : "telegram-user"}`,
-    name: input.isAdmin ? "Telegram personal/admin compatibility" : "Telegram allowlist compatibility",
-    description: input.isAdmin
-      ? "Phase 1 compatibility grant for the existing Telegram personal/admin operator."
-      : "Phase 1 compatibility grant for existing allowed Telegram users.",
-    scope: "user",
-    operations,
-    resourceSelectors: {
-      surfaceKind: "telegram",
-      chatId: String(input.chatId)
-    },
-    source: input.isAdmin ? "telegram_admin_allowlist" : "telegram_allowlist",
-    grantor: "codex-chat-phase-1",
-    actorId: input.actor.id,
-    conversationSessionId: input.conversationSessionId,
-    auditPolicy: "log",
-    createdAt
-  }];
-}
-
-function buildSlackCapabilityGrants(input: {
-  actor: ActorContext;
-  teamId: string;
-  channelId: string;
-  threadTs?: string;
-  conversationSessionId: string;
-  createdAt?: string;
-}): CapabilityGrant[] {
-  const createdAt = input.createdAt ?? nowIso();
-  return [{
-    id: `grant:${input.actor.id}:slack-source:${input.conversationSessionId}`,
-    name: "Slack source conversation compatibility",
-    description: "Slack foundation grant for reading and replying to the originating Slack conversation only. Broader Slack capabilities require the future capability requirements session and enforcement phase.",
-    scope: "temporary",
-    operations: SLACK_SOURCE_OPERATIONS,
-    resourceSelectors: {
-      surfaceKind: "slack",
-      teamId: input.teamId,
-      channelId: input.channelId,
-      threadTs: input.threadTs
-    },
-    source: "slack_event_source",
-    grantor: "codex-chat-slack-foundation",
-    actorId: input.actor.id,
-    conversationSessionId: input.conversationSessionId,
-    auditPolicy: "log",
-    createdAt
-  }];
-}
-
-function systemGrant(actor: ActorContext, conversationSessionId: string, createdAt?: string): CapabilityGrant {
-  return {
-    id: `grant:${actor.id}:system`,
-    name: "System runtime compatibility",
-    description: "Phase 1 permissive grant for service-owned synthetic runtime events.",
-    scope: "system",
-    operations: ["*"],
-    resourceSelectors: { surfaceKind: actor.surfaceKind },
-    source: "system",
-    actorId: actor.id,
-    conversationSessionId,
-    auditPolicy: "log",
-    createdAt: createdAt ?? nowIso()
-  };
+function resourceSelectorsMatch(selectors: Record<string, unknown>, resource: Record<string, unknown>): boolean {
+  for (const [key, expected] of Object.entries(selectors)) {
+    const actual = resource[key];
+    if (expected === "*") continue;
+    if (Array.isArray(expected)) {
+      if (!expected.some((item) => String(item) === String(actual))) return false;
+      continue;
+    }
+    if (String(expected) !== String(actual)) return false;
+  }
+  for (const [key, actual] of Object.entries(resource)) {
+    if (actual === undefined || actual === null || actual === "") continue;
+    if (!(key in selectors)) return false;
+  }
+  return true;
 }
 
 function conversationSessionIdForKey(key: ConversationKey): string {

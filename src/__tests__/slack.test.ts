@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { ApiGateway, type ApiGatewayHooks } from "../api.js";
-import { SLACK_BRAIN_PERMISSION_DENIED_MESSAGE } from "../brain-capabilities.js";
+import { CAPABILITY_DENIED_MESSAGE } from "../capabilities.js";
 import { loadConfig, type AppConfig } from "../config.js";
 import { FileStore } from "../file-store.js";
 import { createLogger } from "../logger.js";
@@ -158,20 +158,33 @@ async function writeBrainCapabilityStore(path: string): Promise<void> {
       { id: "identity:identity_slack_T0BCF7LBNNB_U0BDR0E1KJL", kind: "external_identity", label: "Tim Slack", description: "Tim Slack", source: "identity_link", personId: "person_tim", identityId: "identity_slack_T0BCF7LBNNB_U0BDR0E1KJL", externalIds: { teamId: "T0BCF7LBNNB", userId: "U0BDR0E1KJL" } }
     ],
     grantBundles: [],
-    grants: [{
-      id: "grant_seed_tim_owner_slack_source_read",
+    grants: [
+      "slack.event.receive",
+      "assistant.run",
+      "assistant.context.read",
+      "slack.history.read",
+      "slack.source.react",
+      "output.text.send",
+      "subagents.dispatch",
+      "subagents.result.deliver"
+    ].map((operation) => ({
+      id: `grant_seed_tim_${operation.replace(/[^a-z0-9]+/gi, "_")}`,
       subjectId: "person:person_tim",
-      capabilityId: "slack.source.read",
+      capabilityId: operation,
       grantKind: "capability",
-      resource: { kind: "global", id: "*", selectors: { scope: "owner_all", teamId: "*", channelId: "*", threadTs: "*" } },
-      actions: ["read"],
+      resource: { kind: "global", id: "*", selectors: {
+        source: "*", surfaceKind: "*", teamId: "*", channelId: "*", threadTs: "*", messageTs: "*",
+        chatId: "*", messageId: "*", conversationSessionId: "*", actorId: "*", targetId: "*",
+        targetPolicy: "*", outputType: "*"
+      } },
+      actions: ["*"],
       source: { kind: "seed", id: "test" },
       grantedBy: "system:test",
       grantedAt: "2026-06-30T00:00:00.000Z",
       status: "active",
-      reason: "Test Tim owner Slack source read grant.",
-      enforcement: "non_enforcing"
-    }],
+      reason: "Test Tim owner Slack grant.",
+      enforcement: "enforcing"
+    })),
     audit: { appendOnly: true, writesEnabled: false, path: "", values: "", requiredFields: [], eventTypes: [], sampleEvent: {} },
     notes: []
   }, null, 2));
@@ -324,11 +337,9 @@ describe("Slack runtime foundation", () => {
       slackSourceKind: "public_channel_root",
       slackReplyThreadTs: "1782000000.000100"
     });
-    expect(normalized.event.capabilityGrants?.[0]).toMatchObject({
-      scope: "temporary",
-      operations: expect.arrayContaining(["slack:read_source", "slack:post_source_thread", "subagents:dispatch"]),
-      resourceSelectors: { surfaceKind: "slack", teamId: "T123", channelId: "C345", threadTs: "1782000000.000100" }
-    });
+    // Runtime no longer fabricates grants; authorization comes solely from
+    // Brain decisions at the enforcement gates.
+    expect(normalized.event.capabilityGrants).toEqual([]);
   });
 
   test("normalizes existing thread mentions to continue in the source thread", () => {
@@ -515,18 +526,8 @@ describe("Slack runtime foundation", () => {
 
     expect(codexTurn).toHaveBeenCalledTimes(1);
     expect(slackSend).toHaveBeenCalledWith(normalized.event.outputTarget, "Tim Slack answer.");
-    const summary = await waitForSlackTelemetry(
-      service.state,
-      (value) => value.lastCapabilityDecision?.eventId === "EvTimSlackAllowed" && value.lastCapabilityDecision?.outcome === "allowed",
-      "Slack Brain capability allow telemetry",
-    );
-    expect(summary.lastCapabilityDecision).toMatchObject({
-      direction: "capability",
-      outcome: "allowed",
-      capabilityId: "slack.source.read",
-      personId: "person_tim",
-      identityId: "identity_slack_T0BCF7LBNNB_U0BDR0E1KJL",
-    });
+    // Capability decisions are log-only (pino + capability_decisions/ audit
+    // files); the visible Slack telemetry summary intentionally omits them.
   });
 
   test("denies unknown Slack identities before context hydration, Codex, or subagents", async () => {
@@ -558,22 +559,11 @@ describe("Slack runtime foundation", () => {
     await service.enqueueUserEvent(normalized.event);
     await waitForIdle(service);
 
-    expect(slackSend).toHaveBeenCalledWith(normalized.event.outputTarget, SLACK_BRAIN_PERMISSION_DENIED_MESSAGE);
+    expect(slackSend).toHaveBeenCalledWith(normalized.event.outputTarget, CAPABILITY_DENIED_MESSAGE);
     expect(codexTurn).not.toHaveBeenCalled();
     expect(history).not.toHaveBeenCalled();
     expect(replies).not.toHaveBeenCalled();
     expect(dispatch).not.toHaveBeenCalled();
-    const summary = await waitForSlackTelemetry(
-      service.state,
-      (value) => value.lastCapabilityDecision?.eventId === "EvUnknownSlackDenied" && value.lastCapabilityDecision?.outcome === "denied",
-      "Slack Brain capability deny telemetry",
-    );
-    expect(summary.lastCapabilityDecision).toMatchObject({
-      direction: "capability",
-      outcome: "denied",
-      reason: "identity_not_linked",
-      capabilityId: "slack.source.read",
-    });
   });
 
   test.each([
@@ -598,14 +588,9 @@ describe("Slack runtime foundation", () => {
     await service.enqueueUserEvent(normalized.event);
     await waitForIdle(service);
 
-    expect(slackSend).toHaveBeenCalledWith(normalized.event.outputTarget, SLACK_BRAIN_PERMISSION_DENIED_MESSAGE);
+    expect(slackSend).toHaveBeenCalledWith(normalized.event.outputTarget, CAPABILITY_DENIED_MESSAGE);
     expect(codexTurn).not.toHaveBeenCalled();
     expect(history).not.toHaveBeenCalled();
-    await waitForSlackTelemetry(
-      service.state,
-      (value) => value.lastCapabilityDecision?.eventId === `EvStore${_label}` && value.lastCapabilityDecision?.outcome === "denied",
-      "Slack Brain capability store fail-closed telemetry",
-    );
   });
 
   test("Telegram path is unaffected by missing Brain capability store", async () => {

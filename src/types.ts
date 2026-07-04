@@ -59,6 +59,35 @@ export interface CapabilityGrant {
   createdAt: string;
 }
 
+export type CapabilityResource = JsonRecord;
+
+export interface CapabilityRequirement {
+  operation: string;
+  action?: string;
+  resource: CapabilityResource;
+  reason: string;
+  caller?: string;
+}
+
+export interface CapabilityDecision {
+  id: string;
+  allowed: boolean;
+  actorId?: string;
+  operation: string;
+  action?: string;
+  resourceSummary: JsonRecord;
+  resourceHash: string;
+  grantIds: string[];
+  reason?: string;
+  checkedAt: string;
+  caller?: string;
+  brainSubjectIds?: string[];
+}
+
+export interface CapabilityDecisionRecord extends CapabilityDecision {
+  recordedAt: string;
+}
+
 export interface CapabilityCheckResult {
   allowed: boolean;
   operation: string;
@@ -303,6 +332,12 @@ export interface SubagentJob {
   originTarget?: OutputTarget;
   defaultOutputTarget?: OutputTarget;
   resultTarget?: SubagentResultTarget;
+  originActorId?: string;
+  dispatchCapabilityDecisionId?: string;
+  dispatchGrantIds?: string[];
+  resultCapabilityDecisionId?: string;
+  allowedControlActorIds?: string[];
+  capabilitySummary?: JsonRecord;
   status: "queued" | "running" | "cancelling" | "completed" | "failed" | "cancelled" | "timed_out" | "abandoned";
   promptPath: string;
   artifactDir: string;

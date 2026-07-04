@@ -6,12 +6,7 @@ import { ApiGateway, type AudioIngestionCompletedEvent } from "./api.js";
 import type { AudioIngestMetadata } from "./audio-ingest.js";
 import { AppConfig, ensureConfiguredDirectories, resolveConfigPath } from "./config.js";
 import { BehaviorPack } from "./behavior.js";
-import {
-  annotateEventWithBrainCapabilityDecision,
-  resolveSlackBrainCapabilityForEvent,
-  SLACK_BRAIN_PERMISSION_DENIED_MESSAGE,
-  type SlackBrainCapabilityDecision
-} from "./brain-capabilities.js";
+import { CAPABILITY_DENIED_MESSAGE, assertBrainCapabilitySourceAvailable, authorize, authorizeOutput, brainCapabilityStorePath, capabilityGrantFromDecision, outOfScopeAllowedDecision, requirementForInboundEvent } from "./capabilities.js";
 import { AppServerCodexClient, CodexCrashInfo } from "./codex.js";
 import {
   consumeDeployMarker,
@@ -36,7 +31,6 @@ import {
   createOrUpdateConversationSession,
   createProgressEvent,
   ensureEventRuntimeContext,
-  hasCapability,
   telegramOutputTarget,
   telegramTargetChatId,
   telegramTargetMessageId
@@ -54,14 +48,13 @@ import { sanitizeChildProcessEnv } from "./env.js";
 import { SlackGateway } from "./slack.js";
 import { hydrateSlackContextForEvent } from "./slack-context.js";
 import {
-  slackCapabilityTelemetryObservation,
   slackContextTelemetryObservation,
   slackOutboundTelemetryObservation,
   slackSubagentRoutingTelemetryObservation,
   type SlackTelemetryObservation
 } from "./slack-telemetry.js";
-import { isTelegramAdmin, TelegramGateway } from "./telegram.js";
-import { CodexClient, StoredAction, SubagentBackendKind, SubagentJob, SubagentOwnerType, SubagentResultTarget, UserEvent } from "./types.js";
+import { TelegramGateway } from "./telegram.js";
+import { CapabilityDecision, CodexClient, StoredAction, SubagentBackendKind, SubagentJob, SubagentOwnerType, SubagentResultTarget, UserEvent } from "./types.js";
 import { makeId, nowIso } from "./util.js";
 
 export const INJECT_TELEGRAM_USER_ID = 253768951;
@@ -275,6 +268,7 @@ export class ServiceSupervisor {
   private turnStartedAt?: Date;
   /** The event currently being processed; used for chat-level crash/timeout notifications. */
   private activeTurnEvent?: UserEvent;
+  private sideEffectEvent?: UserEvent;
   private activeTurnToken = 0;
   private drainingQueue = false;
   private watchdogInterval?: ReturnType<typeof setInterval>;
@@ -298,7 +292,9 @@ export class ServiceSupervisor {
     this.api = new ApiGateway(config, this.state, this.files, transcriber, logger, {
       onAudioIngestionCompleted: (event) => this.enqueueAudioIngestionForCodex(event),
       onSlackUserEvent: async (event) => {
-        this.addImmediateSlackReaction(event);
+        // Immediate ack (👀) fires before any authorization — it acknowledges
+        // receipt, not permission; unauthorized senders still get a denial.
+        void this.addImmediateSlackReaction(event);
         await this.enqueueUserEvent(event);
       }
     });
@@ -385,6 +381,7 @@ export class ServiceSupervisor {
       logger
     );
     this.ipc = new LocalIpcServer(resolveConfigPath(config, config.service.ipcSocket), logger, async (message) => {
+      await this.authorizeIpcMessage(message);
       if (message.type === "loop_run") {
         void this.loops.handleRun(message.loopId, message.scheduledAt).catch((error) => {
           this.logger.error({ component: "loops", event: "async_run_failed", loopId: message.loopId, error }, "asynchronous loop run failed");
@@ -417,9 +414,43 @@ export class ServiceSupervisor {
     });
   }
 
+  private async authorizeIpcMessage(message: { type?: string; brainSubjectId?: string }): Promise<void> {
+    if (message.type === "ping") return;
+    // Local-socket callers (cron loop runner, CLI) stay trusted as before;
+    // only messages asserting a Brain subject are checked against the store.
+    if (!this.config.brain.enforcementEnabled || !message.brainSubjectId) return;
+    const actor = {
+      id: message.brainSubjectId ?? "ipc:unauthenticated",
+      surfaceKind: "system" as const,
+      correlationId: makeId("corr"),
+      metadata: message.brainSubjectId ? { brainSubjectId: message.brainSubjectId } : {}
+    };
+    const operation = message.type === "loop_run"
+      ? "ipc.loop.run"
+      : message.type === "subagent_steer"
+        ? "ipc.subagent.steer"
+        : message.type?.startsWith("employee_")
+          ? "ipc.employee.manage"
+          : "ipc.unknown";
+    const decision = await authorize(actor, {
+      operation,
+      action: operation.split(".").at(-1) ?? operation,
+      resource: { command: message.type },
+      reason: "local IPC mutation",
+      caller: "service.ipc"
+    }, { storePath: brainCapabilityStorePath(this.config), caller: "service.ipc" });
+    await this.recordCapabilityDecision(decision);
+    if (!decision.allowed) throw new Error(`IPC capability denied for ${message.type}: ${decision.reason ?? "denied"}`);
+  }
+
   async start(): Promise<void> {
     await ensureConfiguredDirectories(this.config);
     await this.state.init();
+    await assertBrainCapabilitySourceAvailable(this.config).catch((error) => {
+      // Slack fails closed per-event; Telegram and internal paths do not
+      // depend on Brain, so a missing/invalid store must not block startup.
+      this.logger.warn({ component: "capabilities", event: "brain_store_unavailable_at_start", error }, "Brain capability store unavailable at startup; Slack traffic will be denied until it is restored");
+    });
     await this.employees.init();
     await this.subagents.loadRuntimeBackendOverride();
     await this.subagents.loadJobs();
@@ -462,7 +493,7 @@ export class ServiceSupervisor {
     await this.codex.stop().catch(() => undefined);
   }
 
-  private addImmediateSlackReaction(event: UserEvent): void {
+  private async addImmediateSlackReaction(event: UserEvent): Promise<void> {
     if (event.source !== "slack") return;
     const channel = typeof event.metadata?.slackChannelId === "string"
       ? event.metadata.slackChannelId
@@ -479,7 +510,7 @@ export class ServiceSupervisor {
       }, "Slack immediate reaction skipped");
       return;
     }
-    void this.slack.addReaction({ channel, timestamp, name: "eyes" }).catch((error) => {
+    await this.slack.addReaction({ channel, timestamp, name: "eyes" }).catch((error) => {
       this.logger.warn({
         component: "slack",
         event: "immediate_reaction_failed",
@@ -492,71 +523,87 @@ export class ServiceSupervisor {
 
   async enqueueUserEvent(event: UserEvent): Promise<void> {
     ensureEventRuntimeContext(event);
-    if (!await this.enforceSlackBrainCapability(event, "enqueue", { recordAllowed: false })) return;
-    await this.createOrResumeConversationSession(event);
-    // Intercept "logs [N]" and "introspect [N]" commands before they reach Codex.
-    // Reply directly from the service — no turn, no tokens consumed.
-    if (event.source === "telegram" && event.chatId && event.text) {
-      const { isLog, lines, includeRaw } = parseLogCommand(event.text);
-      if (isLog) {
-        await this.handleLogCommandEvent(event, lines, includeRaw);
-        return;
+    if (!await this.authorizeInboundEvent(event, "enqueue")) return;
+    const previousSideEffectEvent = this.sideEffectEvent;
+    this.sideEffectEvent = event;
+    try {
+      await this.createOrResumeConversationSession(event);
+      // Intercept "logs [N]" and "introspect [N]" commands before they reach Codex.
+      // Reply directly from the service — no turn, no tokens consumed.
+      if (event.source === "telegram" && event.chatId && event.text) {
+        const { isLog, lines, includeRaw } = parseLogCommand(event.text);
+        if (isLog) {
+          if (!await this.authorizeServiceCommand(event, "service.command.logs")) return;
+          await this.handleLogCommandEvent(event, lines, includeRaw);
+          return;
+        }
+        // Intercept "update" / "deploy" / "redeploy" before Codex sees it.
+        // Codex must not be the one driving its own restart — chicken/egg —
+        // so the service handles the whole thing.
+        if (isDeployCommand(event.text)) {
+          if (!await this.authorizeServiceCommand(event, "service.deploy")) return;
+          await this.handleDeployCommandEvent(event);
+          return;
+        }
+        const backendCommand = parseSubagentBackendCommand(event.text);
+        if (backendCommand.isBackend) {
+          if (!await this.authorizeServiceCommand(event, backendCommand.action === "status" ? "runtime.status.read" : "subagents.backend.set")) return;
+          await this.handleSubagentBackendCommandEvent(event, backendCommand);
+          return;
+        }
+        const employeeCommand = parseEmployeeCommand(event.text);
+        if (employeeCommand.isEmployee) {
+          if (!await this.authorizeServiceCommand(event, `employees.manage.${employeeCommand.action}`)) return;
+          await this.handleEmployeeCommandEvent(event, employeeCommand);
+          return;
+        }
+        const agentStatus = parseAgentStatusCommand(event.text);
+        if (agentStatus.isStatus) {
+          if (!await this.authorizeServiceCommand(event, "runtime.status.read")) return;
+          await this.sendTextToOutputTarget(event.outputTarget, this.formatSingleSubagentStatus(agentStatus.jobId));
+          return;
+        }
+        const agentSteer = parseAgentSteerCommand(event.text);
+        if (agentSteer.isSteer) {
+          if (!await this.authorizeServiceCommand(event, "subagents.control.steer")) return;
+          const result = await this.steerJob(agentSteer.jobId, agentSteer.text);
+          await this.sendTextToOutputTarget(event.outputTarget, result);
+          return;
+        }
+        const agentKill = parseAgentKillCommand(event.text);
+        if (agentKill.isKill) {
+          if (!await this.authorizeServiceCommand(event, "subagents.control.cancel")) return;
+          const result = await this.cancelJob(agentKill.jobId);
+          await this.sendTextToOutputTarget(event.outputTarget, result);
+          return;
+        }
+        const agentsCmd = parseAgentsCommand(event.text);
+        if (agentsCmd.isAgents) {
+          if (!await this.authorizeServiceCommand(event, "runtime.status.read")) return;
+          const output = this.formatJobsDetailed(agentsCmd.lastN);
+          await this.sendTextToOutputTarget(event.outputTarget, output);
+          return;
+        }
+        if (parseLoopsCommand(event.text)) {
+          if (!await this.authorizeServiceCommand(event, "runtime.status.read")) return;
+          await this.sendTextToOutputTarget(event.outputTarget, await formatLoopsStatus(this.config, this.state));
+          return;
+        }
+        if (parseHelpCommand(event.text)) {
+          if (!await this.authorizeServiceCommand(event, "service.command.help")) return;
+          await this.sendTextToOutputTarget(event.outputTarget, HELP_TEXT);
+          return;
+        }
       }
-      // Intercept "update" / "deploy" / "redeploy" before Codex sees it.
-      // Codex must not be the one driving its own restart — chicken/egg —
-      // so the service handles the whole thing.
-      if (isDeployCommand(event.text)) {
-        await this.handleDeployCommandEvent(event);
-        return;
-      }
-      const backendCommand = parseSubagentBackendCommand(event.text);
-      if (backendCommand.isBackend) {
-        await this.handleSubagentBackendCommandEvent(event, backendCommand);
-        return;
-      }
-      const employeeCommand = parseEmployeeCommand(event.text);
-      if (employeeCommand.isEmployee) {
-        await this.handleEmployeeCommandEvent(event, employeeCommand);
-        return;
-      }
-      const agentStatus = parseAgentStatusCommand(event.text);
-      if (agentStatus.isStatus) {
-        await this.sendTextToOutputTarget(event.outputTarget, this.formatSingleSubagentStatus(agentStatus.jobId));
-        return;
-      }
-      const agentSteer = parseAgentSteerCommand(event.text);
-      if (agentSteer.isSteer) {
-        const result = await this.steerJob(agentSteer.jobId, agentSteer.text);
-        await this.sendTextToOutputTarget(event.outputTarget, result);
-        return;
-      }
-      const agentKill = parseAgentKillCommand(event.text);
-      if (agentKill.isKill) {
-        const result = await this.cancelJob(agentKill.jobId);
-        await this.sendTextToOutputTarget(event.outputTarget, result);
-        return;
-      }
-      const agentsCmd = parseAgentsCommand(event.text);
-      if (agentsCmd.isAgents) {
-        const output = this.formatJobsDetailed(agentsCmd.lastN);
-        await this.sendTextToOutputTarget(event.outputTarget, output);
-        return;
-      }
-      if (parseLoopsCommand(event.text)) {
-        await this.sendTextToOutputTarget(event.outputTarget, await formatLoopsStatus(this.config, this.state));
-        return;
-      }
-      if (parseHelpCommand(event.text)) {
-        await this.sendTextToOutputTarget(event.outputTarget, HELP_TEXT);
-        return;
-      }
-    }
 
-    if (await this.dispatchDiarizedTelegramAudioIfNeeded(event)) {
-      return;
-    }
+      if (await this.dispatchDiarizedTelegramAudioIfNeeded(event)) {
+        return;
+      }
 
-    await this.enqueueMainEvent(this.queueKeyForEvent(event), event);
+      await this.enqueueMainEvent(this.queueKeyForEvent(event), event);
+    } finally {
+      this.sideEffectEvent = previousSideEffectEvent;
+    }
   }
 
   async enqueueSynthetic(text: string, metadata?: Record<string, unknown>): Promise<void> {
@@ -576,6 +623,8 @@ export class ServiceSupervisor {
       receivedAt: nowIso()
     };
     ensureEventRuntimeContext(event);
+    const decision = await this.authorizeAndRecord(event, "system.callback.enqueue", "synthetic callback enqueue", "service.enqueueSynthetic");
+    if (!decision.allowed) return;
     await this.createOrResumeConversationSession(event);
     await this.enqueueMainEvent(this.queueKeyForEvent(event), event);
   }
@@ -624,6 +673,7 @@ export class ServiceSupervisor {
       metadata: {
         audioIngestionId: event.result.ingestion_id,
         audioIngestKeyIdentity: event.keyIdentity,
+        brainSubjectId: `api_key:${event.keyIdentity}`,
         audioIngestMetadata: metadata,
         audioIngestPrompt: metadata.prompt,
         audioIngestTranscriptionMode: record?.transcription?.mode ?? event.result.transcription?.mode,
@@ -639,6 +689,9 @@ export class ServiceSupervisor {
       },
       receivedAt
     };
+    ensureEventRuntimeContext(userEvent);
+    const audioDecision = await this.authorizeAndRecord(userEvent, "audio_ingest.run", "audio ingestion transcript delivery", "service.enqueueAudioIngestionForCodex");
+    if (!audioDecision.allowed) return;
     await this.state.recordMessage({
       direction: "inbound",
       source: "audio_ingest",
@@ -721,6 +774,11 @@ export class ServiceSupervisor {
   }
 
   private async dispatchDiarizedAudioSubagent(input: DiarizedAudioSubagentRequest): Promise<boolean> {
+    const decision = await this.authorizeAndRecord(input.event, "subagents.dispatch", "diarized audio subagent dispatch", "service.dispatchDiarizedAudioSubagent");
+    if (!decision.allowed) {
+      await this.sendCapabilityDenialReply(input.event, decision);
+      return false;
+    }
     const profile = "researcher";
     const model = this.subagents.resolveModel(this.config.subagents.defaultModel || this.config.codex.model);
     const effort = "high";
@@ -1360,7 +1418,7 @@ export class ServiceSupervisor {
 
   private async processEvent(event: UserEvent, turnToken: number): Promise<void> {
     ensureEventRuntimeContext(event);
-    if (!await this.enforceSlackBrainCapability(event, "run")) return;
+    if (!await this.authorizeInboundEvent(event, "run")) return;
     const turnId = makeId("turn");
     const runContext = buildRunContext({ event, runId: turnId });
     event.runContext = runContext;
@@ -1598,6 +1656,7 @@ export class ServiceSupervisor {
   }
 
   private async handleSubagentReturnToMain(job: SubagentJob, result: string): Promise<void> {
+    if (!await this.authorizeSubagentResult(job, "main")) return;
     if (this.shouldDirectDeliverTerminalSubagent(job)) {
       await this.deliverDirectTerminalSubagent(job, result);
       return;
@@ -1623,6 +1682,7 @@ export class ServiceSupervisor {
   }
 
   private async deliverDirectTerminalSubagent(job: SubagentJob, result: string): Promise<void> {
+    if (!await this.authorizeSubagentResult(job, "user")) return;
     const text = this.formatDirectTerminalSubagentText(job, result);
     if (job.defaultOutputTarget || job.originChatId !== undefined) {
       this.recordSlackSubagentRoutingIfNeeded(job);
@@ -1644,6 +1704,26 @@ export class ServiceSupervisor {
       conversationSessionId: job.conversationSessionId,
       correlationId: job.correlationId
     }));
+  }
+
+  private async authorizeSubagentResult(job: SubagentJob, target: string): Promise<boolean> {
+    const surface = job.originTarget?.surfaceKind ?? job.defaultOutputTarget?.surfaceKind;
+    if (!this.config.brain.enforcementEnabled || surface !== "slack") return true;
+    const actor = job.originTarget ? {
+      id: `subagent:${job.id}`,
+      surfaceKind: "system" as const,
+      correlationId: job.correlationId ?? makeId("corr"),
+      metadata: { brainSubjectId: `subagent:${job.id}`, jobId: job.id }
+    } : undefined;
+    const decision = await authorize(actor, {
+      operation: "subagents.result.deliver",
+      action: "deliver",
+      resource: { jobId: job.id, ownerType: job.ownerType, ownerId: job.ownerId, resultTarget: target },
+      reason: "subagent result delivery",
+      caller: "service.authorizeSubagentResult"
+    }, { storePath: brainCapabilityStorePath(this.config), caller: "service.authorizeSubagentResult" });
+    await this.recordCapabilityDecision(decision);
+    return decision.allowed;
   }
 
   private formatDirectTerminalSubagentText(job: SubagentJob, result: string): string {
@@ -1733,6 +1813,45 @@ export class ServiceSupervisor {
 
   private async executeDirective(action: DirectiveAction, origin: UserEvent, options: { dispatchStatusText?: string; parentTurnId?: string } = {}): Promise<StoredAction["status"]> {
     ensureEventRuntimeContext(origin);
+    const directiveDecision = await this.authorizeAndRecord(origin, `directive.${action.type}.execute`, `directive ${action.type}`, "service.executeDirective");
+    if (!directiveDecision.allowed) {
+      const denied: StoredAction = {
+        id: makeId("action"),
+        idempotencyKey: action.idempotencyKey,
+        type: action.type,
+        status: "skipped",
+        createdAt: nowIso(),
+        completedAt: nowIso(),
+        runId: options.parentTurnId,
+        conversationSessionId: origin.conversationSessionId,
+        correlationId: origin.correlationId,
+        outputTarget: origin.outputTarget,
+        payload: { ...action, capabilityDecisionId: directiveDecision.id, denialReason: directiveDecision.reason }
+      };
+      await this.state.saveAction(denied);
+      return denied.status;
+    }
+    const underlyingOperation = this.underlyingDirectiveOperation(action);
+    if (underlyingOperation) {
+      const underlyingDecision = await this.authorizeAndRecord(origin, underlyingOperation, `directive ${action.type} side effect`, "service.executeDirective");
+      if (!underlyingDecision.allowed) {
+        const denied: StoredAction = {
+          id: makeId("action"),
+          idempotencyKey: action.idempotencyKey,
+          type: action.type,
+          status: "skipped",
+          createdAt: nowIso(),
+          completedAt: nowIso(),
+          runId: options.parentTurnId,
+          conversationSessionId: origin.conversationSessionId,
+          correlationId: origin.correlationId,
+          outputTarget: origin.outputTarget,
+          payload: { ...action, capabilityDecisionId: underlyingDecision.id, denialReason: underlyingDecision.reason }
+        };
+        await this.state.saveAction(denied);
+        return denied.status;
+      }
+    }
     const stored: StoredAction = {
       id: makeId("action"),
       idempotencyKey: action.idempotencyKey,
@@ -1855,6 +1974,19 @@ export class ServiceSupervisor {
 
   private shouldPreExecuteDirective(action: DirectiveAction): boolean {
     return action.type === "react";
+  }
+
+  private underlyingDirectiveOperation(action: DirectiveAction): string | undefined {
+    if (action.type === "send_text") return "output.text.send";
+    if (action.type === "send_image") return "output.image.send";
+    if (action.type === "send_document") return "output.document.send";
+    if (action.type === "dispatch_subagent") return "subagents.dispatch";
+    if (action.type === "cancel_job") return "subagents.control.cancel";
+    if (action.type === "steer_subagent") return "subagents.control.steer";
+    if (action.type === "notify_owner") return "runtime.admin";
+    if (action.type === "react") return "output.reaction.add";
+    if (action.type === "enqueue_main") return "system.callback.enqueue";
+    return undefined;
   }
 
   private directiveActionKey(action: DirectiveAction, blockIndex: number, actionIndex: number): string {
@@ -2022,68 +2154,86 @@ export class ServiceSupervisor {
     }
   }
 
-  private async enforceSlackBrainCapability(event: UserEvent, stage: "enqueue" | "run" | "context", options: { recordAllowed?: boolean } = {}): Promise<boolean> {
-    if (event.source !== "slack") return true;
-    const decision = await resolveSlackBrainCapabilityForEvent(event);
-    annotateEventWithBrainCapabilityDecision(event, decision);
-    const shouldRecord = !decision.allowed || options.recordAllowed !== false;
-    if (shouldRecord) await this.recordSlackCapabilityDecision(event, decision, stage);
-    const logPayload = {
-      component: "slack",
-      event: "brain_capability_decision",
-      stage,
-      allowed: decision.allowed,
-      reason: decision.reason,
-      capabilityId: decision.capabilityId,
-      action: decision.action,
-      teamId: typeof event.metadata?.slackTeamId === "string" ? event.metadata.slackTeamId : event.outputTarget?.teamId,
-      channelId: typeof event.metadata?.slackChannelId === "string" ? event.metadata.slackChannelId : event.outputTarget?.channelId,
-      userId: typeof event.metadata?.slackUserId === "string" ? event.metadata.slackUserId : event.actor?.surfaceUserId,
-      eventId: typeof event.metadata?.slackEventId === "string" ? event.metadata.slackEventId : undefined,
-      personId: decision.personId,
-      identityId: decision.identityId,
-      grantIds: decision.grantIds,
-    };
-    if (decision.allowed) {
-      if (shouldRecord) this.logger.info(logPayload, "Slack Brain capability check allowed");
-      return true;
+  private async authorizeInboundEvent(event: UserEvent, stage: "enqueue" | "run"): Promise<boolean> {
+    const receiveOperation = `${event.source}.event.receive`;
+    const receiveDecision = await this.authorizeAndRecord(event, receiveOperation, `${stage} receive`, `service.${stage}`);
+    if (!receiveDecision.allowed) {
+      await this.sendCapabilityDenialReply(event, receiveDecision);
+      return false;
     }
-
-    this.logger.warn(logPayload, "Slack Brain capability check denied");
-    if (this.canSendTextToOutputTarget(event.outputTarget)) {
-      try {
-        await this.sendTextToOutputTarget(event.outputTarget, SLACK_BRAIN_PERMISSION_DENIED_MESSAGE);
-      } catch (sendError) {
-        this.logger.error({
-          component: "slack",
-          event: "brain_capability_denial_reply_failed",
-          stage,
-          teamId: logPayload.teamId,
-          channelId: logPayload.channelId,
-          userId: logPayload.userId,
-          eventId: logPayload.eventId,
-          reason: decision.reason,
-          sendError
-        }, "Failed to send Slack Brain capability denial reply");
-      }
+    const runDecision = await this.authorizeAndRecord(event, "assistant.run", `${stage} model run`, `service.${stage}`);
+    const grant = capabilityGrantFromDecision(runDecision, event.actor?.id, event.conversationSessionId);
+    if (grant) event.capabilityGrants = [...(event.capabilityGrants ?? []), grant];
+    if (!runDecision.allowed) {
+      await this.sendCapabilityDenialReply(event, runDecision);
+      return false;
     }
-    return false;
+    return true;
   }
 
-  private async recordSlackCapabilityDecision(event: UserEvent, decision: SlackBrainCapabilityDecision, stage: "enqueue" | "run" | "context"): Promise<void> {
-    await this.state.recordSlackTelemetryObservation(slackCapabilityTelemetryObservation({
-      event,
-      allowed: decision.allowed,
-      reason: decision.reason,
-      capabilityId: decision.capabilityId,
-      action: decision.action,
-      decisionStage: stage,
-      grantIds: decision.grantIds,
-      personId: decision.personId,
-      identityId: decision.identityId
-    })).catch((error) => {
-      this.logger.warn({ component: "slack", event: "telemetry_record_failed", error }, "Slack capability telemetry observation was dropped");
+  private async authorizeServiceCommand(event: UserEvent, operation: string): Promise<boolean> {
+    const decision = await this.authorizeAndRecord(event, operation, `service command ${operation}`, "service.command");
+    if (!decision.allowed) await this.sendCapabilityDenialReply(event, decision);
+    return decision.allowed;
+  }
+
+  /**
+   * Brain capability enforcement is scoped to Slack-surface traffic (and
+   * Brain-authenticated IPC). Telegram keeps its numeric allowlist and
+   * internal system/loop/subagent paths keep local trust — the Brain store
+   * does not carry grants for those, and Telegram must keep working even if
+   * the Brain store is missing.
+   */
+  private brainEnforcementApplies(event?: Pick<UserEvent, "source" | "actor" | "outputTarget"> | undefined, target?: UserEvent["outputTarget"]): boolean {
+    if (!this.config.brain.enforcementEnabled) return false;
+    if (event?.source === "slack") return true;
+    const surface = target?.surfaceKind ?? event?.outputTarget?.surfaceKind ?? event?.actor?.surfaceKind;
+    return surface === "slack";
+  }
+
+  private async authorizeAndRecord(event: UserEvent, operation: string, reason: string, caller: string): Promise<CapabilityDecision> {
+    ensureEventRuntimeContext(event);
+    if (!this.brainEnforcementApplies(event)) {
+      return outOfScopeAllowedDecision({ actorId: event.actor?.id, operation, caller });
+    }
+    const decision = await authorize(event.actor, requirementForInboundEvent(event, operation, reason, caller), {
+      storePath: brainCapabilityStorePath(this.config),
+      caller,
     });
+    await this.recordCapabilityDecision(decision);
+    this.logger[decision.allowed ? "info" : "warn"]({
+      component: "capabilities",
+      event: "capability_decision",
+      allowed: decision.allowed,
+      operation: decision.operation,
+      action: decision.action,
+      actorId: decision.actorId,
+      reason: decision.reason,
+      grantIds: decision.grantIds,
+      decisionId: decision.id,
+      caller,
+    }, decision.allowed ? "Brain capability check allowed" : "Brain capability check denied");
+    // Capability decisions are log-only (pino + capability_decisions/ audit
+    // files); they are intentionally NOT surfaced in the visible Slack
+    // telemetry summary.
+    return decision;
+  }
+
+  private async recordCapabilityDecision(decision: CapabilityDecision): Promise<void> {
+    await this.state.recordCapabilityDecision(decision).catch((error) => {
+      this.logger.error({ component: "capabilities", event: "decision_audit_failed", error, decisionId: decision.id }, "Capability audit write failed");
+      throw error;
+    });
+  }
+
+  private async sendCapabilityDenialReply(event: UserEvent, decision: CapabilityDecision): Promise<void> {
+    const target = event.outputTarget;
+    if (!target || target.routingPolicy !== "source_reply" || !this.canSendTextToOutputTarget(target)) return;
+    try {
+      await this.sendTextToOutputTargetUnaudited(target, CAPABILITY_DENIED_MESSAGE, "text");
+    } catch (sendError) {
+      this.logger.error({ component: "capabilities", event: "denial_reply_failed", operation: decision.operation, decisionId: decision.id, sendError }, "Failed to send capability denial reply");
+    }
   }
 
   private isStaleTurnToken(turnToken: number): boolean {
@@ -2436,9 +2586,10 @@ export class ServiceSupervisor {
 
   private async hydrateSlackContextPrompt(event: UserEvent): Promise<string | undefined> {
     if (event.source !== "slack") return undefined;
-    if ((event.metadata?.brainCapability as { allowed?: unknown } | undefined)?.allowed !== true) {
-      if (!await this.enforceSlackBrainCapability(event, "context")) return undefined;
-    }
+    const contextDecision = await this.authorizeAndRecord(event, "assistant.context.read", "hydrate Slack context", "service.hydrateSlackContextPrompt");
+    if (!contextDecision.allowed) return undefined;
+    const slackHistoryDecision = await this.authorizeAndRecord(event, "slack.history.read", "hydrate Slack context history", "service.hydrateSlackContextPrompt");
+    if (!slackHistoryDecision.allowed) return undefined;
     try {
       const context = await hydrateSlackContextForEvent(event, {
         gateway: this.slack,
@@ -2590,6 +2741,23 @@ export class ServiceSupervisor {
   }
 
   private async sendTextToOutputTarget(target: UserEvent["outputTarget"], text: string, format?: "text" | "markdown" | "markdownv2", preserveFormatArgument = false): Promise<void> {
+    const actor = this.activeTurnEvent?.actor ?? this.sideEffectEvent?.actor;
+    if (actor && this.brainEnforcementApplies(this.activeTurnEvent ?? this.sideEffectEvent, target) && target?.surfaceKind === "slack") {
+      const decision = await authorizeOutput({
+        actor,
+        target,
+        outputType: "text",
+        reason: "send text output",
+        storePath: brainCapabilityStorePath(this.config),
+        caller: "service.sendTextToOutputTarget",
+      });
+      await this.recordCapabilityDecision(decision);
+      if (!decision.allowed) throw new Error(`Capability denied for text output: ${decision.reason ?? "denied"}`);
+    }
+    await this.sendTextToOutputTargetUnaudited(target, text, format, preserveFormatArgument);
+  }
+
+  private async sendTextToOutputTargetUnaudited(target: UserEvent["outputTarget"], text: string, format?: "text" | "markdown" | "markdownv2", preserveFormatArgument = false): Promise<void> {
     if (target?.surfaceKind === "slack") {
       this.recordSlackTelemetry(slackOutboundTelemetryObservation({ target, outcome: "attempt" }));
       try {
@@ -2613,12 +2781,36 @@ export class ServiceSupervisor {
   }
 
   private async sendImageToOutputTarget(target: UserEvent["outputTarget"], input: Parameters<TelegramGateway["sendImage"]>[1]): Promise<void> {
+    if ((this.activeTurnEvent?.actor ?? this.sideEffectEvent?.actor) && this.brainEnforcementApplies(this.activeTurnEvent ?? this.sideEffectEvent, target) && target?.surfaceKind === "slack") {
+      const decision = await authorizeOutput({
+        actor: this.activeTurnEvent?.actor ?? this.sideEffectEvent?.actor,
+        target,
+        outputType: "image",
+        reason: "send image output",
+        storePath: brainCapabilityStorePath(this.config),
+        caller: "service.sendImageToOutputTarget",
+      });
+      await this.recordCapabilityDecision(decision);
+      if (!decision.allowed) throw new Error(`Capability denied for image output: ${decision.reason ?? "denied"}`);
+    }
     const chatId = telegramTargetChatId(target);
     if (chatId === undefined) throw new Error(`Unsupported or missing image output target: ${target?.surfaceKind ?? "none"}`);
     await this.telegram.sendImage(chatId, { ...input, replyToMessageId: telegramTargetMessageId(target) });
   }
 
   private async sendDocumentToOutputTarget(target: UserEvent["outputTarget"], input: Parameters<TelegramGateway["sendDocument"]>[1]): Promise<void> {
+    if ((this.activeTurnEvent?.actor ?? this.sideEffectEvent?.actor) && this.brainEnforcementApplies(this.activeTurnEvent ?? this.sideEffectEvent, target) && target?.surfaceKind === "slack") {
+      const decision = await authorizeOutput({
+        actor: this.activeTurnEvent?.actor ?? this.sideEffectEvent?.actor,
+        target,
+        outputType: "document",
+        reason: "send document output",
+        storePath: brainCapabilityStorePath(this.config),
+        caller: "service.sendDocumentToOutputTarget",
+      });
+      await this.recordCapabilityDecision(decision);
+      if (!decision.allowed) throw new Error(`Capability denied for document output: ${decision.reason ?? "denied"}`);
+    }
     const chatId = telegramTargetChatId(target);
     if (chatId === undefined) throw new Error(`Unsupported or missing document output target: ${target?.surfaceKind ?? "none"}`);
     await this.telegram.sendDocument(chatId, { ...input, replyToMessageId: telegramTargetMessageId(target) });
@@ -2677,17 +2869,6 @@ export class ServiceSupervisor {
   private async handleSubagentBackendCommandEvent(event: UserEvent, command: Exclude<SubagentBackendCommand, { isBackend: false }>): Promise<void> {
     const chatId = event.chatId;
     if (!chatId) return;
-    if (command.action !== "status") {
-      const isAdmin = hasCapability(event.capabilityGrants, "runtime:admin") || isTelegramAdmin({
-        userId: event.userId,
-        configAdminUserIds: this.config.telegram.allowlist.adminUserIds,
-        stateUsers: await this.state.listTelegramUsers()
-      });
-      if (!isAdmin) {
-        await this.sendTextToOutputTarget(event.outputTarget, SUBAGENT_BACKEND_DENIED_MESSAGE).catch(() => undefined);
-        return;
-      }
-    }
 
     let status: SubagentBackendStatus;
     if (command.action === "set") {
@@ -2734,15 +2915,6 @@ export class ServiceSupervisor {
   private async handleDeployCommandEvent(event: UserEvent): Promise<void> {
     const chatId = event.chatId;
     if (!chatId) return;
-    const isAdmin = hasCapability(event.capabilityGrants, "service:deploy") || isTelegramAdmin({
-      userId: event.userId,
-      configAdminUserIds: this.config.telegram.allowlist.adminUserIds,
-      stateUsers: await this.state.listTelegramUsers()
-    });
-    if (!isAdmin) {
-      await this.sendTextToOutputTarget(event.outputTarget, DEPLOY_DENIED_MESSAGE).catch(() => undefined);
-      return;
-    }
     // Send the ack BEFORE doing anything else so the user sees feedback
     // even if drain or spawn takes a moment.
     try {

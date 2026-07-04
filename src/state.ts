@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
 import { AppConfig, resolveConfigPath } from "./config.js";
 import type { AudioIngestionRecord } from "./audio-ingest.js";
-import { ConversationSession, EmployeeRuntimeState, LoopRun, MonitorEvent, ProgressEvent, StoredAction, SubagentBackendKind, SubagentJob } from "./types.js";
+import { CapabilityDecision, CapabilityDecisionRecord, ConversationSession, EmployeeRuntimeState, LoopRun, MonitorEvent, ProgressEvent, StoredAction, SubagentBackendKind, SubagentJob } from "./types.js";
 import { atomicWriteJson, atomicWriteText, ensureDir, nowIso, pathExists, removeIfExists } from "./util.js";
 import {
   emptySlackTelemetrySummary,
@@ -43,7 +43,7 @@ export class StateStore {
 
   async init(): Promise<void> {
     await ensureDir(this.root);
-    for (const dir of ["messages", "files", "turns", "queued_turns", "jobs", "employees", "employee_child_results", "loop_runs", "monitor_events", "actions", "audio_ingestions", "conversation_sessions", "progress_events", "slack_telemetry"]) {
+    for (const dir of ["messages", "files", "turns", "queued_turns", "jobs", "employees", "employee_child_results", "loop_runs", "monitor_events", "actions", "audio_ingestions", "conversation_sessions", "progress_events", "slack_telemetry", "capability_decisions"]) {
       await ensureDir(join(this.root, dir));
     }
     if (!(await pathExists(join(this.root, "schema.json")))) {
@@ -163,6 +163,13 @@ export class StateStore {
       const current = await readJsonFile<SlackTelemetrySummary>(summaryPath, emptySlackTelemetrySummary());
       await atomicWriteJson(summaryPath, updateSlackTelemetrySummary(current, observation));
     });
+  }
+
+  async recordCapabilityDecision(decision: CapabilityDecision): Promise<CapabilityDecisionRecord> {
+    const record: CapabilityDecisionRecord = { ...decision, recordedAt: nowIso() };
+    const day = safeDay(record.checkedAt);
+    await this.appendJsonl(`capability_decisions/${day}.jsonl`, record);
+    return record;
   }
 
   async readSlackTelemetrySummary(): Promise<SlackTelemetrySummary> {

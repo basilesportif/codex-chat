@@ -4,13 +4,17 @@ import type { Logger } from "pino";
 import { pathExists } from "./util.js";
 
 export type IpcMessage =
-  | { type: "loop_run"; loopId: string; scheduledAt?: string }
-  | { type: "subagent_steer"; jobId: string; text: string }
-  | { type: "employee_start"; employeeId: string }
-  | { type: "employee_stop"; employeeId: string }
-  | { type: "employee_steer"; employeeId: string; text: string }
-  | { type: "employee_status"; employeeId: string }
-  | { type: "ping" };
+  | ({ type: "loop_run"; loopId: string; scheduledAt?: string } & IpcAuthFields)
+  | ({ type: "subagent_steer"; jobId: string; text: string } & IpcAuthFields)
+  | ({ type: "employee_start"; employeeId: string } & IpcAuthFields)
+  | ({ type: "employee_stop"; employeeId: string } & IpcAuthFields)
+  | ({ type: "employee_steer"; employeeId: string; text: string } & IpcAuthFields)
+  | ({ type: "employee_status"; employeeId: string } & IpcAuthFields)
+  | ({ type: "ping" } & IpcAuthFields);
+
+interface IpcAuthFields {
+  brainSubjectId?: string;
+}
 
 export type IpcResponse = { ok: true; result?: unknown } | { ok: false; error: string };
 

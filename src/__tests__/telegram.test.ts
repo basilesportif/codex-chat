@@ -214,7 +214,8 @@ describe("Telegram reply context extraction", () => {
       conversationKey: expect.objectContaining({ id: "telegram:chat:100" }),
       conversationSessionId: expect.stringMatching(/^session_[0-9a-f]{24}$/),
       correlationId: expect.stringMatching(/^corr_/),
-      capabilityGrants: expect.arrayContaining([expect.objectContaining({ operations: expect.arrayContaining(["telegram:write"]) })])
+      // Runtime no longer fabricates grants; Brain is the sole grant source (Slack-scoped).
+      capabilityGrants: []
     }));
   });
 

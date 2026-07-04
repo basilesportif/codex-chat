@@ -2193,7 +2193,8 @@ export class ServiceSupervisor {
 
   private async authorizeSyntheticCallback(event: UserEvent): Promise<CapabilityDecision> {
     const caller = "service.enqueueSynthetic";
-    if (!this.brainEnforcementApplies(event)) {
+    const surface = event.outputTarget?.surfaceKind ?? event.actor?.surfaceKind;
+    if (!this.config.brain.enforcementEnabled || (surface !== "slack" && surface !== "telegram")) {
       return outOfScopeAllowedDecision({ actorId: event.actor?.id, operation: "system.callback.enqueue", caller });
     }
     const actor = this.syntheticCallbackActor(event);
@@ -2242,6 +2243,7 @@ export class ServiceSupervisor {
   private brainEnforcementApplies(event?: Pick<UserEvent, "source" | "actor" | "outputTarget"> | undefined, target?: UserEvent["outputTarget"]): boolean {
     if (!this.config.brain.enforcementEnabled) return false;
     if (event?.source === "slack" || event?.source === "telegram") return true;
+    if (event?.source) return false;
     const surface = target?.surfaceKind ?? event?.outputTarget?.surfaceKind ?? event?.actor?.surfaceKind;
     return surface === "slack" || surface === "telegram";
   }

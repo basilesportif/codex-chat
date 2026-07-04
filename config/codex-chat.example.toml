@@ -124,6 +124,26 @@ childInterruptGraceMs = 5000
 allowedProfiles = []
 cleanupArtifacts = true
 
+[subagents.claude]
+# Disabled by default. Opt in only after configuring Claude subscription OAuth
+# with `claude auth login` (local ~/.claude credentials) or
+# `claude setup-token` / CLAUDE_CODE_OAUTH_TOKEN. API keys and provider
+# auth env vars are stripped/rejected for this backend.
+enabled = false
+pathToClaudeCodeExecutable = ""
+permissionMode = "bypassPermissions"
+allowDangerouslySkipPermissions = true
+allowedTools = ["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep"]
+disallowedTools = []
+maxTurns = 100
+# Empty isolates subagents from user/project/local Claude settings that could
+# contain apiKeyHelper or non-OAuth provider configuration.
+settingSources = []
+# Claude has no Codex serviceTier equivalent. When a subagent requests Fast,
+# codex-chat applies Claude Code fastMode settings when supported and records
+# that serviceTier itself is otherwise ignored.
+fastMode = true
+
 [employees]
 # Durable Employees are disabled by default. When enabled, the service can start
 # minimal non-ephemeral app-server threads and persist per-Employee thread IDs.

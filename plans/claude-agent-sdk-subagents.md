@@ -4,9 +4,9 @@ Status: implementation plan for adding an opt-in Claude Agent SDK subagent backe
 
 ## Implementation progress
 
-- [x] Phase 1 — Backend selection/config/env/OAuth readiness scaffolding.
-- [x] Phase 2 — Claude Agent SDK streaming session backend, steering, events, artifacts, and cancellation.
-- [ ] Phase 3 — Documentation/example config, final validation, and rollout notes.
+- [x] Phase 1 — Backend selection/config/env/OAuth readiness scaffolding (committed in `af6e7fd`).
+- [x] Phase 2 — Claude Agent SDK streaming session backend, steering, events, artifacts, and cancellation (committed in `af6e7fd`).
+- [x] Phase 3 — Documentation/example config, final validation, and rollout notes.
 
 ## Goals
 

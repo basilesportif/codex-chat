@@ -193,17 +193,36 @@ set, and next/last run when available.
   `codex exec` child behavior.
 - `codex_app_server` enables the experimental steerable app-server child
   backend for new jobs.
+- `claude_agent_sdk` enables an opt-in Claude Agent SDK child backend. It is
+  disabled by default under `[subagents.claude]` and requires Claude
+  subscription OAuth (`claude auth login` local credentials or
+  `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`). Anthropic/Claude API
+  keys, Bedrock/Vertex/Foundry/gateway provider env vars, and configured Codex
+  provider API keys are stripped from the Claude child environment; the backend
+  fails readiness if OAuth is not present.
 
 Telegram recovery path: send `agent backend exec` from an admin account. That
 sets a persisted runtime override in `data/state/subagent_runtime.json` so new
 and queued subagents use `codex_exec` even if config still says
-`codex_app_server`. `agent backend` shows configured, override, and effective
-backend. `agent backend config` clears the runtime override.
+`codex_app_server` or `claude_agent_sdk`. Use `agent backend app-server` or
+`agent backend claude` to opt new/queued jobs into those backends. `agent
+backend` shows configured, override, and effective backend. `agent backend
+config` clears the runtime override.
 
 Running jobs are not changed by the backend command. Use `agent kill <ref>` for
 any already-running bad child job, then dispatch again after rollback.
 
-Use `agent status <ref>` for a mechanical snapshot of a subagent job. For app-server-backed running jobs, `agent steer <ref> <text>` can still send natural-language steering text to the child.
+Use `agent status <ref>` for a mechanical snapshot of a subagent job. For
+app-server- or Claude-backed running jobs with an active turn, `agent steer
+<ref> <text>` sends natural-language steering text to the child. Claude
+steering is implemented with the SDK streaming input session as a follow-up user
+message in the same session.
+
+Claude model/effort/tier notes: `model` is passed through to Claude unchanged;
+`low|medium|high|xhigh` map to Claude SDK effort; `none|minimal` disable
+Claude thinking. Codex `serviceTier` has no Claude equivalent, so it is recorded
+on launch and otherwise ignored except that Fast requests apply Claude Code
+`fastMode` settings when the installed SDK supports them.
 
 ## Durable Employees
 

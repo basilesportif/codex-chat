@@ -80,9 +80,9 @@ async function writeTestBrainCapabilityStore(path: string): Promise<void> {
       { id: "identity_telegram_tim", provider: "telegram", providerUserId: "253768951", personId: "person_tim", status: "linked" },
       { id: "identity_telegram_test", provider: "telegram", providerUserId: "9", personId: "person_tim", status: "linked" }
     ],
-    subjects: [{ id: "person:person_tim", personId: "person_tim" }, { id: "system:system" }, { id: "subagent:test" }, { id: "api_key:test" }],
+    subjects: [{ id: "person:person_tim", personId: "person_tim" }, { id: "system:system" }, { id: "system:codex-chat-runtime" }, { id: "subagent:test" }, { id: "api_key:test" }],
     grantBundles: [],
-    grants: ["person:person_tim", "system:system", "api_key:test", "subagent:test"].flatMap((subjectId) => operations.map((operation) => ({
+    grants: ["person:person_tim", "system:system", "system:codex-chat-runtime", "api_key:test", "subagent:test"].flatMap((subjectId) => operations.map((operation) => ({
       id: `grant_${subjectId.replace(/[^a-z0-9]+/gi, "_")}_${operation.replace(/[^a-z0-9]+/gi, "_")}`,
       subjectId,
       capabilityId: operation,

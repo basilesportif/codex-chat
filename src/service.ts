@@ -59,7 +59,7 @@ import {
   type SlackTelemetryObservation
 } from "./slack-telemetry.js";
 import { TelegramGateway } from "./telegram.js";
-import { CapabilityDecision, CodexClient, StoredAction, SubagentBackendKind, SubagentJob, SubagentOwnerType, SubagentResultTarget, UserEvent } from "./types.js";
+import { ActorContext, CapabilityDecision, CodexClient, StoredAction, SubagentBackendKind, SubagentJob, SubagentOwnerType, SubagentResultTarget, UserEvent } from "./types.js";
 import { compactText, inlineCode, makeId, nowIso } from "./util.js";
 
 export const INJECT_TELEGRAM_USER_ID = 253768951;
@@ -68,6 +68,7 @@ const CODEX_TEMPORARILY_UNAVAILABLE_MESSAGE = "⚠️ Codex is currently unavail
 const CODEX_RESTARTING_MESSAGE = "⚠️ Codex is restarting. Your message was not processed; please resend it after the restart notice.";
 const DISABLED_EXEC_RESUME_MESSAGE = "exec-resume transport is disabled. Only app-server (OAuth) is supported. Run 'codex login' to authenticate.";
 const RESTARTED_RESEND_MESSAGE = "⚠️ Service was restarted. Please resend your message.";
+const CODEX_CHAT_RUNTIME_SUBJECT_ID = "system:codex-chat-runtime";
 const QUEUE_OVERFLOW_MESSAGE = "⚠️ I dropped an older queued message because this chat already has 50 pending messages. Please resend it if still needed.";
 const MAX_QUEUE_PER_KEY = 50;
 const TURN_RESPONSE_WARN_MS = 45_000;
@@ -628,7 +629,7 @@ export class ServiceSupervisor {
       receivedAt: nowIso()
     };
     ensureEventRuntimeContext(event);
-    const decision = await this.authorizeAndRecord(event, "system.callback.enqueue", "synthetic callback enqueue", "service.enqueueSynthetic");
+    const decision = await this.authorizeSyntheticCallback(event);
     if (!decision.allowed) return;
     await this.createOrResumeConversationSession(event);
     await this.enqueueMainEvent(this.queueKeyForEvent(event), event);
@@ -1734,10 +1735,10 @@ export class ServiceSupervisor {
     // Result delivery is a service action: authorize as the stable runtime
     // subject Brain knows about, not a per-job id that can never be granted.
     const actor = job.originTarget ? {
-      id: "system:codex-chat-runtime",
+      id: CODEX_CHAT_RUNTIME_SUBJECT_ID,
       surfaceKind: "system" as const,
       correlationId: job.correlationId ?? makeId("corr"),
-      metadata: { brainSubjectId: "system:codex-chat-runtime", jobId: job.id }
+      metadata: { brainSubjectId: CODEX_CHAT_RUNTIME_SUBJECT_ID, jobId: job.id }
     } : undefined;
     const decision = await authorize(actor, {
       operation: "subagents.result.deliver",
@@ -2188,6 +2189,48 @@ export class ServiceSupervisor {
     const decision = await this.authorizeAndRecord(event, operation, `service command ${operation}`, "service.command");
     if (!decision.allowed) await this.sendCapabilityDenialReply(event, decision);
     return decision.allowed;
+  }
+
+  private async authorizeSyntheticCallback(event: UserEvent): Promise<CapabilityDecision> {
+    const caller = "service.enqueueSynthetic";
+    if (!this.brainEnforcementApplies(event)) {
+      return outOfScopeAllowedDecision({ actorId: event.actor?.id, operation: "system.callback.enqueue", caller });
+    }
+    const actor = this.syntheticCallbackActor(event);
+    const eventForAuth: UserEvent = actor ? { ...event, actor } : event;
+    const decision = await authorize(eventForAuth.actor, requirementForInboundEvent(eventForAuth, "system.callback.enqueue", "synthetic callback enqueue", caller), {
+      storePath: brainCapabilityStorePath(this.config),
+      caller,
+    });
+    await this.recordCapabilityDecision(decision);
+    this.logger[decision.allowed ? "info" : "warn"]({
+      component: "capabilities",
+      event: "capability_decision",
+      allowed: decision.allowed,
+      operation: decision.operation,
+      action: decision.action,
+      actorId: decision.actorId,
+      reason: decision.reason,
+      grantIds: decision.grantIds,
+      decisionId: decision.id,
+      caller,
+    }, decision.allowed ? "Brain capability check allowed" : "Brain capability check denied");
+    return decision;
+  }
+
+  private syntheticCallbackActor(event: UserEvent): ActorContext | undefined {
+    if (event.source === "telegram" || event.source === "slack") return undefined;
+    return {
+      id: CODEX_CHAT_RUNTIME_SUBJECT_ID,
+      surfaceKind: "system",
+      isAdmin: true,
+      isPersonalOwner: true,
+      correlationId: event.correlationId ?? makeId("corr"),
+      metadata: {
+        ...event.metadata,
+        brainSubjectId: CODEX_CHAT_RUNTIME_SUBJECT_ID,
+      },
+    };
   }
 
   /**

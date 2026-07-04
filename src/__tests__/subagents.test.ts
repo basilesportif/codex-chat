@@ -864,6 +864,40 @@ describe("subagents", () => {
     expect(manager.listJobs().find((job) => job.id === claudeId)).toMatchObject({ backend: "claude_agent_sdk", backendExplicit: true, status: "queued" });
   });
 
+  test("a cancel landing while startJob is mid-await keeps the job cancelled and never starts the backend", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
+    tempDirs.push(root);
+    const { SubagentManager } = await import("../subagents.js");
+    const config = makeConfig(root, 1);
+    const execBackend = fakeBackend("codex_exec");
+    let releaseProfile!: (value: string) => void;
+    const profileGate = new Promise<string>((resolve) => {
+      releaseProfile = resolve;
+    });
+    const manager = new SubagentManager(
+      config,
+      { readSubagentProfile: vi.fn().mockReturnValue(profileGate) } as never,
+      { saveJob: vi.fn().mockResolvedValue(undefined) } as never,
+      fakeLogger() as never,
+      { onReturnToMain: vi.fn(), onSendToUser: vi.fn() },
+      { codex_exec: execBackend }
+    );
+
+    // dispatch awaits drain → startJob, which is blocked on the profile gate,
+    // so hold the promise and cancel while startJob is mid-await.
+    const dispatched = manager.dispatch({ profile: "x", prompt: "work", route: "return_to_main" });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const queued = manager.listJobs()[0];
+    expect(queued).toBeDefined();
+    const cancel = await manager.requestCancel(queued.id, { reason: "user" });
+    expect(cancel.status).toBe("success");
+    releaseProfile("profile contents");
+    await dispatched;
+
+    expect(execBackend.start).not.toHaveBeenCalled();
+    expect(manager.listJobs().find((job) => job.id === queued.id)).toMatchObject({ status: "cancelled" });
+  });
+
   test("auto-routes Claude model slugs to claude_agent_sdk when backend is omitted", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
     tempDirs.push(root);

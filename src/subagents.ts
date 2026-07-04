@@ -682,6 +682,17 @@ export class SubagentManager {
     const ownerType = this.normalizeOwnerType(input.ownerType ?? this.jobs.get(id)?.ownerType);
     const ownerId = input.ownerId ?? this.jobs.get(id)?.ownerId ?? this.defaultOwnerId(ownerType);
     const resultTarget = input.resultTarget ?? this.jobs.get(id)?.resultTarget ?? this.resultTargetForRoute(input.route);
+    // A cancel may have landed while the awaits above (ensureDir, profile
+    // read, prompt write) were in flight. Starting anyway would overwrite the
+    // terminal status below and run a job the user was told was cancelled.
+    const preStartStatus = this.jobs.get(id)?.status;
+    if (preStartStatus && preStartStatus !== "queued") {
+      this.logger.info(
+        { component: "subagents", event: "start_aborted", jobId: id, status: preStartStatus },
+        "subagent start aborted; job left queued state during startup"
+      );
+      return;
+    }
     const job: SubagentJob = this.jobs.get(id) ?? {
       id,
       profile: input.profile,
@@ -753,6 +764,16 @@ export class SubagentManager {
       serviceTier: job.serviceTier,
       serviceTierMode: job.serviceTierMode
     })}\n`, { mode: 0o600 });
+    // Same hazard for the awaits just above (saveJob, launch-config append):
+    // a cancel seeing status="running" with no running-map entry takes the
+    // abandoned fallback — don't launch a child for a job already terminal.
+    if (job.status !== "running") {
+      this.logger.info(
+        { component: "subagents", event: "start_aborted", jobId: id, status: job.status },
+        "subagent start aborted before backend launch; job reached terminal state during startup"
+      );
+      return;
+    }
     const backend = this.backends[backendKind];
     const child = await backend.start({
       job,

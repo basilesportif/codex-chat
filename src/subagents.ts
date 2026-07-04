@@ -631,15 +631,21 @@ export class SubagentManager {
           await this.startJob(input);
         } catch (error) {
           const id = input.id ?? makeId("job");
-          const failed = this.jobs.get(id);
-          if (failed) {
-            failed.status = "failed";
-            failed.error = error instanceof Error ? error.message : String(error);
-            failed.completedAt = nowIso();
-            await this.state.saveJob(failed);
-            await this.deliverTerminalResult(failed, this.formatTerminalResult(failed, "", undefined, undefined));
-          }
           this.logger.error({ component: "subagents", event: "start_failed", jobId: id, error }, "subagent start failed");
+          try {
+            const failed = this.jobs.get(id);
+            if (failed) {
+              failed.status = "failed";
+              failed.error = error instanceof Error ? error.message : String(error);
+              failed.completedAt = nowIso();
+              await this.state.saveJob(failed);
+              await this.deliverTerminalResult(failed, this.formatTerminalResult(failed, "", undefined, undefined));
+            }
+          } catch (cleanupError) {
+            // The failure-bookkeeping path must not throw out of drain() —
+            // callers fire it with `void this.drain()`.
+            this.logger.error({ component: "subagents", event: "start_failure_cleanup_failed", jobId: id, error: cleanupError }, "failed to record subagent start failure");
+          }
         }
       }
     } finally {
@@ -796,7 +802,13 @@ export class SubagentManager {
       void this.requestCancel(id, { reason: "timeout" });
     }, timeoutSec * 1000);
     this.running.set(id, { job, child, backend, timeout });
-    void child.finished.then((finish) => this.finishJob(id, finish));
+    // Never let a finishJob failure (e.g. transient FS error in saveJob)
+    // become an unhandled rejection — that would take down the whole service.
+    void child.finished
+      .then((finish) => this.finishJob(id, finish))
+      .catch((error) => {
+        this.logger.error({ component: "subagents", event: "finish_job_failed", jobId: id, error }, "finishJob failed after child settled");
+      });
     if (job.pid || job.activeTurnId || job.backendThreadId) void this.state.saveJob(job);
   }
 
@@ -815,7 +827,12 @@ export class SubagentManager {
     job.activeTurnId = undefined;
     if (finish.error) job.error = finish.error;
     let result = "";
-    if (job.lastMessagePath && await pathExists(job.lastMessagePath)) result = await readFile(job.lastMessagePath, "utf8");
+    if (job.lastMessagePath && await pathExists(job.lastMessagePath)) {
+      result = await readFile(job.lastMessagePath, "utf8").catch((error) => {
+        this.logger.warn({ component: "subagents", event: "last_message_read_failed", jobId, error }, "could not read subagent last message; delivering without it");
+        return "";
+      });
+    }
     result = this.formatTerminalResult(job, result, finish.code, finish.signal);
     await this.state.saveJob(job);
     await this.deliverTerminalResult(job, result);

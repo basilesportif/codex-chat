@@ -24,6 +24,7 @@ import {
 } from "./deploy.js";
 import { loadCodexProfileConfig } from "./codex-profiles.js";
 import { DirectiveAction, parseDirectives } from "./directives.js";
+import { claudeFastModeSupported } from "./subagent-backends.js";
 import { EmployeeManager, parseEmployeeCommand, type EmployeeCommand } from "./employees.js";
 import { FileStore } from "./file-store.js";
 import { CodexHeartbeat } from "./heartbeat.js";
@@ -1076,10 +1077,13 @@ export class ServiceSupervisor {
 
   private formatJobModelEffort(job: SubagentJob): string {
     const showProviderDetails = this.shouldShowSubagentProviderDetails(job.codexProfile, job.modelProvider);
+    const tierText = job.backend === "claude_agent_sdk" && job.serviceTier === "fast" && !claudeFastModeSupported(job.model ?? "")
+      ? "standard (fast unavailable for this model)"
+      : job.serviceTier;
     const parts = [
       job.model ? `model=${job.model}` : "",
       job.effort ? `effort=${job.effort}` : "",
-      job.serviceTier ? `tier=${job.serviceTier}` : "",
+      job.serviceTier ? `tier=${tierText}` : "",
       showProviderDetails && job.serviceTierMode ? `tierMode=${job.serviceTierMode}` : "",
       showProviderDetails && job.codexProfile ? `codexProfile=${job.codexProfile}` : "",
       showProviderDetails && job.modelProvider ? `provider=${job.modelProvider}` : ""
@@ -1170,7 +1174,10 @@ export class ServiceSupervisor {
     const isClaudeBackend = action.backend === "claude_agent_sdk";
     const model = action.model || (isClaudeBackend ? "sdk-default" : this.subagents.resolveModel(action.model));
     const effort = action.effort || this.subagents.resolveEffort(action.effort);
-    const tier = action.serviceTier || this.subagents.resolveServiceTier(action.serviceTier);
+    const requestedTier = action.serviceTier || this.subagents.resolveServiceTier(action.serviceTier);
+    const tier = isClaudeBackend && requestedTier === "fast" && !claudeFastModeSupported(action.model ?? "")
+      ? "standard (fast unavailable for this model)"
+      : requestedTier;
     const provider = action.modelProvider || this.subagents.resolveModelProvider(action.modelProvider);
     const codexProfile = action.codexProfile || this.subagents.resolveCodexProfile(action.codexProfile);
     const tierMode = this.subagents.resolveServiceTierMode(action.serviceTierMode, provider);

@@ -84,6 +84,20 @@ const DEFAULT_CLAUDE_SUBAGENT_CONFIG: ClaudeSubagentConfig = {
 
 const CLAUDE_SYNTHETIC_ACTIVE_TURN_ID = "claude-agent-sdk-stream";
 
+const CLAUDE_FAST_MODE_MODEL_PREFIXES = ["claude-opus-4-7", "claude-opus-4-8"];
+
+/**
+ * Claude fast mode is a premium speed tier available only on Opus 4.8/4.7.
+ * An empty model means the SDK default — treat it as supported and let the
+ * SDK decide. A serviceTier of "fast" on any other Claude model runs at the
+ * standard tier; callers surface that downgrade in user-facing status.
+ */
+export function claudeFastModeSupported(model: string): boolean {
+  const normalized = model.trim().toLowerCase();
+  if (!normalized) return true;
+  return normalized === "opus" || CLAUDE_FAST_MODE_MODEL_PREFIXES.some((prefix) => normalized.startsWith(prefix));
+}
+
 function claudeSubagentConfig(config: AppConfig): ClaudeSubagentConfig {
   return { ...DEFAULT_CLAUDE_SUBAGENT_CONFIG, ...(config.subagents.claude ?? {}) };
 }
@@ -561,7 +575,7 @@ class ClaudeAgentSdkSession {
 
   private shouldApplyFastMode(): boolean {
     const cfg = claudeSubagentConfig(this.config);
-    return cfg.fastMode && this.input.serviceTier === "fast" && this.input.serviceTierMode !== "omit";
+    return cfg.fastMode && this.input.serviceTier === "fast" && this.input.serviceTierMode !== "omit" && claudeFastModeSupported(this.input.model);
   }
 
   private claudeEffortAndThinking(effort: string): { effort?: ClaudeEffortLevel; thinking?: ClaudeThinkingConfig } {

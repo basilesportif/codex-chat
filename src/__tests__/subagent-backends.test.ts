@@ -471,7 +471,7 @@ describe("Claude Agent SDK subagent backend", () => {
       stdoutPath: join(root, "events.jsonl"),
       stderrPath: join(root, "stderr.log"),
       appServerLogPath: join(root, "app-server.log"),
-      model: "claude-sonnet-5",
+      model: "claude-opus-4-8",
       effort: "xhigh",
       serviceTier: "fast",
       serviceTierMode: "auto",
@@ -482,7 +482,7 @@ describe("Claude Agent SDK subagent backend", () => {
     await expect(started.finished).resolves.toMatchObject({ code: 0, signal: null });
     expect(queryMock).toHaveBeenCalledOnce();
     const options = queryMock.mock.calls[0]?.[0].options as Record<string, unknown> & { env: Record<string, string | undefined>; settings: Record<string, unknown> };
-    expect(options.model).toBe("claude-sonnet-5");
+    expect(options.model).toBe("claude-opus-4-8");
     expect(options.effort).toBe("xhigh");
     expect(options.permissionMode).toBe("bypassPermissions");
     expect(options.settingSources).toEqual([]);
@@ -501,6 +501,73 @@ describe("Claude Agent SDK subagent backend", () => {
     expect(events).toContain("serviceTierIgnored");
     expect(events).not.toContain("oauth-secret-value");
     expect(events).not.toContain("anthropic-api-secret");
+    await backend.shutdown();
+  });
+
+  test("fast mode is only applied on models that support it", async () => {
+    vi.resetModules();
+    const { claudeFastModeSupported } = await import("../subagent-backends.js");
+    expect(claudeFastModeSupported("claude-opus-4-8")).toBe(true);
+    expect(claudeFastModeSupported("claude-opus-4-7")).toBe(true);
+    expect(claudeFastModeSupported("opus")).toBe(true);
+    expect(claudeFastModeSupported("")).toBe(true); // SDK default — let the SDK decide
+    expect(claudeFastModeSupported("claude-fable-5")).toBe(false);
+    expect(claudeFastModeSupported("fable")).toBe(false);
+    expect(claudeFastModeSupported("claude-sonnet-5")).toBe(false);
+    expect(claudeFastModeSupported("claude-haiku-4-5")).toBe(false);
+  });
+
+  test("a Fable job with serviceTier fast runs without fast-mode settings", async () => {
+    vi.resetModules();
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-subagent-claude-"));
+    tempDirs.push(root);
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "oauth-secret-value";
+    const queryMock = vi.fn((params: { prompt: AsyncIterable<unknown>; options: Record<string, unknown> }) => {
+      async function* messages() {
+        await params.prompt[Symbol.asyncIterator]().next();
+        yield fakeClaudeInitMessage();
+        yield {
+          type: "result",
+          subtype: "success",
+          result: "fable answer",
+          errors: [],
+          uuid: "00000000-0000-4000-8000-000000000021",
+          session_id: "claude-session"
+        };
+      }
+      return Object.assign(messages(), {
+        initializationResult: vi.fn().mockResolvedValue({
+          account: { apiKeySource: "oauth", apiProvider: "firstParty", tokenSource: "oauth", subscriptionType: "max" }
+        }),
+        interrupt: vi.fn().mockResolvedValue(undefined),
+        close: vi.fn()
+      });
+    });
+    vi.doMock("@anthropic-ai/claude-agent-sdk", () => ({ query: queryMock }));
+
+    const { ClaudeAgentSdkChildAgentBackend } = await import("../subagent-backends.js");
+    const backend = new ClaudeAgentSdkChildAgentBackend(enableClaude(testConfig(root)), fakeLogger() as never);
+    const job = subagentJob(root, "job_claudefablefast00000000000000000");
+    const started = await backend.start({
+      job,
+      assembledPrompt: "fable task",
+      lastMessagePath: join(root, "last-message.md"),
+      stdoutPath: join(root, "events.jsonl"),
+      stderrPath: join(root, "stderr.log"),
+      appServerLogPath: join(root, "app-server.log"),
+      model: "claude-fable-5",
+      effort: "medium",
+      serviceTier: "fast",
+      serviceTierMode: "auto",
+      images: [],
+      onJobUpdated: vi.fn().mockResolvedValue(undefined)
+    });
+
+    await expect(started.finished).resolves.toMatchObject({ code: 0, signal: null });
+    const options = queryMock.mock.calls[0]?.[0].options as Record<string, unknown>;
+    expect(options.settings).toBeUndefined();
+    const events = await readFile(join(root, "events.jsonl"), "utf8");
+    expect(events).toContain('"fastModeSettingApplied":false');
     await backend.shutdown();
   });
 

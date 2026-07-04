@@ -504,6 +504,79 @@ describe("Claude Agent SDK subagent backend", () => {
     await backend.shutdown();
   });
 
+  test("a steer queued mid-turn keeps the session open until the steered turn's result", async () => {
+    vi.resetModules();
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-subagent-claude-"));
+    tempDirs.push(root);
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "oauth-secret-value";
+    const prompts: unknown[] = [];
+    const queryMock = vi.fn((params: { prompt: AsyncIterable<unknown>; options: Record<string, unknown> }) => {
+      async function* messages() {
+        const iterator = params.prompt[Symbol.asyncIterator]();
+        prompts.push((await iterator.next()).value);
+        yield fakeClaudeInitMessage();
+        // The steer arrives while turn 1 is still running…
+        prompts.push((await iterator.next()).value);
+        // …then turn 1 finishes, and the steered turn runs as turn 2.
+        yield {
+          type: "result",
+          subtype: "success",
+          result: "turn one answer",
+          errors: [],
+          uuid: "00000000-0000-4000-8000-000000000011",
+          session_id: "claude-session"
+        };
+        yield {
+          type: "result",
+          subtype: "success",
+          result: "steered final answer",
+          errors: [],
+          uuid: "00000000-0000-4000-8000-000000000012",
+          session_id: "claude-session"
+        };
+      }
+      return Object.assign(messages(), {
+        initializationResult: vi.fn().mockResolvedValue({
+          account: { apiKeySource: "oauth", apiProvider: "firstParty", tokenSource: "oauth", subscriptionType: "max" }
+        }),
+        interrupt: vi.fn().mockResolvedValue(undefined),
+        close: vi.fn()
+      });
+    });
+    vi.doMock("@anthropic-ai/claude-agent-sdk", () => ({ query: queryMock }));
+
+    const { ClaudeAgentSdkChildAgentBackend } = await import("../subagent-backends.js");
+    const backend = new ClaudeAgentSdkChildAgentBackend(enableClaude(testConfig(root)), fakeLogger() as never);
+    const job = subagentJob(root, "job_claudesteer000000000000000000000");
+    const started = await backend.start({
+      job,
+      assembledPrompt: "long task",
+      lastMessagePath: join(root, "last-message.md"),
+      stdoutPath: join(root, "events.jsonl"),
+      stderrPath: join(root, "stderr.log"),
+      appServerLogPath: join(root, "app-server.log"),
+      model: "claude-opus-4-8",
+      effort: "medium",
+      serviceTier: "fast",
+      serviceTierMode: "auto",
+      images: [],
+      onJobUpdated: vi.fn().mockResolvedValue(undefined)
+    });
+
+    await backend.steer(job.id, "actually also cover the edge cases");
+
+    await expect(started.finished).resolves.toMatchObject({ code: 0, signal: null });
+    expect(prompts[1]).toMatchObject({
+      type: "user",
+      message: { role: "user", content: [{ type: "text", text: "actually also cover the edge cases" }] }
+    });
+    await expect(readFile(join(root, "last-message.md"), "utf8")).resolves.toBe("steered final answer");
+    const events = await readFile(join(root, "events.jsonl"), "utf8");
+    expect(events).toContain("claude_steer_enqueued");
+    expect(events).toContain("claude_turn_result_deferred");
+    await backend.shutdown();
+  });
+
   test("accepts subscription OAuth when SDK init event reports apiKeySource none", async () => {
     vi.resetModules();
     const root = await mkdtemp(join(tmpdir(), "codex-chat-subagent-claude-"));

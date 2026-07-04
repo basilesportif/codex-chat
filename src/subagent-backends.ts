@@ -361,6 +361,13 @@ class ClaudeAgentSdkSession {
   private closed = false;
   private stopping = false;
   private settled = false;
+  /**
+   * User turns pushed to the SDK that have not yet produced a result message.
+   * In streaming-input mode the SDK emits one result per turn, so a steer
+   * queued mid-turn means the first result is not the end of the job — settle
+   * only when every pushed turn has resolved.
+   */
+  private pendingUserTurns = 0;
   private assistantText = "";
   private partialText = "";
   private finalMessage = "";
@@ -407,6 +414,7 @@ class ClaudeAgentSdkSession {
 
     this.input.job.activeTurnId = CLAUDE_SYNTHETIC_ACTIVE_TURN_ID;
     await this.input.onJobUpdated(this.input.job);
+    this.pendingUserTurns += 1;
     this.queue.push(await this.buildUserMessage(this.input.assembledPrompt, this.input.images));
 
     return {
@@ -421,8 +429,9 @@ class ClaudeAgentSdkSession {
     if (!this.query || this.closed || !this.queue.isOpen() || !this.input.job.activeTurnId) {
       throw new Error(`Subagent ${this.input.job.id} is not currently steerable; Claude Agent SDK input stream is not accepting messages.`);
     }
+    this.pendingUserTurns += 1;
     this.queue.push(await this.buildUserMessage(text, []));
-    await this.appendEvent({ event: "claude_steer_enqueued", at: nowIso(), backend: "claude_agent_sdk", jobId: this.input.job.id });
+    await this.appendEvent({ event: "claude_steer_enqueued", at: nowIso(), backend: "claude_agent_sdk", jobId: this.input.job.id, pendingUserTurns: this.pendingUserTurns });
   }
 
   async interrupt(reason?: string): Promise<void> {
@@ -656,12 +665,27 @@ class ClaudeAgentSdkSession {
       return;
     }
     if (message.type === "result") {
-      this.input.job.activeTurnId = undefined;
+      this.pendingUserTurns = Math.max(0, this.pendingUserTurns - 1);
       if (message.subtype === "success") {
         this.finalMessage = message.result || this.assistantText || this.partialText;
+        if (this.pendingUserTurns > 0 && !this.stopping) {
+          // A steer was queued behind this turn — the SDK will run it as the
+          // next turn. Keep the session open (queue, query, activeTurnId) so
+          // the steered turn's result becomes the job's final output.
+          await this.appendEvent({
+            event: "claude_turn_result_deferred",
+            at: nowIso(),
+            backend: "claude_agent_sdk",
+            jobId: this.input.job.id,
+            pendingUserTurns: this.pendingUserTurns
+          });
+          return;
+        }
+        this.input.job.activeTurnId = undefined;
         await this.writeFinalMessage(this.finalMessage);
         this.settle({ code: 0, signal: null });
       } else {
+        this.input.job.activeTurnId = undefined;
         const resultErrors = Array.isArray(message.errors) ? message.errors : [];
         const errors = resultErrors.length > 0 ? resultErrors.join("; ") : message.subtype;
         const final = this.assistantText || this.partialText;

@@ -31,7 +31,7 @@ Source: four-way audit (codex-chat concurrency, codex-chat cleanliness, assistan
 - [ ] **16. Fork/dup reconciliation (bundle — may defer parts)**
   - [x] 16a. file-save: make A's `scripts/file-save.mjs`/`file-list.mjs` thin wrappers over B's scripts (B owns workspace conventions); collapse the two skill docs into one (A's SKILL.md points at B's).
   - [x] 16b. setup-server: reduce A's `behavior/skills/setup-server/SKILL.md` to codex-chat deltas + "read B's doc first".
-  - [ ] 16c. dispatch-rubric dedup: A `behavior/AGENTS.md` owns directive/tier mechanics; strip the restated rubric from B's `config/TELEGRAM.md`, `CLAUDE.md`, and per-skill boilerplate in `todo.md`/`projects.md`/`reminders.md`.
+  - [x] 16c. dispatch-rubric dedup (B commit 6b8c4d8): A `behavior/AGENTS.md` owns directive/tier mechanics; strip the restated rubric from B's `config/TELEGRAM.md`, `CLAUDE.md`, and per-skill boilerplate in `todo.md`/`projects.md`/`reminders.md`.
   - [x] 16d. drop blanket `source workspace/.env` guidance in A `behavior/assistant-claude.md` (B scripts load env via `runtime-env.js`).
   - [ ] 16e. path parameterization: inject `{{LOGIC_REPO}}`/`{{WORKSPACE}}` in A's behavior loader from config instead of ~20 hardcoded absolute paths (incl. `src/subagents.ts:23` repo-registry path).
 
@@ -48,26 +48,26 @@ Source: four-way audit (codex-chat concurrency, codex-chat cleanliness, assistan
   - [x] 8d. Claude `steer()`: build message first; mutate `pendingUserTurns`/timer synchronously around push; roll back on throw.
   - [x] 8e. app-server session: exit-after-`turnCompleted` settles `{code:0}` (job wrongly marked failed).
   - [x] 8f. `StateStore.queues` unbounded growth: delete entry in `.finally` when tail.
-- [ ] **17. Config defaults declared 3-4×** — `src/config.ts` + `DEFAULT_CLAUDE_SUBAGENT_CONFIG`: derive defaults from the zod schema (`configSchema.parse({})`, export claude sub-schema); verify deepMerge semantics with partial TOML tables.
-- [ ] **18. Structural dedup (bundle)**
-  - [ ] 18a. generic session-map backend base for CodexAppServer/ClaudeAgentSdk backend classes.
-  - [ ] 18b. `startJob` consumes the queued job instead of rebuilding a 25-field literal; drop dead fallback.
-  - [ ] 18c. move `jobOwnerType`/`jobResultTarget`/`resultTargetForRoute`/terminal-status predicates to one exported module; delete defensive casts of real methods (`shortRef`, state override methods).
-  - [ ] 18d. one `compactText`/`inlineCode` util replacing six ad-hoc copies (service.ts, employees.ts).
-  - [ ] 18e. parameterize fenced-block parser in directives.ts; reuse in employees.ts.
-  - [ ] 18f. dead code: `SubagentManager.cancel()`, unexport `writeDefaultConfigIfMissing`, shared `normalizeRef`, mark `addJobs` test-only.
-  - [ ] 18g. structured terminal results through `SubagentCallbacks` (delete the header-stripping regex in service.ts).
+- [x] **17. Config defaults declared 3-4×** (A commit cc4b6ee; zod prefault + configSchema.parse({}); partial-TOML test added) — `src/config.ts` + `DEFAULT_CLAUDE_SUBAGENT_CONFIG`: derive defaults from the zod schema (`configSchema.parse({})`, export claude sub-schema); verify deepMerge semantics with partial TOML tables.
+- [x] **18. Structural dedup (bundle)** (A commits 6f20728 + efdc835)
+  - [x] 18a. generic session-map backend base for CodexAppServer/ClaudeAgentSdk backend classes.
+  - [x] 18b. `startJob` consumes the queued job instead of rebuilding a 25-field literal; drop dead fallback.
+  - [x] 18c. move `jobOwnerType`/`jobResultTarget`/`resultTargetForRoute`/terminal-status predicates to one exported module; delete defensive casts of real methods (`shortRef`, state override methods).
+  - [x] 18d. one `compactText`/`inlineCode` util replacing six ad-hoc copies (service.ts, employees.ts).
+  - [x] 18e. parameterize fenced-block parser in directives.ts; reuse in employees.ts.
+  - [x] 18f. dead code: `SubagentManager.cancel()`, unexport `writeDefaultConfigIfMissing`, shared `normalizeRef`, mark `addJobs` test-only.
+  - [x] 18g. structured terminal results through `SubagentCallbacks` (delete the header-stripping regex in service.ts).
 - [ ] **19. processEvent split + per-delta reparse fix** — `src/service.ts:1359-1511`: split into consumeCodexStream/executeParsedDirectives/closeTurn helpers; stop re-running `parseDirectives` on the full accumulated output per delta (scan appended tail for new complete fences).
 
 **Phase 4 boundary: commit ticks, push A, restart service.**
 
 ## Phase 5 — cleanliness (assistant-agent-logic)
 
-- [ ] **20. Script-layer consolidation (bundle)**
-  - [ ] 20a. shared `scripts/lib/cli.js` `parseArgs` + `runMain` error-contract wrapper; migrate highest-traffic scripts first (full 64-script migration can trail).
-  - [ ] 20b. move personal noise-filter senders from `scripts/lib/email-state.js` into workspace data (`dismissed-emails.json` seeds / noise-rules JSON).
-  - [ ] 20c. delete dead scripts: `fix-football-events.js` (one-off, mutates a real calendar), `mercury-accounts.js`/`mercury-balances.js`/`mercury-transactions.js` (superseded by `finance-*.js --provider mercury`).
-  - [ ] 20d. `defineStateStore` factory in `state-stores.js`; move inline store defs from `flag-event.js`/`protonmail-send.js` into lib.
+- [x] **20. Script-layer consolidation (bundle)** (B commits 4473748, 6a70a21, cf8405e, ee4e83a; noise rules seeded into live workspace)
+  - [x] 20a. shared `scripts/lib/cli.js` `parseArgs` + `runMain` error-contract wrapper; migrate highest-traffic scripts first (full 64-script migration can trail).
+  - [x] 20b. move personal noise-filter senders from `scripts/lib/email-state.js` into workspace data (`dismissed-emails.json` seeds / noise-rules JSON).
+  - [x] 20c. delete dead scripts: `fix-football-events.js` (one-off, mutates a real calendar), `mercury-accounts.js`/`mercury-balances.js`/`mercury-transactions.js` (superseded by `finance-*.js --provider mercury`).
+  - [x] 20d. `defineStateStore` factory in `state-stores.js`; move inline store defs from `flag-event.js`/`protonmail-send.js` into lib.
 
 **Phase 5 boundary: commit + push both. Done.**
 

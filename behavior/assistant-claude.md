@@ -1,13 +1,13 @@
 # Assistant Skills
 
-The assistant-agent-logic repo is cloned at `/home/tim/pkg/tim/assistant-agent-logic`. The workspace data lives at `/home/tim/.assistant-claude/workspace/`.
+The assistant-agent-logic repo is cloned at `{{LOGIC_REPO}}`. The workspace data lives at `{{WORKSPACE}}/`.
 
 **The skill docs in that repo are the source of truth** for every capability: which script to run, its flags, and the required workflow. Do not run scripts from memory or from this file alone — read the relevant skill doc first (see the list below), then run exactly what it documents.
 
-Some scripts require env vars from `/home/tim/.assistant-claude/workspace/.env`. Load them in a subshell scoped to the single command — do not export the secrets file into your long-lived shell:
+Some scripts require env vars from `{{WORKSPACE}}/.env`. Load them in a subshell scoped to the single command — do not export the secrets file into your long-lived shell:
 
 ```bash
-( set -a && source /home/tim/.assistant-claude/workspace/.env && set +a && node /home/tim/pkg/tim/assistant-agent-logic/scripts/<script>.js ... )
+( set -a && source {{WORKSPACE}}/.env && set +a && node {{LOGIC_REPO}}/scripts/<script>.js ... )
 ```
 
 ## Capabilities → skill docs

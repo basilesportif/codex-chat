@@ -2,7 +2,7 @@
 
 Use this skill when the user asks to bootstrap, secure, or deploy `codex-chat` on a new remote Ubuntu/Debian server.
 
-This skill is based on the `assistant-agent-logic` setup-server workflow (`/home/tim/pkg/tim/assistant-agent-logic/config/skills/setup-server.md`), adapted for `codex-chat`. Phases 1-2 here (root access, deploy user) mirror that doc's Phase 1; when improving either copy's shared bootstrap steps (user creation, key handling, sudo policy), apply the same fix to the other doc in the same change. The SSH-hardening phase and everything from Phase 4 onward are codex-chat-specific and live only here. It should produce a working remote host with:
+This skill is based on the `assistant-agent-logic` setup-server workflow (`{{LOGIC_REPO}}/config/skills/setup-server.md`), adapted for `codex-chat`. Phases 1-2 here (root access, deploy user) mirror that doc's Phase 1; when improving either copy's shared bootstrap steps (user creation, key handling, sudo policy), apply the same fix to the other doc in the same change. The SSH-hardening phase and everything from Phase 4 onward are codex-chat-specific and live only here. It should produce a working remote host with:
 
 - a non-root deploy user
 - passwordless sudo for that user

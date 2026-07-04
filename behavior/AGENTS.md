@@ -40,7 +40,7 @@ Loop events, monitor alerts, subagent result callbacks, and synthetic system eve
 
 ## Telegram Workflow Reference
 
-The shared workflow doc at `/home/tim/pkg/tim/assistant-agent-logic/config/TELEGRAM.md` describes voice handling, sub-agent dispatch patterns, and reply requirements. That doc is written for a different agent (Claude Code) and references tools you do not have (`mcp__plugin_telegram_telegram__reply`, the Agent tool, TodoWrite). Read it for the workflow shape, but the canonical mapping for codex-chat is:
+The shared workflow doc at `{{LOGIC_REPO}}/config/TELEGRAM.md` describes voice handling, sub-agent dispatch patterns, and reply requirements. That doc is written for a different agent (Claude Code) and references tools you do not have (`mcp__plugin_telegram_telegram__reply`, the Agent tool, TodoWrite). Read it for the workflow shape, but the canonical mapping for codex-chat is:
 
 - "Send a reply" → emit a `send_text` directive.
 - "React with an emoji" → emit a `react` directive only when explicitly asked to change a reaction after receipt; never use it as the normal user-message ack.
@@ -87,7 +87,7 @@ The shared workflow doc at `/home/tim/pkg/tim/assistant-agent-logic/config/TELEG
 - Do not request Telegram download URLs; the service already stores files locally.
 - If the user asks you to send an existing local image back, emit a `send_image` directive with a local path.
 - If the user asks you to generate, create, edit, transform, or render an image, dispatch an `implementer` subagent first. The main loop must never call built-in imagegen for user image requests or generate the image itself.
-- If the user asks you to create, publish, or share a simple data visualization, map, report, chart, table, calculator, one-off scratch page, small tool, Google Maps-style static page, or other functional static HTML/CSS/JS artifact, dispatch an `implementer` subagent with `/home/tim/pkg/tim/assistant-agent-logic/config/skills/generated-web-page.md`. Phrases like "scratch page", "temporary page", "private preview page", "quick page", or "one-off page" should route here even when Tim does not name the configured scratch host. Default to publishing through `codex-chat-web` using the publisher's configured private Clerk-protected base URL as the source of truth unless Tim asks otherwise. Use `generated-web-page.md`, not `web-page-design.md`, unless Tim explicitly asks for a serious visual redesign, design system, or real site design. The subagent should build the page in its artifact directory, treat the configured scratch-page host as an on-demand scratch page host rather than a dashboard, publish through `codex-chat-web`'s publisher to a Clerk-protected `/private/pages/<id>/` URL, and return the private URL plus TTL/pruning or promotion status.
+- If the user asks you to create, publish, or share a simple data visualization, map, report, chart, table, calculator, one-off scratch page, small tool, Google Maps-style static page, or other functional static HTML/CSS/JS artifact, dispatch an `implementer` subagent with `{{LOGIC_REPO}}/config/skills/generated-web-page.md`. Phrases like "scratch page", "temporary page", "private preview page", "quick page", or "one-off page" should route here even when Tim does not name the configured scratch host. Default to publishing through `codex-chat-web` using the publisher's configured private Clerk-protected base URL as the source of truth unless Tim asks otherwise. Use `generated-web-page.md`, not `web-page-design.md`, unless Tim explicitly asks for a serious visual redesign, design system, or real site design. The subagent should build the page in its artifact directory, treat the configured scratch-page host as an on-demand scratch page host rather than a dashboard, publish through `codex-chat-web`'s publisher to a Clerk-protected `/private/pages/<id>/` URL, and return the private URL plus TTL/pruning or promotion status.
 - If the user asks to save, keep, file, archive, or attach a file/PDF/document from the conversation (for example "save this PDF", "save this to Decisive Outcomes", "save this as conference prospectus", or "attach this to Bill Pate"), do it directly in the main session. Read `behavior/skills/file-save/SKILL.md`, use the provided local attachment path, copy it with `node scripts/file-save.mjs`, and record available event metadata (`received_at`, Telegram chat/message IDs, original name, MIME type, size, SHA-256). Default to private storage; never copy private PDFs into Brain or public source repos. Ask only if the source attachment is ambiguous or missing.
 - For image edits, pass the received local image paths to the dispatch in `images` and mention them in the prompt. The implementer subagent owns the imagegen call.
 - The implementer subagent must generate/edit the image, choose the final output, copy it into an allowed temporary codex-chat data path such as `data/artifacts/generated-images/<slug>/<file>.png`, and return the staged path, caption, and ready-to-use `send_image` directive.
@@ -98,9 +98,9 @@ The shared workflow doc at `/home/tim/pkg/tim/assistant-agent-logic/config/TELEG
 
 ## Web Page Design And Scratch Page Routing
 
-When Tim asks for real site or page visual design work, such as a new visual/product design from scratch for a webpage, homepage, landing page, app page, design system, design mockup, or visual redesign, dispatch an `implementer` subagent. The prompt must instruct it to read `/home/tim/pkg/tim/assistant-agent-logic/config/skills/web-page-design.md` before doing the work.
+When Tim asks for real site or page visual design work, such as a new visual/product design from scratch for a webpage, homepage, landing page, app page, design system, design mockup, or visual redesign, dispatch an `implementer` subagent. The prompt must instruct it to read `{{LOGIC_REPO}}/config/skills/web-page-design.md` before doing the work.
 
-If Tim asks for a simple data visualization, map, report, chart, table, calculator, one-off scratch page, or other functional static page, use `/home/tim/pkg/tim/assistant-agent-logic/config/skills/generated-web-page.md`, not `web-page-design.md`, unless he explicitly asks for a serious visual redesign, design system, or real site design. Treat "scratch page", "temporary page", "private preview page", "quick page", and "one-off page" as generated-web-page requests even when the configured scratch host is not mentioned; default to publishing through `codex-chat-web` using the publisher's configured private Clerk-protected base URL as the source of truth unless Tim asks otherwise.
+If Tim asks for a simple data visualization, map, report, chart, table, calculator, one-off scratch page, or other functional static page, use `{{LOGIC_REPO}}/config/skills/generated-web-page.md`, not `web-page-design.md`, unless he explicitly asks for a serious visual redesign, design system, or real site design. Treat "scratch page", "temporary page", "private preview page", "quick page", and "one-off page" as generated-web-page requests even when the configured scratch host is not mentioned; default to publishing through `codex-chat-web` using the publisher's configured private Clerk-protected base URL as the source of truth unless Tim asks otherwise.
 
 If a request needs both design and a browser-viewable artifact, use `web-page-design.md` first only for real site, landing page, or app page work. The implementer should complete the design brief, visual direction, reference analysis, screenshots, critique, and improvement pass before reading `generated-web-page.md` for static page packaging and publishing.
 
@@ -188,7 +188,7 @@ Example: a concise git push loop.
   "type": "command",
   "command": "/home/tim/pkg/tim/codex-chat/scripts/workspace-git-push.sh",
   "args": [],
-  "cwd": "/home/tim/.assistant-claude/workspace",
+  "cwd": "{{WORKSPACE}}",
   "route": "send_to_admins",
   "timeoutSec": 180,
   "lock": true,
@@ -353,7 +353,7 @@ Reminder: the service already emitted the user-message 👀 reaction before Code
 
 ### Step 1 — ALWAYS read the skill doc first
 
-Skill docs live at `/home/tim/pkg/tim/assistant-agent-logic/config/skills/`. Read the matching file before ANY other action:
+Skill docs live at `{{LOGIC_REPO}}/config/skills/`. Read the matching file before ANY other action:
 
 | Request type | Skill file |
 |---|---|
@@ -374,19 +374,19 @@ Calendar-event safety defaults, repeated here for routing prompts: no Google Mee
 
 ### Step 2 — Check for a workspace overlay
 
-After reading the skill doc, check if `/home/tim/.assistant-claude/workspace/instructions/skills/<skill>.md` exists. If it does, read it too. Workspace overlays contain user-specific preferences that refine (but never override) the skill doc. Always apply both.
+After reading the skill doc, check if `{{WORKSPACE}}/instructions/skills/<skill>.md` exists. If it does, read it too. Workspace overlays contain user-specific preferences that refine (but never override) the skill doc. Always apply both.
 
 ### Step 3 — Data lives in the workspace
 
-All state files are under `/home/tim/.assistant-claude/workspace/data/` (`todos.json`, `bets.json`, `crm.json`, `reminders.json`, `projects.json`, etc.). Never hardcode a file path — the skill doc will tell you the exact file name.
+All state files are under `{{WORKSPACE}}/data/` (`todos.json`, `bets.json`, `crm.json`, `reminders.json`, `projects.json`, etc.). Never hardcode a file path — the skill doc will tell you the exact file name.
 
 ### Step 4 — Run scripts from the assistant-agent-logic repo
 
-Executable scripts are at `/home/tim/pkg/tim/assistant-agent-logic/scripts/`. The skill doc specifies which script to call and which flags to pass. Always follow the skill doc — do not invent flags or call scripts ad hoc.
+Executable scripts are at `{{LOGIC_REPO}}/scripts/`. The skill doc specifies which script to call and which flags to pass. Always follow the skill doc — do not invent flags or call scripts ad hoc.
 
 ### Step 5 — Composio connected-account IDs
 
-For any Composio action (calendar, Gmail, etc.), the connected-account IDs are in `/home/tim/.assistant-claude/workspace/composio.yaml`. Read that file and pass the correct account ID in every Composio call. Never hardcode or guess account IDs.
+For any Composio action (calendar, Gmail, etc.), the connected-account IDs are in `{{WORKSPACE}}/composio.yaml`. Read that file and pass the correct account ID in every Composio call. Never hardcode or guess account IDs.
 
 ### Step 6 — Respond via a send_text directive
 

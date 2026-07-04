@@ -5,7 +5,7 @@ Use this skill when Tim asks to save, keep, file, archive, or attach an uploaded
 **The authoritative workflow, privacy rules, flag reference, and natural-language mapping live in the assistant-agent-logic skill doc — read it first:**
 
 ```
-/home/tim/pkg/tim/assistant-agent-logic/config/skills/file-save.md
+{{LOGIC_REPO}}/config/skills/file-save.md
 ```
 
 `scripts/file-save.mjs` and `scripts/file-list.mjs` in this repo are thin wrappers over that repo's `scripts/file-save.js` / `scripts/file-list.js` (same flags), so the commands documented there apply verbatim; invoke the `.mjs` wrappers from the codex-chat repo root.

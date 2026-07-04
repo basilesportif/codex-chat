@@ -1,6 +1,7 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
+import { defaultPathsConfig } from "../config.js";
 
 /**
  * The behavior pack references scripts and skill docs that live in the
@@ -8,7 +9,7 @@ import { describe, expect, test } from "vitest";
  * gone stale before (agents then run nonexistent commands and improvise).
  * This test asserts every referenced file actually exists.
  */
-const LOGIC_REPO = "/home/tim/pkg/tim/assistant-agent-logic";
+const LOGIC_REPO = defaultPathsConfig().logicRepo;
 const BEHAVIOR_DIR = join(process.cwd(), "behavior");
 
 async function exists(path: string): Promise<boolean> {

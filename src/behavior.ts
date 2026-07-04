@@ -1,19 +1,33 @@
 import { createHash } from "node:crypto";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join, relative } from "node:path";
-import { AppConfig, resolveConfigPath } from "./config.js";
+import { AppConfig, PathsConfig, resolveConfigPath } from "./config.js";
 import { pathExists } from "./util.js";
 
 export class BehaviorPack {
   readonly dir: string;
   readonly entrypointPath: string;
+  private readonly paths: PathsConfig;
   constructor(config: AppConfig) {
     this.dir = resolveConfigPath(config, config.behavior.dir);
     this.entrypointPath = join(this.dir, config.behavior.entrypoint);
+    this.paths = config.paths;
+  }
+
+  /**
+   * Behavior-pack markdown refers to the assistant-agent-logic checkout and
+   * the assistant workspace via {{LOGIC_REPO}} / {{WORKSPACE}} template
+   * tokens; substitute the configured absolute paths whenever file content
+   * is assembled into a prompt.
+   */
+  private substituteTemplateTokens(text: string): string {
+    return text
+      .replaceAll("{{LOGIC_REPO}}", this.paths.logicRepo)
+      .replaceAll("{{WORKSPACE}}", this.paths.assistantWorkspace);
   }
 
   async loadBootstrapPrompt(): Promise<string> {
-    const entry = await readFile(this.entrypointPath, "utf8");
+    const entry = this.substituteTemplateTokens(await readFile(this.entrypointPath, "utf8"));
     const subagents = await this.listFiles("subagents", ".md");
     const skills = await this.listFiles("skills", "SKILL.md");
     const prompt = [
@@ -55,7 +69,7 @@ export class BehaviorPack {
     const safe = profile.replace(/[^a-zA-Z0-9_.-]/g, "");
     const path = join(this.dir, "subagents", `${safe}.md`);
     if (!(await pathExists(path))) throw new Error(`Unknown subagent profile: ${profile}`);
-    return readFile(path, "utf8");
+    return this.substituteTemplateTokens(await readFile(path, "utf8"));
   }
 
   private async listFiles(folder: string, suffix: string): Promise<string[]> {

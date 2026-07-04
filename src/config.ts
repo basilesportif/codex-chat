@@ -130,6 +130,21 @@ export function defaultClaudeSubagentConfig(): ClaudeSubagentConfig {
   return claudeSubagentSchema.parse({});
 }
 
+// External filesystem locations the behavior pack and subagent prompts refer
+// to. Substituted for the {{LOGIC_REPO}} / {{WORKSPACE}} template tokens in
+// behavior/**/*.md when their content is assembled into prompts.
+const pathsSchema = z.object({
+  logicRepo: z.string().default("/home/tim/pkg/tim/assistant-agent-logic"),
+  assistantWorkspace: z.string().default("/home/tim/.assistant-claude/workspace"),
+});
+
+export type PathsConfig = z.infer<typeof pathsSchema>;
+
+/** Fully-defaulted [paths] config, derived from the schema. */
+export function defaultPathsConfig(): PathsConfig {
+  return pathsSchema.parse({});
+}
+
 const configSchema = z.object({
   version: z.literal(1).default(1),
   service: z.object({
@@ -224,6 +239,7 @@ const configSchema = z.object({
     entrypoint: z.string().default("AGENTS.md"),
     reloadOnSighup: z.boolean().default(true),
   }).prefault({}),
+  paths: pathsSchema.prefault({}),
   subagents: z.object({
     enabled: z.boolean().default(true),
     backend: subagentBackendSchema.default("codex_exec"),

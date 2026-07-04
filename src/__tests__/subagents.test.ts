@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setImmediate as realSetImmediate } from "node:timers";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import type { AppConfig } from "../config.js";
+import { defaultPathsConfig, type AppConfig } from "../config.js";
 import type { SubagentJob } from "../types.js";
 import type { ChildAgentBackend, ChildAgentFinish, StartChildAgentInput, StartedChildAgent } from "../subagent-backends.js";
 
@@ -78,7 +78,8 @@ function makeConfig(rootDir: string, maxConcurrent = 2): AppConfig {
       childInterruptGraceMs: 5000,
       allowedProfiles: [],
       cleanupArtifacts: false
-    }
+    },
+    paths: defaultPathsConfig()
   } as AppConfig;
 }
 

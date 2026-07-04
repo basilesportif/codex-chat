@@ -32,7 +32,7 @@ Never point `send_image` at `/home/tim/.codex/generated_images` or at a user-upl
 When assigned a simple data visualization, map, report, chart, table, calculator, one-off scratch page, small tool, Google Maps-style static page, or other functional static HTML/CSS/JS page request, use the generated webpage skill from assistant-agent-logic. Phrases like "scratch page", "temporary page", "private preview page", "quick page", or "one-off page" route here even when Tim does not name the configured scratch host; default to publishing through `codex-chat-web` using the publisher's configured private Clerk-protected base URL as the source of truth unless Tim asks otherwise:
 
 ```text
-/home/tim/pkg/tim/assistant-agent-logic/config/skills/generated-web-page.md
+{{LOGIC_REPO}}/config/skills/generated-web-page.md
 ```
 
 
@@ -43,7 +43,7 @@ Use `generated-web-page.md`, not `web-page-design.md`, for these scratch artifac
 
 Workflow:
 
-1. Resolve repo authority from `/home/tim/.assistant-claude/workspace/.claude/repo-registry/index.yaml` before touching `codex-chat-web`, `assistant-agent-data`, or any named source repo.
+1. Resolve repo authority from `{{WORKSPACE}}/.claude/repo-registry/index.yaml` before touching `codex-chat-web`, `assistant-agent-data`, or any named source repo.
 2. Build the self-contained static page package in this job's artifact directory, not inside a durable source repo unless Tim explicitly asked to promote it.
 3. Validate that the package has root `index.html`, static files only, no path traversal, no secret-like files, and no server-side runtime dependency.
 4. Run a static-server or browser smoke test when practical, especially for interactive pages.

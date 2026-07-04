@@ -1709,11 +1709,13 @@ export class ServiceSupervisor {
   private async authorizeSubagentResult(job: SubagentJob, target: string): Promise<boolean> {
     const surface = job.originTarget?.surfaceKind ?? job.defaultOutputTarget?.surfaceKind;
     if (!this.config.brain.enforcementEnabled || surface !== "slack") return true;
+    // Result delivery is a service action: authorize as the stable runtime
+    // subject Brain knows about, not a per-job id that can never be granted.
     const actor = job.originTarget ? {
-      id: `subagent:${job.id}`,
+      id: "system:codex-chat-runtime",
       surfaceKind: "system" as const,
       correlationId: job.correlationId ?? makeId("corr"),
-      metadata: { brainSubjectId: `subagent:${job.id}`, jobId: job.id }
+      metadata: { brainSubjectId: "system:codex-chat-runtime", jobId: job.id }
     } : undefined;
     const decision = await authorize(actor, {
       operation: "subagents.result.deliver",

@@ -82,7 +82,7 @@ function makeConfig(rootDir: string, maxConcurrent = 2): AppConfig {
   } as AppConfig;
 }
 
-function fakeBackend(kind: "codex_exec" | "codex_app_server", options: { activeTurnId?: string; alive?: boolean } = {}) {
+function fakeBackend(kind: "codex_exec" | "codex_app_server" | "claude_agent_sdk", options: { activeTurnId?: string; alive?: boolean } = {}) {
   let resolveFinish!: (finish: ChildAgentFinish) => void;
   const starts: StartChildAgentInput[] = [];
   const finished = new Promise<ChildAgentFinish>((resolve) => {
@@ -759,6 +759,76 @@ describe("subagents", () => {
     expect(state.setSubagentBackendOverride).toHaveBeenCalledWith("codex_exec", "test");
     expect(manager.backendStatus()).toMatchObject({ configured: "codex_app_server", override: "codex_exec", effective: "codex_exec" });
     expect(manager.listJobs()[0]).toMatchObject({ id: queuedId, backend: "codex_exec", status: "queued" });
+  });
+
+  test("Claude backend override round-trips and queued jobs can opt into it", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
+    tempDirs.push(root);
+    const { SubagentManager } = await import("../subagents.js");
+    const config = makeConfig(root, 0);
+    const state = {
+      saveJob: vi.fn().mockResolvedValue(undefined),
+      setSubagentBackendOverride: vi.fn().mockResolvedValue(undefined)
+    };
+    const manager = new SubagentManager(
+      config,
+      { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") } as never,
+      state as never,
+      fakeLogger() as never,
+      { onReturnToMain: vi.fn(), onSendToUser: vi.fn() }
+    );
+
+    const queuedId = await manager.dispatch({ profile: "x", prompt: "queued", route: "return_to_main" });
+    await manager.setBackendOverride("claude_agent_sdk", "test");
+
+    expect(state.setSubagentBackendOverride).toHaveBeenCalledWith("claude_agent_sdk", "test");
+    expect(manager.backendStatus()).toMatchObject({ configured: "codex_exec", override: "claude_agent_sdk", effective: "claude_agent_sdk" });
+    expect(manager.listJobs()[0]).toMatchObject({ id: queuedId, backend: "claude_agent_sdk", status: "queued" });
+  });
+
+  test("Claude jobs are steerable only while active and alive", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
+    tempDirs.push(root);
+    const { SubagentManager } = await import("../subagents.js");
+    const config = makeConfig(root, 1);
+    config.subagents.backend = "claude_agent_sdk";
+    const claudeBackend = fakeBackend("claude_agent_sdk", { activeTurnId: "claude-agent-sdk-stream", alive: true });
+    const manager = new SubagentManager(
+      config,
+      { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") } as never,
+      { saveJob: vi.fn().mockResolvedValue(undefined) } as never,
+      fakeLogger() as never,
+      { onReturnToMain: vi.fn(), onSendToUser: vi.fn() },
+      { claude_agent_sdk: claudeBackend }
+    );
+
+    const id = await manager.dispatch({ profile: "x", prompt: "run", route: "return_to_main" });
+    await waitFor(() => claudeBackend.starts.length === 1);
+
+    expect(manager.activeJobSnapshots(5).jobs.find((job) => job.id === id)).toMatchObject({
+      backend: "claude_agent_sdk",
+      steerable: true
+    });
+    await expect(manager.steerJob(id.slice(4, 12), "follow up")).resolves.toMatchObject({ status: "success" });
+    expect(claudeBackend.steer).toHaveBeenCalledWith(id, "follow up");
+
+    const deadBackend = fakeBackend("claude_agent_sdk", { activeTurnId: "claude-agent-sdk-stream", alive: false });
+    const deadConfig = makeConfig(root, 1);
+    deadConfig.subagents.backend = "claude_agent_sdk";
+    const deadManager = new SubagentManager(
+      deadConfig,
+      { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") } as never,
+      { saveJob: vi.fn().mockResolvedValue(undefined) } as never,
+      fakeLogger() as never,
+      { onReturnToMain: vi.fn(), onSendToUser: vi.fn() },
+      { claude_agent_sdk: deadBackend }
+    );
+    const deadId = await deadManager.dispatch({ profile: "x", prompt: "run", route: "return_to_main" });
+    await waitFor(() => deadBackend.starts.length === 1);
+    expect(deadManager.activeJobSnapshots(5).jobs.find((job) => job.id === deadId)).toMatchObject({
+      backend: "claude_agent_sdk",
+      steerable: false
+    });
   });
 
   test("resolves full job ids, displayed prefixes, and hex prefixes", async () => {

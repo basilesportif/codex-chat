@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { AppConfig } from "../config.js";
-import { childSecretEnvNames, sanitizeChildProcessEnv, sanitizeCodexChildProcessEnv } from "../env.js";
+import { childSecretEnvNames, sanitizeChildProcessEnv, sanitizeClaudeAgentSdkChildProcessEnv, sanitizeCodexChildProcessEnv } from "../env.js";
 
 function config(apiKeyEnv = "TRANSCRIPTION_API_KEY", ingestKeysEnv?: string): Pick<AppConfig, "transcription"> & Partial<Pick<AppConfig, "ingest" | "slack" | "codex">> {
   return {
@@ -48,6 +48,15 @@ describe("child process environment sanitizer", () => {
     expect(new Set(childSecretEnvNames(config("CUSTOM_TRANSCRIPTION_KEY")))).toEqual(new Set([
       "OPENAI_API_KEY",
       "OPENROUTER_API_KEY",
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_AUTH_TOKEN",
+      "ANTHROPIC_AWS_API_KEY",
+      "ANTHROPIC_BEDROCK_MANTLE_API_KEY",
+      "ANTHROPIC_FOUNDRY_API_KEY",
+      "AWS_BEARER_TOKEN_BEDROCK",
+      "CLAUDE_CODE_OAUTH_TOKEN",
+      "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+      "CLAUDE_CODE_OAUTH_SCOPES",
       "CUSTOM_TRANSCRIPTION_KEY",
       "SLACK_SIGNING_SECRET",
       "SLACK_BOT_TOKEN",
@@ -56,6 +65,15 @@ describe("child process environment sanitizer", () => {
     expect(new Set(childSecretEnvNames(config("OPENAI_API_KEY")))).toEqual(new Set([
       "OPENAI_API_KEY",
       "OPENROUTER_API_KEY",
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_AUTH_TOKEN",
+      "ANTHROPIC_AWS_API_KEY",
+      "ANTHROPIC_BEDROCK_MANTLE_API_KEY",
+      "ANTHROPIC_FOUNDRY_API_KEY",
+      "AWS_BEARER_TOKEN_BEDROCK",
+      "CLAUDE_CODE_OAUTH_TOKEN",
+      "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+      "CLAUDE_CODE_OAUTH_SCOPES",
       "SLACK_SIGNING_SECRET",
       "SLACK_BOT_TOKEN",
       "SLACK_APP_TOKEN"
@@ -79,6 +97,28 @@ describe("child process environment sanitizer", () => {
 
     expect(sanitizeChildProcessEnv(config(), input)).not.toHaveProperty("OPENROUTER_API_KEY");
     expect(sanitizeCodexChildProcessEnv(config(), input).OPENROUTER_API_KEY).toBe("or-secret");
+  });
+
+  test("passes only Claude OAuth env to Claude Agent SDK child processes", () => {
+    const input = {
+      CLAUDE_CODE_OAUTH_TOKEN: "oauth-token",
+      CLAUDE_CODE_OAUTH_REFRESH_TOKEN: "refresh-token",
+      ANTHROPIC_API_KEY: "api-key",
+      ANTHROPIC_AUTH_TOKEN: "auth-token",
+      CLAUDE_CODE_USE_BEDROCK: "1",
+      OPENROUTER_API_KEY: "provider-key",
+      OTHER_VAR: "keep"
+    };
+
+    const sanitized = sanitizeClaudeAgentSdkChildProcessEnv(config(), input);
+
+    expect(sanitized.CLAUDE_CODE_OAUTH_TOKEN).toBe("oauth-token");
+    expect(sanitized.CLAUDE_CODE_OAUTH_REFRESH_TOKEN).toBe("refresh-token");
+    expect(sanitized).not.toHaveProperty("ANTHROPIC_API_KEY");
+    expect(sanitized).not.toHaveProperty("ANTHROPIC_AUTH_TOKEN");
+    expect(sanitized).not.toHaveProperty("CLAUDE_CODE_USE_BEDROCK");
+    expect(sanitized).not.toHaveProperty("OPENROUTER_API_KEY");
+    expect(sanitized.OTHER_VAR).toBe("keep");
   });
 
   test("strips configured Slack secrets", () => {

@@ -139,7 +139,7 @@ export type Route =
   | "store_only"
   | "silent";
 
-export type SubagentBackendKind = "codex_exec" | "codex_app_server";
+export type SubagentBackendKind = "codex_exec" | "codex_app_server" | "claude_agent_sdk";
 export type ServiceTier = "standard" | "fast";
 export type ServiceTierMode = "auto" | "always" | "omit";
 export type SubagentOwnerType = "main" | "loop" | "monitor" | "employee";

@@ -2,6 +2,12 @@
 
 Status: implementation plan for adding an opt-in Claude Agent SDK subagent backend to codex-chat while preserving existing Codex subagent backends and rollback behavior.
 
+## Implementation progress
+
+- [x] Phase 1 — Backend selection/config/env/OAuth readiness scaffolding.
+- [x] Phase 2 — Claude Agent SDK streaming session backend, steering, events, artifacts, and cancellation.
+- [ ] Phase 3 — Documentation/example config, final validation, and rollout notes.
+
 ## Goals
 
 - Add an additive backend kind, tentatively `claude_agent_sdk`, alongside `codex_exec` and `codex_app_server`.

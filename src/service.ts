@@ -196,7 +196,7 @@ export type SubagentBackendCommand =
 
 
 /**
- * Parses "agent backend [status|exec|app-server|config]" commands.
+ * Parses "agent backend [status|exec|app-server|claude|config]" commands.
  * "agent backend exec" is the Telegram recovery path for the safe exec backend.
  */
 export function parseSubagentBackendCommand(text: string): SubagentBackendCommand {
@@ -208,6 +208,9 @@ export function parseSubagentBackendCommand(text: string): SubagentBackendComman
   if (value === "exec" || value === "codex_exec") return { isBackend: true, action: "set", backend: "codex_exec" };
   if (value === "app-server" || value === "app_server" || value === "codex_app_server") {
     return { isBackend: true, action: "set", backend: "codex_app_server" };
+  }
+  if (value === "claude" || value === "claude-agent-sdk" || value === "claude_agent_sdk") {
+    return { isBackend: true, action: "set", backend: "claude_agent_sdk" };
   }
   return { isBackend: false };
 }
@@ -236,9 +239,12 @@ export const HELP_TEXT = `Service commands (handled instantly, bypass Codex):
   agents <N>        — active jobs plus last N terminal jobs
   agent status <ref> — mechanical subagent status for one job
   agent kill <ref>  — cancel a subagent by full ID, displayed ref, or hex prefix
-  agent steer <ref> <text> — steer a running app-server subagent
+  agent steer <ref> <text> — steer a running steerable subagent
   agent backend     — show effective subagent backend
   agent backend exec — recovery: force new/queued subagents back to safe codex_exec
+  agent backend app-server — opt new/queued subagents into steerable app-server backend
+  agent backend claude — opt new/queued subagents into Claude Agent SDK backend
+  agent backend config — clear runtime backend override
   employees           — list configured durable Employees
   employee status <id> — show Employee runtime/scaffold status
   employee start <id> — start/resume a minimal durable Employee runtime when enabled
@@ -931,7 +937,7 @@ export class ServiceSupervisor {
         const ref = this.formatJobCancelRef(j);
         const details = this.formatJobSummaryDetails(j);
         details.push(`cancel: ${this.formatJobInlineCode(`agent kill ${ref}`)}`);
-        if (j.backend === "codex_app_server") details.push(`steer: ${this.formatJobInlineCode(`agent steer ${ref} <text>`)}`);
+        if (j.backend === "codex_app_server" || j.backend === "claude_agent_sdk") details.push(`steer: ${this.formatJobInlineCode(`agent steer ${ref} <text>`)}`);
         this.appendNumberedJobLines(lines, index + 1, ref, this.formatJobHeader(j, formatDurationSeconds(elapsedSec(j.startedAt))), details);
       });
     }
@@ -1103,7 +1109,7 @@ export class ServiceSupervisor {
         : job.startedAt ?? job.enqueuedAt ?? job.completedAt ?? job.abandonedAt;
     const elapsedMs = elapsedFrom ? Date.now() - new Date(elapsedFrom).getTime() : 0;
     const elapsed = formatDurationSeconds(Number.isFinite(elapsedMs) ? elapsedMs / 1000 : 0);
-    const steerable = job.status === "running" && backend === "codex_app_server" && Boolean(job.activeTurnId);
+    const steerable = job.status === "running" && (backend === "codex_app_server" || backend === "claude_agent_sdk") && Boolean(job.activeTurnId);
     const lines = [
       `Subagent ${job.id}`,
       `ref: ${refText}`,
@@ -1274,7 +1280,7 @@ export class ServiceSupervisor {
       return `Steered subagent ${result.job.id} (${result.job.profile}).`;
     }
     if (result.status === "unsupported_backend" && result.job) {
-      return `Subagent ${result.job.id} (${result.job.profile}) was launched with backend=codex_exec and is not steerable. Use "agent backend app-server" before dispatching a new steerable job.`;
+      return `Subagent ${result.job.id} (${result.job.profile}) was launched with backend=codex_exec and is not steerable. Use "agent backend app-server" or "agent backend claude" before dispatching a new steerable job.`;
     }
     if ((result.status === "not_running" || result.status === "not_steerable") && result.job) {
       return `Subagent ${result.job.id} (${result.job.profile}) is not currently steerable: ${result.message}`;
@@ -2627,6 +2633,8 @@ export class ServiceSupervisor {
     ];
     if (action === "set" && status.effective === "codex_exec") {
       lines.push("Recovery active: new and queued subagents will use the safe codex_exec backend. Running jobs are unchanged; use agent kill <ref> if needed.");
+    } else if (action === "set" && status.effective === "claude_agent_sdk") {
+      lines.push("Claude Agent SDK backend enabled for new and queued subagents. Requires [subagents.claude].enabled=true and Claude subscription OAuth; recover with: agent backend exec");
     } else if (action === "set") {
       lines.push("App-server child backend enabled for new and queued subagents. Recover with: agent backend exec");
     } else if (action === "clear") {

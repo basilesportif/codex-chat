@@ -22,6 +22,12 @@ const overrideEnvNames = [
   "CODEX_CHAT_CODEX_SANDBOX",
   "CODEX_CHAT_CODEX_APPROVAL_POLICY",
   "CODEX_CHAT_SUBAGENTS_BACKEND",
+  "CODEX_CHAT_SUBAGENTS_CLAUDE_ENABLED",
+  "CODEX_CHAT_SUBAGENTS_CLAUDE_PATH",
+  "CODEX_CHAT_SUBAGENTS_CLAUDE_PERMISSION_MODE",
+  "CODEX_CHAT_SUBAGENTS_CLAUDE_ALLOWED_TOOLS",
+  "CODEX_CHAT_SUBAGENTS_CLAUDE_DISALLOWED_TOOLS",
+  "CODEX_CHAT_SUBAGENTS_CLAUDE_FAST_MODE",
   "CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL",
   "CODEX_CHAT_SUBAGENTS_DEFAULT_CODEX_PROFILE",
   "CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL_PROVIDER",
@@ -98,6 +104,17 @@ userIds = [12345]
     expect(config.codex.modelProvider).toBe("");
     expect(config.subagents.defaultServiceTier).toBe("fast");
     expect(config.subagents.backend).toBe("codex_exec");
+    expect(config.subagents.claude).toMatchObject({
+      enabled: false,
+      pathToClaudeCodeExecutable: "",
+      permissionMode: "bypassPermissions",
+      allowDangerouslySkipPermissions: true,
+      allowedTools: ["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep"],
+      disallowedTools: [],
+      maxTurns: 100,
+      settingSources: [],
+      fastMode: true,
+    });
     expect(config.api.enabled).toBe(false);
     expect(config.slack.enabled).toBe(false);
     expect(config.slack.eventsPath).toBe("/api/slack/events");
@@ -209,6 +226,61 @@ backend = "codex_exec"
     const config = await loadConfig(path);
 
     expect(config.subagents.backend).toBe("codex_app_server");
+  });
+
+  test("loads Claude Agent SDK subagent backend and safe OAuth-only defaults", async () => {
+    const path = await tempConfig(`
+version = 1
+
+[subagents]
+backend = "claude_agent_sdk"
+
+[subagents.claude]
+enabled = true
+pathToClaudeCodeExecutable = "/opt/claude"
+permissionMode = "dontAsk"
+allowedTools = ["Read", "Grep"]
+disallowedTools = ["Bash"]
+fastMode = false
+`);
+
+    const config = await loadConfig(path);
+
+    expect(config.subagents.backend).toBe("claude_agent_sdk");
+    expect(config.subagents.claude).toMatchObject({
+      enabled: true,
+      pathToClaudeCodeExecutable: "/opt/claude",
+      permissionMode: "dontAsk",
+      allowDangerouslySkipPermissions: true,
+      allowedTools: ["Read", "Grep"],
+      disallowedTools: ["Bash"],
+      maxTurns: 100,
+      settingSources: [],
+      fastMode: false,
+    });
+  });
+
+  test("allows Claude Agent SDK subagent env overrides", async () => {
+    process.env.CODEX_CHAT_SUBAGENTS_BACKEND = "claude_agent_sdk";
+    process.env.CODEX_CHAT_SUBAGENTS_CLAUDE_ENABLED = "true";
+    process.env.CODEX_CHAT_SUBAGENTS_CLAUDE_PATH = "/usr/local/bin/claude";
+    process.env.CODEX_CHAT_SUBAGENTS_CLAUDE_PERMISSION_MODE = "plan";
+    process.env.CODEX_CHAT_SUBAGENTS_CLAUDE_ALLOWED_TOOLS = "Read, Glob";
+    process.env.CODEX_CHAT_SUBAGENTS_CLAUDE_DISALLOWED_TOOLS = "Bash";
+    process.env.CODEX_CHAT_SUBAGENTS_CLAUDE_FAST_MODE = "false";
+    const path = await tempConfig("version = 1\n");
+
+    const config = await loadConfig(path);
+
+    expect(config.subagents.backend).toBe("claude_agent_sdk");
+    expect(config.subagents.claude).toMatchObject({
+      enabled: true,
+      pathToClaudeCodeExecutable: "/usr/local/bin/claude",
+      permissionMode: "plan",
+      allowedTools: ["Read", "Glob"],
+      disallowedTools: ["Bash"],
+      fastMode: false,
+    });
   });
 
   test("loads audio ingest keys from environment without storing raw keys", async () => {

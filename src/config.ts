@@ -25,9 +25,11 @@ const approvalSchema = z.enum([
   "never",
 ]);
 const telegramUserIdSchema = z.union([z.number().int(), z.string().min(1)]);
-const subagentBackendSchema = z.enum(["codex_exec", "codex_app_server"]);
+const subagentBackendSchema = z.enum(["codex_exec", "codex_app_server", "claude_agent_sdk"]);
 const serviceTierSchema = z.enum(["standard", "fast"]);
 const serviceTierModeSchema = z.enum(["auto", "always", "omit"]);
+const claudePermissionModeSchema = z.enum(["default", "acceptEdits", "bypassPermissions", "plan", "dontAsk", "auto"]);
+const claudeSettingSourceSchema = z.enum(["user", "project", "local"]);
 const employeeStartupSchema = z.enum(["on_demand", "always"]);
 const employeeIdSchema = z
   .string()
@@ -235,6 +237,31 @@ const configSchema = z.object({
     childInterruptGraceMs: z.number().int().positive().default(5000),
     allowedProfiles: z.array(z.string()).default([]),
     cleanupArtifacts: z.boolean().default(true),
+    claude: z
+      .object({
+        enabled: z.boolean().default(false),
+        pathToClaudeCodeExecutable: z.string().default(""),
+        permissionMode: claudePermissionModeSchema.default("bypassPermissions"),
+        allowDangerouslySkipPermissions: z.boolean().default(true),
+        allowedTools: z.array(z.string()).default(["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep"]),
+        disallowedTools: z.array(z.string()).default([]),
+        maxTurns: z.number().int().positive().default(100),
+        // Empty by default so SDK subagents do not load user/project settings
+        // that could contain apiKeyHelper or other non-OAuth auth sources.
+        settingSources: z.array(claudeSettingSourceSchema).default([]),
+        fastMode: z.boolean().default(true),
+      })
+      .default({
+        enabled: false,
+        pathToClaudeCodeExecutable: "",
+        permissionMode: "bypassPermissions",
+        allowDangerouslySkipPermissions: true,
+        allowedTools: ["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep"],
+        disallowedTools: [],
+        maxTurns: 100,
+        settingSources: [],
+        fastMode: true,
+      }),
   }),
   employees: z.object({
     enabled: z.boolean().default(false),
@@ -390,6 +417,17 @@ const defaultConfig = configSchema.parse({
     childInterruptGraceMs: 5000,
     allowedProfiles: [],
     cleanupArtifacts: true,
+    claude: {
+      enabled: false,
+      pathToClaudeCodeExecutable: "",
+      permissionMode: "bypassPermissions",
+      allowDangerouslySkipPermissions: true,
+      allowedTools: ["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep"],
+      disallowedTools: [],
+      maxTurns: 100,
+      settingSources: [],
+      fastMode: true,
+    },
   },
   employees: {
     enabled: false,
@@ -593,6 +631,12 @@ function collectEnvOverrides(
       path: ["codex", "approvalPolicy"],
     },
     { name: "CODEX_CHAT_SUBAGENTS_BACKEND", path: ["subagents", "backend"] },
+    { name: "CODEX_CHAT_SUBAGENTS_CLAUDE_ENABLED", path: ["subagents", "claude", "enabled"], parse: parseBooleanEnv },
+    { name: "CODEX_CHAT_SUBAGENTS_CLAUDE_PATH", path: ["subagents", "claude", "pathToClaudeCodeExecutable"] },
+    { name: "CODEX_CHAT_SUBAGENTS_CLAUDE_PERMISSION_MODE", path: ["subagents", "claude", "permissionMode"] },
+    { name: "CODEX_CHAT_SUBAGENTS_CLAUDE_ALLOWED_TOOLS", path: ["subagents", "claude", "allowedTools"], parse: splitCsvEnv },
+    { name: "CODEX_CHAT_SUBAGENTS_CLAUDE_DISALLOWED_TOOLS", path: ["subagents", "claude", "disallowedTools"], parse: splitCsvEnv },
+    { name: "CODEX_CHAT_SUBAGENTS_CLAUDE_FAST_MODE", path: ["subagents", "claude", "fastMode"], parse: parseBooleanEnv },
     {
       name: "CODEX_CHAT_API_ENABLED",
       path: ["api", "enabled"],

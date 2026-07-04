@@ -9,6 +9,7 @@ import { OutputTarget, Route, ServiceTier, ServiceTierMode, SubagentBackendKind,
 import {
   ChildAgentBackend,
   ChildAgentFinish,
+  ClaudeAgentSdkChildAgentBackend,
   CodexAppServerChildAgentBackend,
   CodexExecChildAgentBackend,
   StartedChildAgent
@@ -194,7 +195,8 @@ export class SubagentManager {
   ) {
     this.backends = {
       codex_exec: backends?.codex_exec ?? new CodexExecChildAgentBackend(config, logger),
-      codex_app_server: backends?.codex_app_server ?? new CodexAppServerChildAgentBackend(config, logger)
+      codex_app_server: backends?.codex_app_server ?? new CodexAppServerChildAgentBackend(config, logger),
+      claude_agent_sdk: backends?.claude_agent_sdk ?? new ClaudeAgentSdkChildAgentBackend(config, logger)
     };
   }
 
@@ -543,7 +545,7 @@ export class SubagentManager {
     if (job.status !== "running") {
       return { status: "not_running", ref, job, message: `Subagent job ${job.id} is ${job.status}, not running.` };
     }
-    const backendKind = job.backend ?? this.effectiveBackend();
+    const backendKind = this.normalizeBackend(job.backend ?? this.effectiveBackend());
     const backend = this.backends[backendKind];
     try {
       await backend.steer(job.id, steeringText);
@@ -884,7 +886,8 @@ export class SubagentManager {
 
   private isJobCurrentlySteerable(job: SubagentJob): boolean {
     if (job.status !== "running") return false;
-    if (this.normalizeBackend(job.backend ?? this.effectiveBackend()) !== "codex_app_server") return false;
+    const backend = this.normalizeBackend(job.backend ?? this.effectiveBackend());
+    if (backend !== "codex_app_server" && backend !== "claude_agent_sdk") return false;
     if (!job.activeTurnId) return false;
     return this.running.get(job.id)?.child.isAlive() === true;
   }
@@ -984,11 +987,12 @@ export class SubagentManager {
   }
 
   private normalizeBackend(value: unknown): SubagentBackendKind {
-    return value === "codex_app_server" ? "codex_app_server" : "codex_exec";
+    if (value === "codex_app_server" || value === "claude_agent_sdk") return value;
+    return "codex_exec";
   }
 
   private cancelGraceMs(kind: SubagentBackendKind): number {
-    return kind === "codex_app_server" ? this.config.subagents.childInterruptGraceMs ?? SIGKILL_GRACE_MS : SIGKILL_GRACE_MS;
+    return kind === "codex_app_server" || kind === "claude_agent_sdk" ? this.config.subagents.childInterruptGraceMs ?? SIGKILL_GRACE_MS : SIGKILL_GRACE_MS;
   }
 
   private normalizeOwnerType(value: unknown): SubagentOwnerType {

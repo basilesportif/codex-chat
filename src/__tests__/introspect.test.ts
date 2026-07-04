@@ -143,10 +143,12 @@ describe("parseAgentStatusCommand", () => {
 });
 
 describe("parseSubagentBackendCommand", () => {
-  test("parses status, recovery, app-server opt-in, and clear commands", () => {
+  test("parses status, recovery, app-server/Claude opt-in, and clear commands", () => {
     expect(parseSubagentBackendCommand("agent backend")).toEqual({ isBackend: true, action: "status" });
     expect(parseSubagentBackendCommand("agent backend exec")).toEqual({ isBackend: true, action: "set", backend: "codex_exec" });
     expect(parseSubagentBackendCommand("subagent backend app-server")).toEqual({ isBackend: true, action: "set", backend: "codex_app_server" });
+    expect(parseSubagentBackendCommand("subagent backend claude")).toEqual({ isBackend: true, action: "set", backend: "claude_agent_sdk" });
+    expect(parseSubagentBackendCommand("subagent backend claude-agent-sdk")).toEqual({ isBackend: true, action: "set", backend: "claude_agent_sdk" });
     expect(parseSubagentBackendCommand("agents backend config")).toEqual({ isBackend: true, action: "clear" });
   });
 });

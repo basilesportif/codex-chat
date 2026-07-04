@@ -1,14 +1,25 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { appendFile, writeFile } from "node:fs/promises";
+import { appendFile, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
+import { homedir } from "node:os";
+import { extname, join } from "node:path";
+import {
+  query as queryClaudeAgentSdk,
+  type EffortLevel as ClaudeEffortLevel,
+  type Options as ClaudeAgentSdkOptions,
+  type Query as ClaudeAgentSdkQuery,
+  type SDKMessage as ClaudeSdkMessage,
+  type SDKUserMessage as ClaudeSdkUserMessage,
+  type ThinkingConfig as ClaudeThinkingConfig
+} from "@anthropic-ai/claude-agent-sdk";
 import WebSocket from "ws";
 import type { Logger } from "pino";
 import { resolveConfigPath, type AppConfig } from "./config.js";
 import { loadCodexProfileConfig } from "./codex-profiles.js";
-import { sanitizeCodexChildProcessEnv } from "./env.js";
+import { CLAUDE_NON_OAUTH_AUTH_ENV, CLAUDE_OAUTH_CHILD_ENV, sanitizeClaudeAgentSdkChildProcessEnv, sanitizeCodexChildProcessEnv, type ChildEnvSource } from "./env.js";
 import type { ServiceTier, ServiceTierMode, SubagentBackendKind, SubagentJob } from "./types.js";
-import { ensureDir, killProcessTree, nowIso } from "./util.js";
+import { ensureDir, killProcessTree, nowIso, pathExists } from "./util.js";
 
 type JsonRpcMessage = Record<string, unknown> & {
   id?: string | number;
@@ -55,6 +66,87 @@ export interface ChildAgentBackend {
   interrupt(jobId: string, reason?: string): Promise<void>;
   kill(jobId: string, signal?: NodeJS.Signals): Promise<void>;
   shutdown(): Promise<void>;
+}
+
+type ClaudeSubagentConfig = NonNullable<AppConfig["subagents"]["claude"]>;
+
+const DEFAULT_CLAUDE_SUBAGENT_CONFIG: ClaudeSubagentConfig = {
+  enabled: false,
+  pathToClaudeCodeExecutable: "",
+  permissionMode: "bypassPermissions",
+  allowDangerouslySkipPermissions: true,
+  allowedTools: ["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep"],
+  disallowedTools: [],
+  maxTurns: 100,
+  settingSources: [],
+  fastMode: true
+};
+
+const CLAUDE_SYNTHETIC_ACTIVE_TURN_ID = "claude-agent-sdk-stream";
+
+function claudeSubagentConfig(config: AppConfig): ClaudeSubagentConfig {
+  return { ...DEFAULT_CLAUDE_SUBAGENT_CONFIG, ...(config.subagents.claude ?? {}) };
+}
+
+class AsyncUserMessageQueue implements AsyncIterable<ClaudeSdkUserMessage> {
+  private readonly queue: ClaudeSdkUserMessage[] = [];
+  private pending?: {
+    resolve: (value: IteratorResult<ClaudeSdkUserMessage>) => void;
+    reject: (error: Error) => void;
+  };
+  private closed = false;
+  private failure?: Error;
+
+  [Symbol.asyncIterator](): AsyncIterator<ClaudeSdkUserMessage> {
+    return {
+      next: () => this.next()
+    };
+  }
+
+  push(message: ClaudeSdkUserMessage): void {
+    if (this.closed) throw new Error("Claude Agent SDK input stream is closed.");
+    if (this.pending) {
+      const pending = this.pending;
+      this.pending = undefined;
+      pending.resolve({ done: false, value: message });
+      return;
+    }
+    this.queue.push(message);
+  }
+
+  close(): void {
+    this.closed = true;
+    if (this.pending) {
+      const pending = this.pending;
+      this.pending = undefined;
+      pending.resolve({ done: true, value: undefined });
+    }
+  }
+
+  isOpen(): boolean {
+    return !this.closed;
+  }
+
+  error(error: Error): void {
+    this.failure = error;
+    this.closed = true;
+    if (this.pending) {
+      const pending = this.pending;
+      this.pending = undefined;
+      pending.reject(error);
+    }
+  }
+
+  private next(): Promise<IteratorResult<ClaudeSdkUserMessage>> {
+    if (this.queue.length > 0) {
+      return Promise.resolve({ done: false, value: this.queue.shift() as ClaudeSdkUserMessage });
+    }
+    if (this.failure) return Promise.reject(this.failure);
+    if (this.closed) return Promise.resolve({ done: true, value: undefined });
+    return new Promise<IteratorResult<ClaudeSdkUserMessage>>((resolve, reject) => {
+      this.pending = { resolve, reject };
+    });
+  }
 }
 
 export class CodexExecChildAgentBackend implements ChildAgentBackend {
@@ -207,6 +299,476 @@ export class CodexAppServerChildAgentBackend implements ChildAgentBackend {
   async shutdown(): Promise<void> {
     await Promise.all([...this.sessions.values()].map((session) => session.kill("SIGTERM").catch(() => undefined)));
   }
+}
+
+export class ClaudeAgentSdkChildAgentBackend implements ChildAgentBackend {
+  readonly kind = "claude_agent_sdk" as const;
+  private readonly sessions = new Map<string, ClaudeAgentSdkSession>();
+
+  constructor(
+    private readonly config: AppConfig,
+    private readonly logger: Logger
+  ) {}
+
+  async start(input: StartChildAgentInput): Promise<StartedChildAgent> {
+    const session = new ClaudeAgentSdkSession(this.config, this.logger, input);
+    this.sessions.set(input.job.id, session);
+    try {
+      const started = await session.start();
+      void started.finished.finally(() => this.sessions.delete(input.job.id));
+      return started;
+    } catch (error) {
+      this.sessions.delete(input.job.id);
+      await session.kill("SIGTERM").catch(() => undefined);
+      throw error;
+    }
+  }
+
+  async steer(jobId: string, text: string): Promise<void> {
+    const session = this.sessions.get(jobId);
+    if (!session) throw new Error(`Subagent ${jobId} has no active Claude Agent SDK session.`);
+    await session.steer(text);
+  }
+
+  async interrupt(jobId: string, reason?: string): Promise<void> {
+    const session = this.sessions.get(jobId);
+    if (!session) return;
+    await session.interrupt(reason);
+  }
+
+  async kill(jobId: string, signal: NodeJS.Signals = "SIGTERM"): Promise<void> {
+    const session = this.sessions.get(jobId);
+    if (session) await session.kill(signal);
+  }
+
+  async shutdown(): Promise<void> {
+    await Promise.all([...this.sessions.values()].map((session) => session.kill("SIGTERM").catch(() => undefined)));
+  }
+}
+
+type ClaudeAccountSummary = {
+  apiProvider?: string;
+  apiKeySource?: string;
+  tokenSource?: string;
+  subscriptionType?: string;
+  emailPresent: boolean;
+  organizationPresent: boolean;
+};
+
+class ClaudeAgentSdkSession {
+  private readonly queue = new AsyncUserMessageQueue();
+  private query?: ClaudeAgentSdkQuery;
+  private closed = false;
+  private stopping = false;
+  private settled = false;
+  private assistantText = "";
+  private partialText = "";
+  private finalMessage = "";
+  private killSignal: NodeJS.Signals | null = null;
+  private resolveFinished!: (finish: ChildAgentFinish) => void;
+  private redactionEnv: ChildEnvSource = {};
+  private readonly finishedPromise = new Promise<ChildAgentFinish>((resolve) => {
+    this.resolveFinished = resolve;
+  });
+
+  constructor(
+    private readonly config: AppConfig,
+    private readonly logger: Logger,
+    private readonly input: StartChildAgentInput
+  ) {}
+
+  async start(): Promise<StartedChildAgent> {
+    const ready = await this.checkReadiness();
+    this.redactionEnv = ready.safeEnv;
+    const options = this.buildOptions(ready.safeEnv);
+    await this.appendEvent({
+      event: "claude_launch_config",
+      at: nowIso(),
+      backend: "claude_agent_sdk",
+      model: this.input.model || undefined,
+      effort: this.input.effort,
+      serviceTier: this.input.serviceTier,
+      serviceTierMode: this.input.serviceTierMode,
+      serviceTierIgnored: true,
+      fastModeSettingApplied: this.shouldApplyFastMode(),
+      oauthEnvPresent: ready.oauthEnvPresent,
+      credentialFiles: ready.credentialFiles,
+      strippedNonOAuthEnv: ready.strippedNonOAuthEnv,
+      settingSources: claudeSubagentConfig(this.config).settingSources
+    });
+
+    const query = queryClaudeAgentSdk({ prompt: this.queue, options });
+    this.query = query;
+    this.input.job.transport = "stdio";
+
+    void this.consumeQuery(query);
+    await this.verifyOAuthInitialization(query);
+
+    this.input.job.activeTurnId = CLAUDE_SYNTHETIC_ACTIVE_TURN_ID;
+    await this.input.onJobUpdated(this.input.job);
+    this.queue.push(await this.buildUserMessage(this.input.assembledPrompt, this.input.images));
+
+    return {
+      kind: "claude_agent_sdk",
+      finished: this.finishedPromise,
+      kill: (signal: NodeJS.Signals = "SIGTERM") => this.kill(signal),
+      isAlive: () => this.isAlive()
+    };
+  }
+
+  async steer(text: string): Promise<void> {
+    if (!this.query || this.closed || !this.queue.isOpen() || !this.input.job.activeTurnId) {
+      throw new Error(`Subagent ${this.input.job.id} is not currently steerable; Claude Agent SDK input stream is not accepting messages.`);
+    }
+    this.queue.push(await this.buildUserMessage(text, []));
+    await this.appendEvent({ event: "claude_steer_enqueued", at: nowIso(), backend: "claude_agent_sdk", jobId: this.input.job.id });
+  }
+
+  async interrupt(reason?: string): Promise<void> {
+    if (!this.query || this.closed) {
+      await this.kill("SIGTERM");
+      return;
+    }
+    this.stopping = true;
+    this.killSignal = "SIGTERM";
+    this.input.job.activeTurnId = undefined;
+    this.queue.close();
+    await this.appendEvent({ event: "claude_interrupt_requested", at: nowIso(), backend: "claude_agent_sdk", jobId: this.input.job.id, reason });
+    try {
+      await this.query.interrupt();
+    } catch (error) {
+      this.logger.warn({ component: "subagents", event: "claude_interrupt_failed", jobId: this.input.job.id, error }, "Claude Agent SDK interrupt failed; closing query");
+      this.query.close();
+    }
+  }
+
+  async kill(signal: NodeJS.Signals = "SIGTERM"): Promise<void> {
+    this.stopping = true;
+    this.closed = true;
+    this.killSignal = signal;
+    this.input.job.activeTurnId = undefined;
+    this.queue.close();
+    this.query?.close();
+  }
+
+  isAlive(): boolean {
+    return !this.closed && !this.settled;
+  }
+
+  private async checkReadiness(): Promise<{
+    safeEnv: NodeJS.ProcessEnv;
+    oauthEnvPresent: boolean;
+    credentialFiles: Array<{ path: string; exists: boolean }>;
+    strippedNonOAuthEnv: string[];
+  }> {
+    const cfg = claudeSubagentConfig(this.config);
+    const safeEnv = sanitizeClaudeAgentSdkChildProcessEnv(this.config);
+    const credentialFiles = await this.credentialFiles(safeEnv);
+    const oauthEnvPresent = Boolean(safeEnv.CLAUDE_CODE_OAUTH_TOKEN);
+    const strippedNonOAuthEnv = this.strippedNonOAuthEnvNames(safeEnv);
+    const readiness = {
+      event: "claude_readiness",
+      at: nowIso(),
+      backend: "claude_agent_sdk",
+      enabled: cfg.enabled,
+      oauthEnvPresent,
+      credentialFiles,
+      strippedNonOAuthEnv
+    };
+    await this.appendEvent(readiness);
+    if (!cfg.enabled) {
+      const error = "Claude Agent SDK backend is disabled. Set [subagents.claude].enabled = true after configuring Claude subscription OAuth.";
+      await this.appendEvent({ ...readiness, event: "claude_readiness_failed", error });
+      throw new Error(error);
+    }
+    if (!oauthEnvPresent && !credentialFiles.some((candidate) => candidate.exists)) {
+      const error = "Claude Agent SDK backend requires subscription OAuth: run `claude auth login` or provide CLAUDE_CODE_OAUTH_TOKEN.";
+      await this.appendEvent({ ...readiness, event: "claude_readiness_failed", error });
+      throw new Error(error);
+    }
+    const leaked = CLAUDE_NON_OAUTH_AUTH_ENV.filter((name) => safeEnv[name]);
+    if (leaked.length > 0) {
+      const error = `Claude Agent SDK sanitized environment still contains non-OAuth auth variables: ${leaked.join(", ")}`;
+      await this.appendEvent({ ...readiness, event: "claude_readiness_failed", error });
+      throw new Error(error);
+    }
+    return { safeEnv, oauthEnvPresent, credentialFiles, strippedNonOAuthEnv };
+  }
+
+  private async credentialFiles(env: NodeJS.ProcessEnv): Promise<Array<{ path: string; exists: boolean }>> {
+    const configuredDir = env.CLAUDE_CONFIG_DIR || process.env.CLAUDE_CONFIG_DIR;
+    const configDir = configuredDir || join(homedir(), ".claude");
+    return [{ path: join(configDir, ".credentials.json"), exists: await pathExists(join(configDir, ".credentials.json")) }];
+  }
+
+  private strippedNonOAuthEnvNames(safeEnv: NodeJS.ProcessEnv): string[] {
+    const stripped = new Set<string>();
+    for (const name of CLAUDE_NON_OAUTH_AUTH_ENV) {
+      if (process.env[name] && !safeEnv[name]) stripped.add(name);
+    }
+    for (const name of this.config.codex.providerApiKeyEnvNames ?? []) {
+      const trimmed = name.trim();
+      if (trimmed && process.env[trimmed] && !safeEnv[trimmed]) stripped.add(trimmed);
+    }
+    return [...stripped].sort();
+  }
+
+  private buildOptions(env: NodeJS.ProcessEnv): ClaudeAgentSdkOptions {
+    const cfg = claudeSubagentConfig(this.config);
+    const { effort, thinking } = this.claudeEffortAndThinking(this.input.effort);
+    const settings = this.shouldApplyFastMode()
+      ? { fastMode: true, fastModePerSessionOptIn: true }
+      : undefined;
+    const options: ClaudeAgentSdkOptions = {
+      cwd: this.config.service.workspace,
+      env: {
+        ...env,
+        CLAUDE_AGENT_SDK_CLIENT_APP: "codex-chat/subagent"
+      },
+      permissionMode: cfg.permissionMode,
+      allowDangerouslySkipPermissions: cfg.permissionMode === "bypassPermissions" ? cfg.allowDangerouslySkipPermissions : undefined,
+      tools: cfg.allowedTools,
+      allowedTools: cfg.allowedTools,
+      disallowedTools: cfg.disallowedTools,
+      maxTurns: cfg.maxTurns,
+      settingSources: cfg.settingSources,
+      strictMcpConfig: true,
+      includePartialMessages: true,
+      settings,
+      stderr: (data) => {
+        void appendFile(this.input.stderrPath, this.redactSecrets(data), { mode: 0o600 }).catch((error) => {
+          this.logger.error({ component: "subagents", event: "claude_stderr_write_failed", jobId: this.input.job.id, error });
+        });
+      },
+      title: `codex-chat subagent ${this.input.job.id}`
+    };
+    if (cfg.pathToClaudeCodeExecutable.trim()) options.pathToClaudeCodeExecutable = cfg.pathToClaudeCodeExecutable.trim();
+    if (this.input.model.trim()) options.model = this.input.model.trim();
+    if (effort) options.effort = effort;
+    if (thinking) options.thinking = thinking;
+    return options;
+  }
+
+  private shouldApplyFastMode(): boolean {
+    const cfg = claudeSubagentConfig(this.config);
+    return cfg.fastMode && this.input.serviceTier === "fast" && this.input.serviceTierMode !== "omit";
+  }
+
+  private claudeEffortAndThinking(effort: string): { effort?: ClaudeEffortLevel; thinking?: ClaudeThinkingConfig } {
+    if (effort === "none" || effort === "minimal") return { thinking: { type: "disabled" } };
+    if (effort === "low" || effort === "medium" || effort === "high" || effort === "xhigh") return { effort };
+    throw new Error(`Unsupported Claude Agent SDK effort: ${effort}`);
+  }
+
+  private async verifyOAuthInitialization(query: ClaudeAgentSdkQuery): Promise<void> {
+    const timeoutMs = Math.max(1, this.config.subagents.childStartupTimeoutSec ?? 60) * 1000;
+    const initialized = await withTimeout(
+      query.initializationResult(),
+      timeoutMs,
+      `Claude Agent SDK initialization did not complete within ${timeoutMs}ms. Check Claude OAuth login and network connectivity.`
+    );
+    const account = initialized.account ?? {};
+    const summary = this.accountSummary(account);
+    await this.appendEvent({
+      event: "claude_initialized",
+      at: nowIso(),
+      backend: "claude_agent_sdk",
+      account: summary,
+      fastModeState: initialized.fast_mode_state
+    });
+    if (summary.apiProvider && summary.apiProvider !== "firstParty") {
+      throw new Error(`Claude Agent SDK backend requires first-party subscription OAuth; SDK reported apiProvider=${summary.apiProvider}.`);
+    }
+    if (summary.apiKeySource && summary.apiKeySource !== "oauth") {
+      throw new Error(`Claude Agent SDK backend requires OAuth credentials; SDK reported apiKeySource=${summary.apiKeySource}.`);
+    }
+  }
+
+  private accountSummary(account: {
+    apiProvider?: string;
+    apiKeySource?: string;
+    tokenSource?: string;
+    subscriptionType?: string;
+    email?: string;
+    organization?: string;
+  }): ClaudeAccountSummary {
+    return {
+      apiProvider: account.apiProvider,
+      apiKeySource: account.apiKeySource,
+      tokenSource: account.tokenSource,
+      subscriptionType: account.subscriptionType,
+      emailPresent: Boolean(account.email),
+      organizationPresent: Boolean(account.organization)
+    };
+  }
+
+  private async consumeQuery(query: ClaudeAgentSdkQuery): Promise<void> {
+    try {
+      for await (const message of query) {
+        await this.handleSdkMessage(message);
+      }
+      if (!this.settled) {
+        if (this.stopping) {
+          await this.writeFinalMessage(this.finalMessage || this.assistantText || this.partialText);
+          this.settle({ code: null, signal: this.killSignal });
+        } else {
+          const final = this.finalMessage || this.assistantText || this.partialText;
+          await this.writeFinalMessage(final);
+          this.settle(final ? { code: 0, signal: null } : { code: 1, signal: null, error: "Claude Agent SDK query ended without a result message." });
+        }
+      }
+    } catch (error) {
+      const message = this.redactSecrets(error instanceof Error ? error.message : String(error));
+      await this.appendEvent({ event: "claude_query_error", at: nowIso(), backend: "claude_agent_sdk", error: message });
+      await this.writeFinalMessage(this.finalMessage || this.assistantText || this.partialText);
+      this.settle({ code: this.stopping ? null : 1, signal: this.killSignal, error: this.stopping ? undefined : message });
+    } finally {
+      this.closed = true;
+      this.input.job.activeTurnId = undefined;
+      this.queue.close();
+      await this.input.onJobUpdated(this.input.job).catch(() => undefined);
+    }
+  }
+
+  private async handleSdkMessage(message: ClaudeSdkMessage): Promise<void> {
+    await this.appendEvent({ event: "claude_sdk_message", at: nowIso(), backend: "claude_agent_sdk", raw: message });
+    if (message.type === "system" && message.subtype === "init") {
+      if (message.apiKeySource !== "oauth") {
+        const error = `Claude Agent SDK backend requires OAuth credentials; SDK init reported apiKeySource=${message.apiKeySource}.`;
+        this.query?.close();
+        throw new Error(error);
+      }
+      this.input.job.backendThreadId = message.session_id;
+      if (!this.stopping) this.input.job.activeTurnId = CLAUDE_SYNTHETIC_ACTIVE_TURN_ID;
+      await this.input.onJobUpdated(this.input.job);
+      return;
+    }
+    if (message.type === "assistant") {
+      this.assistantText += extractClaudeAssistantText(message);
+      if (message.error) this.input.job.error = `Claude assistant error: ${message.error}`;
+      return;
+    }
+    if (message.type === "stream_event") {
+      this.partialText += extractClaudeStreamDelta(message);
+      return;
+    }
+    if (message.type === "result") {
+      this.input.job.activeTurnId = undefined;
+      if (message.subtype === "success") {
+        this.finalMessage = message.result || this.assistantText || this.partialText;
+        await this.writeFinalMessage(this.finalMessage);
+        this.settle({ code: 0, signal: null });
+      } else {
+        const resultErrors = Array.isArray(message.errors) ? message.errors : [];
+        const errors = resultErrors.length > 0 ? resultErrors.join("; ") : message.subtype;
+        const final = this.assistantText || this.partialText;
+        await this.writeFinalMessage(final);
+        this.input.job.error = errors;
+        this.settle({ code: 1, signal: null, error: errors });
+      }
+      this.queue.close();
+      this.query?.close();
+    }
+  }
+
+  private async buildUserMessage(text: string, images: string[]): Promise<ClaudeSdkUserMessage> {
+    const content: Array<Record<string, unknown>> = [{ type: "text", text }];
+    for (const image of images) {
+      const mediaType = imageMediaType(image);
+      if (!mediaType) {
+        content.push({ type: "text", text: `\n\n[Attached image path: ${image}]` });
+        continue;
+      }
+      try {
+        const data = (await readFile(image)).toString("base64");
+        content.push({ type: "image", source: { type: "base64", media_type: mediaType, data } });
+      } catch {
+        content.push({ type: "text", text: `\n\n[Attached image path unreadable by parent; try reading locally if needed: ${image}]` });
+      }
+    }
+    return {
+      type: "user",
+      message: { role: "user", content: content as never },
+      parent_tool_use_id: null,
+      timestamp: nowIso()
+    };
+  }
+
+  private async writeFinalMessage(value: string): Promise<void> {
+    await writeFile(this.input.lastMessagePath, value, { mode: 0o600 }).catch((error) => {
+      this.logger.error({ component: "subagents", event: "claude_last_message_write_failed", jobId: this.input.job.id, error });
+      this.input.job.error = error instanceof Error ? error.message : String(error);
+    });
+  }
+
+  private async appendEvent(value: unknown): Promise<void> {
+    await appendFile(this.input.stdoutPath, `${this.redactSecrets(JSON.stringify(value))}\n`, { mode: 0o600 }).catch((error) => {
+      this.logger.error({ component: "subagents", event: "claude_event_write_failed", jobId: this.input.job.id, error });
+    });
+  }
+
+  private redactSecrets(value: string): string {
+    const env = { ...process.env, ...this.redactionEnv };
+    const secretNames = new Set<string>([
+      ...CLAUDE_OAUTH_CHILD_ENV,
+      ...CLAUDE_NON_OAUTH_AUTH_ENV,
+      ...(this.config.codex.providerApiKeyEnvNames ?? [])
+    ]);
+    let result = value;
+    for (const name of secretNames) {
+      const secret = env[name]?.trim();
+      if (secret && secret.length >= 4) result = result.split(secret).join(`[REDACTED:${name}]`);
+    }
+    return result;
+  }
+
+  private settle(finish: ChildAgentFinish): void {
+    if (this.settled) return;
+    this.settled = true;
+    this.closed = true;
+    this.input.job.activeTurnId = undefined;
+    this.resolveFinished(finish);
+  }
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  }) as Promise<T>;
+}
+
+function extractClaudeAssistantText(message: Extract<ClaudeSdkMessage, { type: "assistant" }>): string {
+  const content = message.message.content;
+  if (!Array.isArray(content)) return "";
+  let text = "";
+  for (const block of content) {
+    if (block && typeof block === "object" && "type" in block && block.type === "text" && "text" in block && typeof block.text === "string") {
+      text += block.text;
+    }
+  }
+  return text;
+}
+
+function extractClaudeStreamDelta(message: Extract<ClaudeSdkMessage, { type: "stream_event" }>): string {
+  const event = message.event as unknown;
+  if (!event || typeof event !== "object") return "";
+  const record = event as Record<string, unknown>;
+  if (record.type !== "content_block_delta" || !record.delta || typeof record.delta !== "object") return "";
+  const delta = record.delta as Record<string, unknown>;
+  return delta.type === "text_delta" && typeof delta.text === "string" ? delta.text : "";
+}
+
+function imageMediaType(path: string): "image/png" | "image/jpeg" | "image/gif" | "image/webp" | undefined {
+  const ext = extname(path).toLowerCase();
+  if (ext === ".png") return "image/png";
+  if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
+  if (ext === ".gif") return "image/gif";
+  if (ext === ".webp") return "image/webp";
+  return undefined;
 }
 
 class ChildAppServerSession {

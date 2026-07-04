@@ -6,7 +6,8 @@ import type { EmployeeRuntimeClient, EmployeeThreadSpec } from "./employee-runti
 import { StateStore } from "./state.js";
 import type { EmployeePendingChildResult, EmployeeProposalAction, EmployeeRuntimeState, EmployeeStatus, SubagentJob } from "./types.js";
 import type { CancelJobResult, SteerJobResult, SubagentControlActor } from "./subagents.js";
-import { ensureDir, makeId, nowIso, pathExists } from "./util.js";
+import { collectFencedBlocks, stripRanges } from "./directives.js";
+import { compactText, ensureDir, inlineCode, makeId, normalizeRef, nowIso, pathExists } from "./util.js";
 
 const EMPLOYEE_SCAFFOLD_MODE = "scaffold_only" as const;
 const EMPLOYEE_APP_SERVER_MODE = "app_server" as const;
@@ -263,7 +264,7 @@ export class EmployeeManager {
   }
 
   resolveEmployeeRef(ref: string): EmployeeResolution {
-    const normalized = this.normalizeRef(ref);
+    const normalized = normalizeRef(ref);
     const employees = this.listEmployees();
     const exact = employees.find((employee) => employee.id.toLowerCase() === normalized.toLowerCase());
     if (exact) return { status: "matched", ref, employee: exact };
@@ -347,11 +348,11 @@ export class EmployeeManager {
       `pendingChildResults: ${state.pendingChildResults?.length ?? 0}`
     ];
     if (state.lastProposal) {
-      lines.push(`lastProposal: ${state.lastProposal.action} at ${state.lastProposal.proposedAt}${state.lastProposal.text ? ` text=${JSON.stringify(this.compact(state.lastProposal.text))}` : ""}`);
+      lines.push(`lastProposal: ${state.lastProposal.action} at ${state.lastProposal.proposedAt}${state.lastProposal.text ? ` text=${JSON.stringify(compactText(state.lastProposal.text, { maxLength: 160, keepBackticks: true }))}` : ""}`);
     }
-    if (state.lastResumeError) lines.push(`lastResumeError: ${this.compact(state.lastResumeError, 240)}`);
-    if (state.lastError) lines.push(`lastError: ${this.compact(state.lastError, 240)}`);
-    if (state.lastServiceActionError) lines.push(`lastServiceActionError: ${this.compact(state.lastServiceActionError, 240)}`);
+    if (state.lastResumeError) lines.push(`lastResumeError: ${compactText(state.lastResumeError, { maxLength: 240, keepBackticks: true })}`);
+    if (state.lastError) lines.push(`lastError: ${compactText(state.lastError, { maxLength: 240, keepBackticks: true })}`);
+    if (state.lastServiceActionError) lines.push(`lastServiceActionError: ${compactText(state.lastServiceActionError, { maxLength: 240, keepBackticks: true })}`);
     if (state.lastChildResultAt) lines.push(`lastChildResultAt: ${state.lastChildResultAt}`);
     if (state.pendingChildResults?.length) {
       for (const pending of state.pendingChildResults.slice(0, 5)) {
@@ -814,7 +815,7 @@ export class EmployeeManager {
 
   private async storeChildResult(employeeId: string, job: SubagentJob, result: string, reason: string): Promise<void> {
     const storedAt = nowIso();
-    const resultPreview = this.compact(result, 500);
+    const resultPreview = compactText(result, { maxLength: 500, keepBackticks: true });
     const resultPath = await this.state.saveEmployeeChildResult(employeeId, job.id, {
       employeeId,
       job,
@@ -977,8 +978,8 @@ export class EmployeeManager {
     const childJobs = this.childJobSummary(employee.id);
     const childSummary = childJobs.total > 0 ? ` child_jobs=${childJobs.active}/${childJobs.total}` : "";
     const pending = state?.pendingChildResults?.length ? ` pending_child_results=${state.pendingChildResults.length}` : "";
-    const description = employee.description ? ` purpose=${JSON.stringify(this.compact(employee.description, 80))}` : "";
-    return this.codeLine(`${employee.id} status=${status} runtime=${runtime} resumable=${resumable} enabled=${enabled} profile=${employee.profile} model=${employee.model} effort=${employee.effort} startup=${employee.startup} dir=${employee.directory} warmup=${warmup}${childSummary}${pending}${description}`);
+    const description = employee.description ? ` purpose=${JSON.stringify(compactText(employee.description, { maxLength: 80, keepBackticks: true }))}` : "";
+    return inlineCode(`${employee.id} status=${status} runtime=${runtime} resumable=${resumable} enabled=${enabled} profile=${employee.profile} model=${employee.model} effort=${employee.effort} startup=${employee.startup} dir=${employee.directory} warmup=${warmup}${childSummary}${pending}${description}`);
   }
 
   private formatProposalResult(action: EmployeeProposalAction, employee: EmployeeDescriptor, state: EmployeeRuntimeState): string {
@@ -1003,32 +1004,12 @@ export class EmployeeManager {
     return "none";
   }
 
-  private codeLine(text: string): string {
-    return `\`${text.replace(/[\r\n`]/g, " ")}\``;
-  }
-
-  private normalizeRef(ref: string): string {
-    return ref.trim().replace(/^[[(<]+/, "").replace(/[\])>.,;:]+$/, "");
-  }
-
-  private compact(text: string, maxLength = 160): string {
-    const compact = text.replace(/\s+/g, " ").trim();
-    return compact.length > maxLength ? `${compact.slice(0, maxLength - 3)}...` : compact;
-  }
-}
-
-interface EmployeeServiceBlock {
-  start: number;
-  end: number;
-  body: string;
-  complete: boolean;
 }
 
 const employeeServiceStart = /^[ \t]*```(?:codex-chat-employee-service|employee-service-action)[ \t]*$/;
-const employeeServiceEnd = /^[ \t]*```[ \t]*$/;
 
 export function parseEmployeeServiceOutput(text: string): EmployeeServiceParseResult {
-  const blocks = collectEmployeeServiceBlocks(text);
+  const blocks = collectFencedBlocks(text, employeeServiceStart);
   const envelopes: EmployeeServiceEnvelope[] = [];
   const errors: string[] = [];
   for (const block of blocks) {
@@ -1042,54 +1023,5 @@ export function parseEmployeeServiceOutput(text: string): EmployeeServiceParseRe
       errors.push(error instanceof Error ? error.message : String(error));
     }
   }
-  return { cleanText: stripEmployeeServiceBlocks(text, blocks).trim(), envelopes, errors };
-}
-
-function collectEmployeeServiceBlocks(text: string): EmployeeServiceBlock[] {
-  const blocks: EmployeeServiceBlock[] = [];
-  const linePattern = /[^\r\n]*(?:\r\n|\n|\r|$)/g;
-  const lines: Array<{ start: number; end: number; content: string }> = [];
-  for (const match of text.matchAll(linePattern)) {
-    if (match[0] === "" && match.index === text.length) break;
-    const start = match.index ?? 0;
-    const raw = match[0];
-    lines.push({ start, end: start + raw.length, content: raw.replace(/(?:\r\n|\n|\r)$/, "") });
-  }
-  for (let i = 0; i < lines.length; i++) {
-    const startLine = lines[i];
-    if (!startLine || !employeeServiceStart.test(startLine.content)) continue;
-    const bodyStart = startLine.end;
-    let endLine: { start: number; end: number; content: string } | undefined;
-    let endIndex = i;
-    for (let j = i + 1; j < lines.length; j++) {
-      const candidate = lines[j];
-      if (!candidate) continue;
-      if (employeeServiceEnd.test(candidate.content)) {
-        endLine = candidate;
-        endIndex = j;
-        break;
-      }
-    }
-    if (endLine) {
-      blocks.push({ start: startLine.start, end: endLine.end, body: text.slice(bodyStart, endLine.start), complete: true });
-      i = endIndex;
-    } else {
-      blocks.push({ start: startLine.start, end: text.length, body: text.slice(bodyStart), complete: false });
-      break;
-    }
-  }
-  return blocks;
-}
-
-function stripEmployeeServiceBlocks(text: string, blocks: EmployeeServiceBlock[]): string {
-  if (blocks.length === 0) return text;
-  let result = "";
-  let cursor = 0;
-  for (const block of blocks) {
-    if (block.start < cursor) continue;
-    result += text.slice(cursor, block.start);
-    cursor = Math.max(cursor, block.end);
-  }
-  result += text.slice(cursor);
-  return result;
+  return { cleanText: stripRanges(text, blocks).trim(), envelopes, errors };
 }

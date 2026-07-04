@@ -57,6 +57,30 @@ export function isInsidePath(child: string, parent: string): boolean {
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
+/**
+ * Flatten a value to a single display-safe line: backticks (unless
+ * `keepBackticks`), CR and LF become spaces, whitespace runs collapse, and
+ * the result is trimmed. With `maxLength`, longer text is cut to
+ * `maxLength - 3` chars plus "...".
+ */
+export function compactText(value: unknown, options: { maxLength?: number; keepBackticks?: boolean } = {}): string {
+  const source = String(value ?? "");
+  const compact = (options.keepBackticks ? source : source.replace(/`/g, " ")).replace(/\s+/g, " ").trim();
+  const { maxLength } = options;
+  if (maxLength !== undefined && compact.length > maxLength) return `${compact.slice(0, maxLength - 3)}...`;
+  return compact;
+}
+
+/** Wrap a value in Markdown inline-code backticks, compacting it first. */
+export function inlineCode(value: unknown): string {
+  return `\`${compactText(value)}\``;
+}
+
+/** Strip surrounding brackets/punctuation from a user-supplied ref token. */
+export function normalizeRef(ref: string): string {
+  return ref.trim().replace(/^[[(<]+/, "").replace(/[\])>.,;:]+$/, "");
+}
+
 export function chunkText(text: string, maxLength = 3900): string[] {
   if (text.length <= maxLength) return [text];
   const units = markdownSplitUnits(text);

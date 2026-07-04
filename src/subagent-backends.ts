@@ -261,17 +261,32 @@ export class CodexExecChildAgentBackend implements ChildAgentBackend {
   }
 }
 
-export class CodexAppServerChildAgentBackend implements ChildAgentBackend {
-  readonly kind = "codex_app_server" as const;
-  private readonly sessions = new Map<string, ChildAppServerSession>();
+/** Common child-session shape managed by {@link SessionMapChildAgentBackend}. */
+interface ManagedChildSession {
+  start(): Promise<StartedChildAgent>;
+  steer(text: string): Promise<void>;
+  interrupt(reason?: string): Promise<void>;
+  kill(signal?: NodeJS.Signals): Promise<void>;
+}
+
+/**
+ * Shared session-map wrapper for backends that run one child session per
+ * job. Subclasses only choose the session class and the no-session error.
+ */
+abstract class SessionMapChildAgentBackend implements ChildAgentBackend {
+  abstract readonly kind: SubagentBackendKind;
+  private readonly sessions = new Map<string, ManagedChildSession>();
 
   constructor(
-    private readonly config: AppConfig,
-    private readonly logger: Logger
+    protected readonly config: AppConfig,
+    protected readonly logger: Logger
   ) {}
 
+  protected abstract createSession(input: StartChildAgentInput): ManagedChildSession;
+  protected abstract missingSessionError(jobId: string): string;
+
   async start(input: StartChildAgentInput): Promise<StartedChildAgent> {
-    const session = new ChildAppServerSession(this.config, this.logger, input);
+    const session = this.createSession(input);
     this.sessions.set(input.job.id, session);
     try {
       const started = await session.start();
@@ -286,7 +301,7 @@ export class CodexAppServerChildAgentBackend implements ChildAgentBackend {
 
   async steer(jobId: string, text: string): Promise<void> {
     const session = this.sessions.get(jobId);
-    if (!session) throw new Error(`Subagent ${jobId} has no active app-server child session.`);
+    if (!session) throw new Error(this.missingSessionError(jobId));
     await session.steer(text);
   }
 
@@ -306,48 +321,27 @@ export class CodexAppServerChildAgentBackend implements ChildAgentBackend {
   }
 }
 
-export class ClaudeAgentSdkChildAgentBackend implements ChildAgentBackend {
+export class CodexAppServerChildAgentBackend extends SessionMapChildAgentBackend {
+  readonly kind = "codex_app_server" as const;
+
+  protected createSession(input: StartChildAgentInput): ManagedChildSession {
+    return new ChildAppServerSession(this.config, this.logger, input);
+  }
+
+  protected missingSessionError(jobId: string): string {
+    return `Subagent ${jobId} has no active app-server child session.`;
+  }
+}
+
+export class ClaudeAgentSdkChildAgentBackend extends SessionMapChildAgentBackend {
   readonly kind = "claude_agent_sdk" as const;
-  private readonly sessions = new Map<string, ClaudeAgentSdkSession>();
 
-  constructor(
-    private readonly config: AppConfig,
-    private readonly logger: Logger
-  ) {}
-
-  async start(input: StartChildAgentInput): Promise<StartedChildAgent> {
-    const session = new ClaudeAgentSdkSession(this.config, this.logger, input);
-    this.sessions.set(input.job.id, session);
-    try {
-      const started = await session.start();
-      void started.finished.finally(() => this.sessions.delete(input.job.id));
-      return started;
-    } catch (error) {
-      this.sessions.delete(input.job.id);
-      await session.kill("SIGTERM").catch(() => undefined);
-      throw error;
-    }
+  protected createSession(input: StartChildAgentInput): ManagedChildSession {
+    return new ClaudeAgentSdkSession(this.config, this.logger, input);
   }
 
-  async steer(jobId: string, text: string): Promise<void> {
-    const session = this.sessions.get(jobId);
-    if (!session) throw new Error(`Subagent ${jobId} has no active Claude Agent SDK session.`);
-    await session.steer(text);
-  }
-
-  async interrupt(jobId: string, reason?: string): Promise<void> {
-    const session = this.sessions.get(jobId);
-    if (!session) return;
-    await session.interrupt(reason);
-  }
-
-  async kill(jobId: string, signal: NodeJS.Signals = "SIGTERM"): Promise<void> {
-    const session = this.sessions.get(jobId);
-    if (session) await session.kill(signal);
-  }
-
-  async shutdown(): Promise<void> {
-    await Promise.all([...this.sessions.values()].map((session) => session.kill("SIGTERM").catch(() => undefined)));
+  protected missingSessionError(jobId: string): string {
+    return `Subagent ${jobId} has no active Claude Agent SDK session.`;
   }
 }
 

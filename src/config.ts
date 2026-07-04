@@ -626,7 +626,7 @@ export async function ensureConfiguredDirectories(
   for (const dir of dirs) await ensureDir(resolveConfigPath(config, dir));
 }
 
-export async function writeDefaultConfigIfMissing(
+async function writeDefaultConfigIfMissing(
   path = "config/codex-chat.toml",
 ): Promise<boolean> {
   return copyExampleIfMissing(path, "codex-chat.example.toml");

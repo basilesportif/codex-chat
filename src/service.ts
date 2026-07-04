@@ -38,6 +38,10 @@ import {
 import { StateStore } from "./state.js";
 import {
   SubagentManager,
+  isTerminalSubagentStatus,
+  jobOwnerType,
+  jobResultTarget,
+  resultTargetForRoute,
   type ActiveSubagentJobSnapshot,
   type CancelJobResult,
   type SteerJobResult,
@@ -55,7 +59,7 @@ import {
 } from "./slack-telemetry.js";
 import { TelegramGateway } from "./telegram.js";
 import { CapabilityDecision, CodexClient, StoredAction, SubagentBackendKind, SubagentJob, SubagentOwnerType, SubagentResultTarget, UserEvent } from "./types.js";
-import { makeId, nowIso } from "./util.js";
+import { compactText, inlineCode, makeId, nowIso } from "./util.js";
 
 export const INJECT_TELEGRAM_USER_ID = 253768951;
 const CODEX_UNAVAILABLE_MESSAGE = "⚠️ Codex is not available. Run 'codex login' on the server to authenticate.";
@@ -365,13 +369,13 @@ export class ServiceSupervisor {
       enqueueMain: (text, metadata) => this.enqueueSynthetic(text, metadata),
       sendAdmins: (text) => this.telegram.notifyOps(text),
       dispatchSubagent: async (input) => {
-        await this.subagents.dispatch({ ...input, ownerType: "loop", ownerId: input.ownerId, ownerRequestId: input.ownerRequestId, resultTarget: this.resultTargetForRoute(input.route) });
+        await this.subagents.dispatch({ ...input, ownerType: "loop", ownerId: input.ownerId, ownerRequestId: input.ownerRequestId, resultTarget: resultTargetForRoute(input.route) });
       }
     });
     this.monitors = new MonitorManager(config, this.state, logger, {
       enqueueMain: (text, metadata) => this.enqueueSynthetic(text, metadata),
       dispatchSubagent: async (input) => {
-        await this.subagents.dispatch({ ...input, ownerType: "monitor", ownerId: input.ownerId, ownerRequestId: input.ownerRequestId, resultTarget: this.resultTargetForRoute(input.route) });
+        await this.subagents.dispatch({ ...input, ownerType: "monitor", ownerId: input.ownerId, ownerRequestId: input.ownerRequestId, resultTarget: resultTargetForRoute(input.route) });
       },
       notifyAdmins: (text) => this.telegram.notifyOps(text)
     });
@@ -705,7 +709,7 @@ export class ServiceSupervisor {
     if (mode === "diarize" && await this.dispatchDiarizedAudioSubagent({
       source: "audio_ingest",
       event: userEvent,
-      summary: this.compactJobText(`Process diarized audio${metadata.title ? `: ${metadata.title}` : ""}`).slice(0, 160),
+      summary: compactText(`Process diarized audio${metadata.title ? `: ${metadata.title}` : ""}`).slice(0, 160),
       ownerRequestId: `audio-ingest-diarize:${event.result.ingestion_id}`,
       eventText: userEvent.text,
       dispatchNote: "Diarized audio ingestion is ready; processing speaker-labelled output in a subagent."
@@ -755,7 +759,7 @@ export class ServiceSupervisor {
     const requestSnippet = typeof event.metadata.telegramAudioRequestSnippet === "string" ? event.metadata.telegramAudioRequestSnippet : undefined;
     const summaryParts = ["Process diarized Telegram audio"];
     if (requestKind === "diarize") summaryParts.push("speaker request");
-    const summary = this.compactJobText(summaryParts.join(" — ")).slice(0, 160);
+    const summary = compactText(summaryParts.join(" — ")).slice(0, 160);
     const ownerRequestId = `telegram-diarize:${event.chatId ?? "no-chat"}:${event.messageId ?? event.receivedAt}`;
     const contextLines = [
       requestSource && requestKind ? `Detected Telegram ${requestSource} request: ${requestKind}` : "",
@@ -898,12 +902,12 @@ export class ServiceSupervisor {
       `ingestion_id: ${input.ingestionId}`,
       `authenticated_key_identity: ${input.keyIdentity}`,
       `transcription_mode: ${input.transcriptionMode ?? input.metadata.transcription_mode ?? "regular"}`,
-      input.metadata.source ? `source: ${this.compactJobText(input.metadata.source)}` : "",
-      input.metadata.device ? `device: ${this.compactJobText(input.metadata.device)}` : "",
-      input.metadata.title ? `title: ${this.compactJobText(input.metadata.title)}` : "",
-      input.metadata.recorded_at ? `recorded_at: ${this.compactJobText(input.metadata.recorded_at)}` : "",
-      input.metadata.client_request_id ? `client_request_id: ${this.compactJobText(input.metadata.client_request_id)}` : "",
-      input.metadata.notes ? `notes: ${this.compactJobText(input.metadata.notes)}` : "",
+      input.metadata.source ? `source: ${compactText(input.metadata.source)}` : "",
+      input.metadata.device ? `device: ${compactText(input.metadata.device)}` : "",
+      input.metadata.title ? `title: ${compactText(input.metadata.title)}` : "",
+      input.metadata.recorded_at ? `recorded_at: ${compactText(input.metadata.recorded_at)}` : "",
+      input.metadata.client_request_id ? `client_request_id: ${compactText(input.metadata.client_request_id)}` : "",
+      input.metadata.notes ? `notes: ${compactText(input.metadata.notes)}` : "",
       input.audioPath ? `audio_path: ${input.audioPath}` : ""
     ].filter(Boolean).join("\n");
     const prompt = input.metadata.prompt?.trim();
@@ -986,7 +990,7 @@ export class ServiceSupervisor {
     const running = all.filter((j) => j.status === "running");
     const cancelling = all.filter((j) => j.status === "cancelling");
     const queued = all.filter((j) => j.status === "queued");
-    const terminal = all.filter((j) => this.isTerminalSubagentStatus(j.status));
+    const terminal = all.filter((j) => isTerminalSubagentStatus(j.status));
     const completed = terminal.filter((j) => j.status === "completed");
     const failed = terminal.filter((j) => j.status === "failed");
     const cancelled = terminal.filter((j) => j.status === "cancelled");
@@ -1020,8 +1024,8 @@ export class ServiceSupervisor {
       running.forEach((j, index) => {
         const ref = this.formatJobCancelRef(j);
         const details = this.formatJobSummaryDetails(j);
-        details.push(`cancel: ${this.formatJobInlineCode(`agent kill ${ref}`)}`);
-        if (j.backend === "codex_app_server" || j.backend === "claude_agent_sdk") details.push(`steer: ${this.formatJobInlineCode(`agent steer ${ref} <text>`)}`);
+        details.push(`cancel: ${inlineCode(`agent kill ${ref}`)}`);
+        if (j.backend === "codex_app_server" || j.backend === "claude_agent_sdk") details.push(`steer: ${inlineCode(`agent steer ${ref} <text>`)}`);
         this.appendNumberedJobLines(lines, index + 1, ref, this.formatJobHeader(j, formatDurationSeconds(elapsedSec(j.startedAt))), details);
       });
     }
@@ -1032,7 +1036,7 @@ export class ServiceSupervisor {
         const ref = this.formatJobCancelRef(j);
         const requested = j.cancelRequestedAt ? `${formatDurationSeconds(elapsedSec(j.cancelRequestedAt))} ago` : "unknown";
         const details = this.formatJobSummaryDetails(j);
-        details.push(`reason: ${this.compactJobText(j.cancelReason ?? "user")}`);
+        details.push(`reason: ${compactText(j.cancelReason ?? "user")}`);
         if (j.termSentAt) details.push(`term sent: ${j.termSentAt}`);
         if (j.killSentAt) details.push(`kill sent: ${j.killSentAt}`);
         this.appendNumberedJobLines(lines, index + 1, ref, this.formatJobHeader(j, `requested ${requested}`), details);
@@ -1045,7 +1049,7 @@ export class ServiceSupervisor {
         const ref = this.formatJobCancelRef(j);
         const age = j.enqueuedAt ? formatDurationSeconds(elapsedSec(j.enqueuedAt)) : "unknown";
         const details = this.formatJobSummaryDetails(j);
-        details.push(`cancel: ${this.formatJobInlineCode(`agent kill ${ref}`)}`);
+        details.push(`cancel: ${inlineCode(`agent kill ${ref}`)}`);
         this.appendNumberedJobLines(lines, index + 1, ref, this.formatJobHeader(j, age), details);
       });
     }
@@ -1077,19 +1081,20 @@ export class ServiceSupervisor {
   }
 
   private appendNumberedJobLines(lines: string[], index: number, ref: string, header: string, details: string[]): void {
-    lines.push(`${index}. ${this.formatJobInlineCode(ref)} — ${this.compactJobText(header)}`);
+    lines.push(`${index}. ${inlineCode(ref)} — ${compactText(header)}`);
     for (const detail of details) {
-      const compact = detail.replace(/[\r\n]/g, " ").replace(/\s+/g, " ").trim();
+      // Details may legitimately contain inline code (cancel/steer hints).
+      const compact = compactText(detail, { keepBackticks: true });
       if (compact) lines.push(`   ${compact}`);
     }
   }
 
   private formatJobHeader(job: SubagentJob, duration: string): string {
-    return [job.profile, job.effort ?? "default", duration].map((part) => this.compactJobText(part)).filter(Boolean).join(" / ");
+    return [job.profile, job.effort ?? "default", duration].map((part) => compactText(part)).filter(Boolean).join(" / ");
   }
 
   private formatJobSummaryDetails(job: SubagentJob): string[] {
-    const summary = this.compactJobText(job.summary);
+    const summary = compactText(job.summary);
     const details = summary ? [summary] : [];
     const owner = this.formatJobOwnerDetails(job);
     if (owner) details.push(owner);
@@ -1097,42 +1102,26 @@ export class ServiceSupervisor {
   }
 
   private formatJobOwnerDetails(job: SubagentJob): string {
-    const ownerType = this.jobOwnerType(job);
-    const resultTarget = this.jobResultTarget(job);
+    const ownerType = jobOwnerType(job);
+    const resultTarget = jobResultTarget(job);
     const parts = [
-      `owner: ${ownerType}:${this.compactJobText(job.ownerId ?? ownerType)}`,
-      job.ownerRequestId ? `request: ${this.compactJobText(job.ownerRequestId)}` : "",
-      job.parentTurnId ? `parentTurn: ${this.compactJobText(job.parentTurnId)}` : "",
+      `owner: ${ownerType}:${compactText(job.ownerId ?? ownerType)}`,
+      job.ownerRequestId ? `request: ${compactText(job.ownerRequestId)}` : "",
+      job.parentTurnId ? `parentTurn: ${compactText(job.parentTurnId)}` : "",
       `result: ${resultTarget}`
     ].filter(Boolean);
-    if (ownerType === "main" && resultTarget === this.resultTargetForRoute(job.route) && !job.ownerRequestId && !job.parentTurnId) return "";
+    if (ownerType === "main" && resultTarget === resultTargetForRoute(job.route) && !job.ownerRequestId && !job.parentTurnId) return "";
     return parts.join(" ");
   }
 
   private formatJobCompactOwner(job: SubagentJob): string {
-    const ownerType = this.jobOwnerType(job);
-    const resultTarget = this.jobResultTarget(job);
-    if (ownerType === "main" && resultTarget === this.resultTargetForRoute(job.route) && !job.ownerRequestId && !job.parentTurnId) return "";
-    const parts = [`owner=${ownerType}:${this.compactJobText(job.ownerId ?? ownerType)}`, `result=${resultTarget}`];
-    if (job.ownerRequestId) parts.push(`request=${this.compactJobText(job.ownerRequestId)}`);
-    if (job.parentTurnId) parts.push(`parentTurn=${this.compactJobText(job.parentTurnId)}`);
+    const ownerType = jobOwnerType(job);
+    const resultTarget = jobResultTarget(job);
+    if (ownerType === "main" && resultTarget === resultTargetForRoute(job.route) && !job.ownerRequestId && !job.parentTurnId) return "";
+    const parts = [`owner=${ownerType}:${compactText(job.ownerId ?? ownerType)}`, `result=${resultTarget}`];
+    if (job.ownerRequestId) parts.push(`request=${compactText(job.ownerRequestId)}`);
+    if (job.parentTurnId) parts.push(`parentTurn=${compactText(job.parentTurnId)}`);
     return ` ${parts.join(" ")}`;
-  }
-
-  private jobOwnerType(job: SubagentJob): SubagentOwnerType {
-    return job.ownerType === "loop" || job.ownerType === "monitor" || job.ownerType === "employee" ? job.ownerType : "main";
-  }
-
-  private jobResultTarget(job: SubagentJob): SubagentResultTarget {
-    return job.resultTarget ?? this.resultTargetForRoute(job.route);
-  }
-
-  private formatJobInlineCode(text: string): string {
-    return `\`${this.compactJobText(text)}\``;
-  }
-
-  private compactJobText(value: unknown): string {
-    return String(value ?? "").replace(/[`\r\n]/g, " ").replace(/\s+/g, " ").trim();
   }
 
   private formatJobModelEffort(job: SubagentJob): string {
@@ -1155,21 +1144,8 @@ export class ServiceSupervisor {
     return Boolean(codexProfile?.trim() || modelProvider?.trim());
   }
 
-  private resultTargetForRoute(route: SubagentJob["route"]): SubagentResultTarget {
-    if (route === "send_to_user") return "user";
-    if (route === "send_to_admins") return "admins";
-    if (route === "store_only") return "store_only";
-    if (route === "silent") return "silent";
-    return "main";
-  }
-
-  private isTerminalSubagentStatus(status: SubagentJob["status"]): boolean {
-    return status === "completed" || status === "failed" || status === "cancelled" || status === "timed_out" || status === "abandoned";
-  }
-
   private formatJobCancelRef(job: SubagentJob): string {
-    const subagents = this.subagents as SubagentManager & { shortRef?: (id: string) => string };
-    return subagents.shortRef?.(job.id) ?? (job.id.startsWith("job_") ? job.id.slice(4, 12) : job.id.slice(0, 8));
+    return this.subagents.shortRef(job.id);
   }
 
   private formatJobDisplayId(job: SubagentJob): string {
@@ -1203,8 +1179,8 @@ export class ServiceSupervisor {
       `status: ${job.status}`,
       `profile: ${job.profile}`,
       `backend: ${backend}`,
-      `owner: ${this.jobOwnerType(job)}:${job.ownerId ?? this.jobOwnerType(job)}`,
-      `resultTarget: ${this.jobResultTarget(job)}`,
+      `owner: ${jobOwnerType(job)}:${job.ownerId ?? jobOwnerType(job)}`,
+      `resultTarget: ${jobResultTarget(job)}`,
       `steerable: ${steerable ? "yes" : "no"}`,
       `elapsed: ${elapsed}`,
       `pid: ${job.pid ?? "unknown"}`
@@ -1215,7 +1191,7 @@ export class ServiceSupervisor {
       lines.push(`model/effort/tier: ${job.model ?? "default"} / ${job.effort ?? "default"} / ${job.serviceTier ?? "default"}${modeText}`);
     }
     if (showProviderDetails) lines.push(`codex profile/provider: ${job.codexProfile || "default"} / ${job.modelProvider || "default"}`);
-    const summary = this.compactJobText(job.summary);
+    const summary = compactText(job.summary);
     if (summary) lines.push(`summary: ${summary}`);
     if (job.ownerRequestId) lines.push(`ownerRequestId: ${job.ownerRequestId}`);
     if (job.parentTurnId) lines.push(`parentTurnId: ${job.parentTurnId}`);
@@ -1734,12 +1710,12 @@ export class ServiceSupervisor {
       : job.status === "cancelled" ? "cancelled" : "failed";
     const icon = job.status === "cancelled" ? "ℹ️" : "⚠️";
     const lines = [
-      `${icon} Subagent ${label}: ${this.compactJobText(job.profile)} (${this.formatJobDisplayId(job)})`,
+      `${icon} Subagent ${label}: ${compactText(job.profile)} (${this.formatJobDisplayId(job)})`,
       `job: ${job.id}`
     ];
-    if (job.summary) lines.push(`task: ${this.truncateSubagentNotice(this.compactJobText(job.summary), 240)}`);
-    if (job.error) lines.push(`error: ${this.truncateSubagentNotice(this.compactJobText(job.error), 320)}`);
-    if (job.cancelReason && job.status !== "failed") lines.push(`reason: ${this.compactJobText(job.cancelReason)}`);
+    if (job.summary) lines.push(`task: ${this.truncateSubagentNotice(compactText(job.summary), 240)}`);
+    if (job.error) lines.push(`error: ${this.truncateSubagentNotice(compactText(job.error), 320)}`);
+    if (job.cancelReason && job.status !== "failed") lines.push(`reason: ${compactText(job.cancelReason)}`);
     if (job.exitCode !== undefined || job.signal !== undefined) {
       lines.push(`exit: ${job.exitCode ?? "null"} signal: ${job.signal ?? "null"}`);
     }
@@ -2685,8 +2661,8 @@ export class ServiceSupervisor {
     parts.push(`child_jobs=${childJobs.active}/${childJobs.total}`);
     if (childJobs.refs.length) parts.push(`child_refs=${JSON.stringify(childJobs.refs.join(","))}`);
     if (employee.pendingChildResults) parts.push(`pending_child_results=${employee.pendingChildResults}`);
-    if (employee.description) parts.push(`purpose=${JSON.stringify(this.compactSnapshotText(employee.description))}`);
-    if (employee.lastError) parts.push(`lastError=${JSON.stringify(this.compactSnapshotText(employee.lastError, 100))}`);
+    if (employee.description) parts.push(`purpose=${JSON.stringify(compactText(employee.description, { maxLength: 160, keepBackticks: true }))}`);
+    if (employee.lastError) parts.push(`lastError=${JSON.stringify(compactText(employee.lastError, { maxLength: 100, keepBackticks: true }))}`);
     return `- ${parts.join(" ")}`;
   }
 
@@ -2723,13 +2699,8 @@ export class ServiceSupervisor {
     if (job.parentTurnId) parts.push(`parent_turn_id=${job.parentTurnId}`);
     if (job.conversationSessionId) parts.push(`conversation_session_id=${job.conversationSessionId}`);
     if (job.correlationId) parts.push(`correlation_id=${job.correlationId}`);
-    if (job.summary) parts.push(`summary=${JSON.stringify(this.compactSnapshotText(job.summary))}`);
+    if (job.summary) parts.push(`summary=${JSON.stringify(compactText(job.summary, { maxLength: 160, keepBackticks: true }))}`);
     return `- ${parts.join(" ")}`;
-  }
-
-  private compactSnapshotText(text: string, maxLength = 160): string {
-    const compact = text.replace(/\s+/g, " ").trim();
-    return compact.length > maxLength ? `${compact.slice(0, maxLength - 3)}...` : compact;
   }
 
   private requireChat(chatId?: number): number {

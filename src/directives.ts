@@ -131,12 +131,12 @@ export interface DirectiveParseResult {
   errors: string[];
 }
 
-interface TextRange {
+export interface TextRange {
   start: number;
   end: number;
 }
 
-interface RawDirectiveBlock extends TextRange {
+export interface FencedBlock extends TextRange {
   body: string;
   complete: boolean;
 }
@@ -146,12 +146,12 @@ interface SourceLine extends TextRange {
 }
 
 const directiveStart = /^[ \t]*```codex-chat[ \t]*$/;
-const directiveEnd = /^[ \t]*```[ \t]*$/;
+const fenceEnd = /^[ \t]*```[ \t]*$/;
 
 export function parseDirectives(text: string): DirectiveParseResult {
   const blocks: DirectiveBlock[] = [];
   const errors: string[] = [];
-  const rawBlocks = collectDirectiveBlocks(text);
+  const rawBlocks = collectFencedBlocks(text, directiveStart);
   for (const rawBlock of rawBlocks) {
     if (!rawBlock.complete) {
       errors.push("Unterminated codex-chat directive block");
@@ -174,19 +174,24 @@ export function parseDirectives(text: string): DirectiveParseResult {
   return { cleanText, blocks, errors };
 }
 
-function collectDirectiveBlocks(text: string): RawDirectiveBlock[] {
-  const blocks: RawDirectiveBlock[] = [];
+/**
+ * Collect fenced blocks whose opening line matches `startPattern` and whose
+ * closing line is a bare ``` fence. An unterminated block runs to the end of
+ * the text with `complete: false`.
+ */
+export function collectFencedBlocks(text: string, startPattern: RegExp): FencedBlock[] {
+  const blocks: FencedBlock[] = [];
   const lines = collectLines(text);
   for (let i = 0; i < lines.length; i++) {
     const startLine = lines[i];
-    if (!startLine || !directiveStart.test(startLine.content)) continue;
+    if (!startLine || !startPattern.test(startLine.content)) continue;
     const bodyStart = startLine.end;
     let endLine: SourceLine | undefined;
     let endLineIndex = i;
     for (let j = i + 1; j < lines.length; j++) {
       const candidate = lines[j];
       if (!candidate) continue;
-      if (directiveEnd.test(candidate.content)) {
+      if (fenceEnd.test(candidate.content)) {
         endLine = candidate;
         endLineIndex = j;
         break;
@@ -215,7 +220,7 @@ function collectLines(text: string): SourceLine[] {
   return lines;
 }
 
-function stripRanges(text: string, ranges: TextRange[]): string {
+export function stripRanges(text: string, ranges: TextRange[]): string {
   if (ranges.length === 0) return text;
   let result = "";
   let cursor = 0;

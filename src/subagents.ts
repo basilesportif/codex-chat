@@ -14,7 +14,7 @@ import {
   CodexExecChildAgentBackend,
   StartedChildAgent
 } from "./subagent-backends.js";
-import { ensureDir, makeId, nowIso, pathExists } from "./util.js";
+import { ensureDir, makeId, normalizeRef, nowIso, pathExists } from "./util.js";
 
 const SIGKILL_GRACE_MS = 5_000;
 const MAX_QUEUE_DEPTH = 200;
@@ -181,6 +181,32 @@ export function isClaudeModelSlug(model: string | undefined): boolean {
 const ACTIVE_JOB_STATUSES = new Set<SubagentJob["status"]>(["queued", "running", "cancelling"]);
 const TERMINAL_JOB_STATUSES = new Set<SubagentJob["status"]>(["completed", "failed", "cancelled", "timed_out", "abandoned"]);
 
+/** True when a job status is terminal (completed/failed/cancelled/timed_out/abandoned). */
+export function isTerminalSubagentStatus(status: SubagentJob["status"]): boolean {
+  return TERMINAL_JOB_STATUSES.has(status);
+}
+
+export function normalizeSubagentOwnerType(value: unknown): SubagentOwnerType {
+  if (value === "loop" || value === "monitor" || value === "employee") return value;
+  return "main";
+}
+
+export function jobOwnerType(job: SubagentJob): SubagentOwnerType {
+  return normalizeSubagentOwnerType(job.ownerType);
+}
+
+export function resultTargetForRoute(route: Route): SubagentResultTarget {
+  if (route === "send_to_user") return "user";
+  if (route === "send_to_admins") return "admins";
+  if (route === "store_only") return "store_only";
+  if (route === "silent") return "silent";
+  return "main";
+}
+
+export function jobResultTarget(job: SubagentJob): SubagentResultTarget {
+  return job.resultTarget ?? resultTargetForRoute(job.route);
+}
+
 export class SubagentManager {
   private queue: DispatchInput[] = [];
   private running = new Map<string, RunningJob>();
@@ -234,7 +260,7 @@ export class SubagentManager {
       correlationId: origin?.correlationId,
       originTarget: origin?.originTarget,
       defaultOutputTarget: origin?.defaultOutputTarget,
-      resultTarget: this.resultTargetForRoute(action.route),
+      resultTarget: resultTargetForRoute(action.route),
       timeoutSec: action.timeoutSec,
       backend: action.backend,
       model: action.model,
@@ -267,11 +293,11 @@ export class SubagentManager {
     input.id = makeId("job");
     const artifactDir = resolveConfigPath(this.config, join(this.config.subagents.artifactDir, input.id));
     const { backend: backendKind, explicit: backendExplicit } = this.resolveDispatchBackend(input);
-    const modelSpec = this.resolveSubagentModelSpec(input, undefined, backendKind);
+    const modelSpec = this.resolveSubagentModelSpec(input, backendKind);
     const { model, effort, serviceTier, serviceTierMode, codexProfile, modelProvider } = modelSpec;
-    const ownerType = this.normalizeOwnerType(input.ownerType);
+    const ownerType = normalizeSubagentOwnerType(input.ownerType);
     const ownerId = input.ownerId ?? this.defaultOwnerId(ownerType);
-    const resultTarget = input.resultTarget ?? this.resultTargetForRoute(input.route);
+    const resultTarget = input.resultTarget ?? resultTargetForRoute(input.route);
     const queuedJob: SubagentJob = {
       id: input.id,
       profile: input.profile,
@@ -313,7 +339,7 @@ export class SubagentManager {
   }
 
   listJobsForOwner(ownerType: SubagentOwnerType, ownerId: string): SubagentJob[] {
-    return this.listJobs().filter((job) => this.jobOwnerType(job) === ownerType && job.ownerId === ownerId);
+    return this.listJobs().filter((job) => jobOwnerType(job) === ownerType && job.ownerId === ownerId);
   }
 
   async cancelActiveJobsForOwner(ownerType: SubagentOwnerType, ownerId: string, reason: string): Promise<CancelJobResult[]> {
@@ -340,8 +366,9 @@ export class SubagentManager {
 
   /**
    * Bulk-add jobs to the in-memory map.
-   * Designed for future disk hydration: callers can load persisted jobs on
-   * startup and inject them here without touching the dispatch/drain path.
+   * Test-only seeding helper today (no production callers). Designed for
+   * future disk hydration: callers can load persisted jobs on startup and
+   * inject them here without touching the dispatch/drain path.
    */
   addJobs(jobs: SubagentJob[]): void {
     for (const job of jobs) {
@@ -405,7 +432,7 @@ export class SubagentManager {
 
 
   resolveJobRef(ref: string): JobRefResolution {
-    const normalized = this.normalizeJobRef(ref);
+    const normalized = normalizeRef(ref);
     const jobs = [...this.jobs.values()];
     const exact = jobs.find((job) => job.id.toLowerCase() === normalized.toLowerCase());
     if (exact) return { status: "matched", ref, job: exact };
@@ -532,11 +559,6 @@ export class SubagentManager {
     };
   }
 
-  async cancel(jobId: string): Promise<boolean> {
-    const result = await this.requestCancel(jobId);
-    return result.status === "success";
-  }
-
   async steerJob(ref: string, text: string, options: { actor?: SubagentControlActor } = {}): Promise<SteerJobResult> {
     const steeringText = text.trim();
     const resolution = this.resolveJobRef(ref);
@@ -654,10 +676,16 @@ export class SubagentManager {
 
   private async startJob(input: DispatchInput): Promise<void> {
     const id = input.id ?? makeId("job");
-    const artifactDir = resolveConfigPath(this.config, join(this.config.subagents.artifactDir, id));
+    // dispatch() creates and persists the queued job (with backend, model
+    // spec, owner and routing fields all resolved) before queueing it, so the
+    // tracked job is the source of truth; startJob only applies the fields
+    // that transition on start.
+    const job = this.jobs.get(id);
+    if (!job) throw new Error(`Subagent job ${id} was queued but is not tracked; refusing to start.`);
+    const artifactDir = job.artifactDir;
     await ensureDir(artifactDir);
-    const promptPath = join(artifactDir, "prompt.md");
-    const profileContents = await this.behavior.readSubagentProfile(input.profile);
+    const promptPath = job.promptPath;
+    const profileContents = await this.behavior.readSubagentProfile(job.profile);
     const assembledPrompt = [
       profileContents.trim(),
       "",
@@ -681,81 +709,32 @@ export class SubagentManager {
     const stderrPath = join(artifactDir, "stderr.log");
     const appServerLogPath = join(artifactDir, "app-server.log");
     const timeoutSec = Math.min(input.timeoutSec ?? this.config.subagents.defaultTimeoutSec, this.config.subagents.maxTimeoutSec);
-    const backendKind = this.backendForJob(id, input.backend);
-    const modelSpec = this.resolveSubagentModelSpec(input, this.jobs.get(id), backendKind);
-    const { model, effort, serviceTier, serviceTierMode, codexProfile, modelProvider } = modelSpec;
-    const ownerType = this.normalizeOwnerType(input.ownerType ?? this.jobs.get(id)?.ownerType);
-    const ownerId = input.ownerId ?? this.jobs.get(id)?.ownerId ?? this.defaultOwnerId(ownerType);
-    const resultTarget = input.resultTarget ?? this.jobs.get(id)?.resultTarget ?? this.resultTargetForRoute(input.route);
+    // dispatch() stamped the backend and model spec on the queued job;
+    // setBackendOverride may have re-stamped backend on non-explicit jobs.
+    const backendKind = this.normalizeBackend(job.backend ?? this.effectiveBackend());
+    const model = job.model ?? "";
+    const effort = job.effort ?? this.resolveEffort();
+    const serviceTier = job.serviceTier ?? this.resolveServiceTier();
+    const serviceTierMode = job.serviceTierMode ?? this.resolveServiceTierMode(undefined, job.modelProvider);
+    const codexProfile = job.codexProfile ?? "";
+    const modelProvider = job.modelProvider ?? "";
     // A cancel may have landed while the awaits above (ensureDir, profile
     // read, prompt write) were in flight. Starting anyway would overwrite the
     // terminal status below and run a job the user was told was cancelled.
-    const preStartStatus = this.jobs.get(id)?.status;
-    if (preStartStatus && preStartStatus !== "queued") {
+    if (job.status !== "queued") {
       this.logger.info(
-        { component: "subagents", event: "start_aborted", jobId: id, status: preStartStatus },
+        { component: "subagents", event: "start_aborted", jobId: id, status: job.status },
         "subagent start aborted; job left queued state during startup"
       );
       return;
     }
-    const job: SubagentJob = this.jobs.get(id) ?? {
-      id,
-      profile: input.profile,
-      route: input.route,
-      ownerType,
-      ownerId,
-      ownerRequestId: input.ownerRequestId,
-      parentTurnId: input.parentTurnId,
-      conversationSessionId: input.conversationSessionId,
-      correlationId: input.correlationId,
-      originTarget: input.originTarget,
-      defaultOutputTarget: input.defaultOutputTarget,
-      resultTarget,
-      status: "queued",
-      promptPath,
-      artifactDir,
-      model,
-      effort,
-      serviceTier,
-      serviceTierMode,
-      codexProfile,
-      modelProvider,
-      backend: backendKind,
-      backendExplicit: input.backend ? true : undefined,
-      summary: input.summary,
-      enqueuedAt: nowIso(),
-      originChatId: input.originChatId,
-      originMessageId: input.originMessageId
-    };
     Object.assign(job, {
-      profile: input.profile,
-      route: input.route,
-      ownerType,
-      ownerId,
-      ownerRequestId: input.ownerRequestId ?? job.ownerRequestId,
-      parentTurnId: input.parentTurnId ?? job.parentTurnId,
-      conversationSessionId: input.conversationSessionId ?? job.conversationSessionId,
-      correlationId: input.correlationId ?? job.correlationId,
-      originTarget: input.originTarget ?? job.originTarget,
-      defaultOutputTarget: input.defaultOutputTarget ?? job.defaultOutputTarget,
-      resultTarget,
       status: "running" as const,
-      promptPath,
-      artifactDir,
       startedAt: nowIso(),
       lastMessagePath,
-      model,
-      effort,
-      serviceTier,
-      serviceTierMode,
-      codexProfile,
-      modelProvider,
-      backend: backendKind,
-      summary: input.summary,
-      originChatId: input.originChatId,
-      originMessageId: input.originMessageId
+      promptPath,
+      artifactDir
     });
-    this.jobs.set(id, job);
     await this.state.saveJob(job);
     await appendFile(stdoutPath, `${JSON.stringify({
       event: "subagent_launch_config",
@@ -772,9 +751,12 @@ export class SubagentManager {
     // Same hazard for the awaits just above (saveJob, launch-config append):
     // a cancel seeing status="running" with no running-map entry takes the
     // abandoned fallback — don't launch a child for a job already terminal.
-    if (job.status !== "running") {
+    // (Re-read defeats TS narrowing: a concurrent cancel mutates the shared
+    // job object during the awaits.)
+    const statusBeforeLaunch = job.status as SubagentJob["status"];
+    if (statusBeforeLaunch !== "running") {
       this.logger.info(
-        { component: "subagents", event: "start_aborted", jobId: id, status: job.status },
+        { component: "subagents", event: "start_aborted", jobId: id, status: statusBeforeLaunch },
         "subagent start aborted before backend launch; job reached terminal state during startup"
       );
       return;
@@ -867,13 +849,13 @@ export class SubagentManager {
   private async deliverTerminalResult(job: SubagentJob, result: string): Promise<void> {
     try {
       if (!["completed", "failed", "cancelled", "timed_out"].includes(job.status)) return;
-      const target = this.jobResultTarget(job);
+      const target = jobResultTarget(job);
       if (target === "main") await this.callbacks.onReturnToMain(job, result);
       if (target === "user") await this.callbacks.onSendToUser(job, result);
       if (target === "employee") await this.callbacks.onReturnToEmployee?.(job, result);
       if (target === "admins") await this.callbacks.onSendToAdmins?.(job, result);
     } catch (error) {
-      this.logger.error({ component: "subagents", event: "callback_failed", jobId: job.id, route: job.route, resultTarget: this.jobResultTarget(job), error }, "subagent result delivery failed");
+      this.logger.error({ component: "subagents", event: "callback_failed", jobId: job.id, route: job.route, resultTarget: jobResultTarget(job), error }, "subagent result delivery failed");
     }
   }
 
@@ -932,13 +914,13 @@ export class SubagentManager {
       serviceTierMode: job.serviceTierMode,
       codexProfile: job.codexProfile,
       modelProvider: job.modelProvider,
-      ownerType: this.jobOwnerType(job),
+      ownerType: jobOwnerType(job),
       ownerId: job.ownerId,
       ownerRequestId: job.ownerRequestId,
       parentTurnId: job.parentTurnId,
       conversationSessionId: job.conversationSessionId,
       correlationId: job.correlationId,
-      resultTarget: this.jobResultTarget(job)
+      resultTarget: jobResultTarget(job)
     };
   }
 
@@ -950,10 +932,6 @@ export class SubagentManager {
     return this.running.get(job.id)?.child.isAlive() === true;
   }
 
-
-  private normalizeJobRef(ref: string): string {
-    return ref.trim().replace(/^[[(<]+/, "").replace(/[\])>.,;:]+$/, "");
-  }
 
   private candidatesFor(jobs: SubagentJob[]): JobRefCandidate[] {
     return jobs.map((job) => ({
@@ -1007,7 +985,7 @@ export class SubagentManager {
     return modelProvider || this.config.subagents.defaultModelProvider || this.config.codex.modelProvider || "";
   }
 
-  private resolveSubagentModelSpec(input: Pick<DispatchInput, "model" | "effort" | "serviceTier" | "serviceTierMode" | "codexProfile" | "modelProvider">, existing?: SubagentJob, backendKind?: SubagentBackendKind): { model: string; effort: string; serviceTier: ServiceTier; serviceTierMode: ServiceTierMode; codexProfile: string; modelProvider: string } {
+  private resolveSubagentModelSpec(input: Pick<DispatchInput, "model" | "effort" | "serviceTier" | "serviceTierMode" | "codexProfile" | "modelProvider">, backendKind?: SubagentBackendKind): { model: string; effort: string; serviceTier: ServiceTier; serviceTierMode: ServiceTierMode; codexProfile: string; modelProvider: string } {
     if (backendKind === "claude_agent_sdk") {
       // Codex provider machinery does not apply to Claude-backed jobs.
       if (input.codexProfile) throw new Error("Subagent codexProfile is not supported with backend=claude_agent_sdk; omit it for Claude-backed dispatches.");
@@ -1015,20 +993,20 @@ export class SubagentManager {
       return {
         // Empty model lets the Claude Agent SDK use its default model instead
         // of inheriting a Codex model slug from config.
-        model: input.model || existing?.model || "",
-        effort: input.effort || existing?.effort || this.resolveEffort(),
-        serviceTier: input.serviceTier ?? existing?.serviceTier ?? this.resolveServiceTier(),
-        serviceTierMode: this.resolveServiceTierMode(input.serviceTierMode ?? existing?.serviceTierMode, ""),
+        model: input.model || "",
+        effort: input.effort || this.resolveEffort(),
+        serviceTier: input.serviceTier ?? this.resolveServiceTier(),
+        serviceTierMode: this.resolveServiceTierMode(input.serviceTierMode, ""),
         codexProfile: "",
         modelProvider: ""
       };
     }
-    const resolvedModel = input.model || existing?.model || this.resolveModel();
+    const resolvedModel = input.model || this.resolveModel();
     if (isClaudeModelSlug(resolvedModel)) {
       throw new Error(`Subagent model '${resolvedModel}' is a Claude model and cannot run on backend=${backendKind ?? this.effectiveBackend()}; dispatch with backend=claude_agent_sdk.`);
     }
-    const defaultCodexProfile = existing?.codexProfile || this.config.subagents.defaultCodexProfile || this.config.codex.profile || "";
-    const defaultModelProvider = existing?.modelProvider || this.config.subagents.defaultModelProvider || this.config.codex.modelProvider || "";
+    const defaultCodexProfile = this.config.subagents.defaultCodexProfile || this.config.codex.profile || "";
+    const defaultModelProvider = this.config.subagents.defaultModelProvider || this.config.codex.modelProvider || "";
     const codexProfile = input.codexProfile || defaultCodexProfile;
     const modelProvider = input.modelProvider || defaultModelProvider;
 
@@ -1037,9 +1015,9 @@ export class SubagentManager {
 
     return {
       model: resolvedModel,
-      effort: input.effort || existing?.effort || this.resolveEffort(),
-      serviceTier: input.serviceTier ?? existing?.serviceTier ?? this.resolveServiceTier(),
-      serviceTierMode: this.resolveServiceTierMode(input.serviceTierMode ?? existing?.serviceTierMode, modelProvider),
+      effort: input.effort || this.resolveEffort(),
+      serviceTier: input.serviceTier ?? this.resolveServiceTier(),
+      serviceTierMode: this.resolveServiceTierMode(input.serviceTierMode, modelProvider),
       codexProfile,
       modelProvider
     };
@@ -1056,11 +1034,6 @@ export class SubagentManager {
 
   private effectiveBackend(): SubagentBackendKind {
     return this.backendOverride ?? this.configuredBackend();
-  }
-
-  private backendForJob(id: string, requested?: SubagentBackendKind): SubagentBackendKind {
-    const existing = this.jobs.get(id)?.backend;
-    return this.normalizeBackend(existing ?? requested ?? this.effectiveBackend());
   }
 
   /**
@@ -1099,29 +1072,8 @@ export class SubagentManager {
     return kind === "codex_app_server" || kind === "claude_agent_sdk" ? this.config.subagents.childInterruptGraceMs ?? SIGKILL_GRACE_MS : SIGKILL_GRACE_MS;
   }
 
-  private normalizeOwnerType(value: unknown): SubagentOwnerType {
-    if (value === "loop" || value === "monitor" || value === "employee") return value;
-    return "main";
-  }
-
   private defaultOwnerId(ownerType: SubagentOwnerType): string {
     return ownerType;
-  }
-
-  private resultTargetForRoute(route: Route): SubagentResultTarget {
-    if (route === "send_to_user") return "user";
-    if (route === "send_to_admins") return "admins";
-    if (route === "store_only") return "store_only";
-    if (route === "silent") return "silent";
-    return "main";
-  }
-
-  private jobOwnerType(job: SubagentJob): SubagentOwnerType {
-    return this.normalizeOwnerType(job.ownerType);
-  }
-
-  private jobResultTarget(job: SubagentJob): SubagentResultTarget {
-    return job.resultTarget ?? this.resultTargetForRoute(job.route);
   }
 
   private authorizeJobControl(job: SubagentJob, actor?: SubagentControlActor): { allowed: true } | { allowed: false; message: string } {
@@ -1129,14 +1081,14 @@ export class SubagentManager {
       return { allowed: true };
     }
     if (actor.ownerType === "employee") {
-      const ownerType = this.jobOwnerType(job);
+      const ownerType = jobOwnerType(job);
       if (ownerType === "employee" && job.ownerId === actor.ownerId) return { allowed: true };
       return {
         allowed: false,
         message: `Employee ${actor.ownerId ?? "unknown"} cannot control subagent job ${job.id}; owner=${ownerType}:${job.ownerId ?? this.defaultOwnerId(ownerType)}.`
       };
     }
-    const ownerType = this.jobOwnerType(job);
+    const ownerType = jobOwnerType(job);
     if (ownerType === actor.ownerType && job.ownerId === actor.ownerId) return { allowed: true };
     return {
       allowed: false,

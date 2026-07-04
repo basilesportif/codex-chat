@@ -208,6 +208,50 @@ export function collectFencedBlocks(text: string, startPattern: RegExp): FencedB
   return blocks;
 }
 
+/**
+ * Incremental scanner over a streamed text buffer that reports when a newly
+ * appended chunk could have completed a fenced block — i.e. when a new line
+ * matching the bare ``` close fence appears (either as a completed line or as
+ * the still-open final line of the buffer, since `collectFencedBlocks` treats
+ * a trailing bare ``` without a newline as a close fence too).
+ *
+ * Callers use this to avoid re-running `parseDirectives` over the entire
+ * accumulated output on every delta: a full re-parse is only needed when
+ * `append` returns true. Triggers are a superset of actual block completions
+ * (extra re-parses are harmless; missed ones are not).
+ */
+export class FenceCloseScanner {
+  private pendingLine = "";
+  private completeFenceLines = 0;
+  private parsedFenceLines = 0;
+  private pendingLineCounted = false;
+
+  /** Feed the next appended chunk; returns true when the buffer should be re-parsed. */
+  append(text: string): boolean {
+    const parts = (this.pendingLine + text).split(/\r\n|\n|\r/);
+    const pendingLineConsumed = parts.length > 1;
+    this.pendingLine = parts.pop() ?? "";
+    for (const line of parts) {
+      if (fenceEnd.test(line)) this.completeFenceLines++;
+    }
+    if (pendingLineConsumed) this.pendingLineCounted = false;
+    let shouldReparse = false;
+    if (this.completeFenceLines > this.parsedFenceLines) {
+      this.parsedFenceLines = this.completeFenceLines;
+      shouldReparse = true;
+    }
+    if (fenceEnd.test(this.pendingLine)) {
+      if (!this.pendingLineCounted) {
+        this.pendingLineCounted = true;
+        shouldReparse = true;
+      }
+    } else {
+      this.pendingLineCounted = false;
+    }
+    return shouldReparse;
+  }
+}
+
 function collectLines(text: string): SourceLine[] {
   const lines: SourceLine[] = [];
   const linePattern = /[^\r\n]*(?:\r\n|\n|\r|$)/g;

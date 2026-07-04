@@ -18,7 +18,7 @@ import {
   waitForTurnDrain
 } from "./deploy.js";
 import { loadCodexProfileConfig } from "./codex-profiles.js";
-import { DirectiveAction, parseDirectives } from "./directives.js";
+import { DirectiveAction, DirectiveParseResult, FenceCloseScanner, parseDirectives } from "./directives.js";
 import { claudeFastModeSupported } from "./subagent-backends.js";
 import { EmployeeManager, parseEmployeeCommand, type EmployeeCommand } from "./employees.js";
 import { FileStore } from "./file-store.js";
@@ -1439,44 +1439,13 @@ export class ServiceSupervisor {
     await this.state.writeJson(`turns/${turnId}.json`, { id: turnId, status: "running", input: event, runContext, startedAt: nowIso() });
     try {
       await this.removePersistedQueuedEvent(event);
-      let output = "";
-      let hadError = false;
-      let errorMessage = "";
-      let errorRaw: unknown;
       let userFacingDelivered = false;
       // Track which directive actions have already been pre-executed during
       // streaming so the final pass can skip only those actions.
       const preExecutedActions = new Set<string>();
+      let stream: Awaited<ReturnType<ServiceSupervisor["consumeCodexStream"]>>;
       try {
-        for await (const codexEvent of this.codex.sendTurn({ text: prompt, attachments: event.attachments, source: event.source, turnId })) {
-          if (this.isStaleTurnToken(turnToken)) return;
-          if (codexEvent.type === "delta") {
-            output += codexEvent.text;
-            // Incremental directive execution: scan for newly-complete fences
-            // and fire streaming-safe actions immediately (fire-and-forget)
-            // so react(👀) fires the moment the fence closes rather than
-            // waiting for the full turn to complete. User-facing actions wait
-            // for the final pass so malformed or incomplete directive output
-            // can be parsed consistently before anything is sent.
-            const parsed = parseDirectives(output);
-            parsed.blocks.forEach((block, blockIndex) => {
-              block.actions.forEach((action, actionIndex) => {
-                const actionKey = this.directiveActionKey(action, blockIndex, actionIndex);
-                if (!preExecutedActions.has(actionKey) && this.shouldPreExecuteDirective(action)) {
-                  preExecutedActions.add(actionKey);
-                  void this.executeDirective(action, event, { parentTurnId: turnId });
-                }
-              });
-            });
-          }
-          if (codexEvent.type === "final" && codexEvent.text.trim()) output = codexEvent.text;
-          if (codexEvent.type === "error") {
-            hadError = true;
-            errorMessage = codexEvent.message ?? "unknown error";
-            errorRaw = codexEvent.raw;
-            this.logger.error({ component: "codex", event: "turn_event_error", turnId, detail: codexEvent.message });
-          }
-        }
+        stream = await this.consumeCodexStream(event, turnId, turnToken, prompt, preExecutedActions);
       } catch (error) {
         if (this.isStaleTurnToken(turnToken)) return;
         this.logger.error({ component: "codex", event: "turn_unavailable", turnId, error }, "Codex turn failed");
@@ -1491,6 +1460,8 @@ export class ServiceSupervisor {
         }
         return;
       }
+      if (stream.stale) return;
+      const { output, hadError, errorMessage, errorRaw } = stream;
       if (hadError && !output.trim()) {
         const brief = errorMessage.split("\n")[0].slice(0, 100);
         await this.resetMainCodexSessionAfterTerminalError(errorMessage, errorRaw);
@@ -1507,34 +1478,9 @@ export class ServiceSupervisor {
         await this.sendTextToOutputTarget(event.outputTarget, parsed.cleanText);
         userFacingDelivered = true;
       }
-      // Final pass: execute any directive actions that were NOT already
-      // pre-executed during streaming. The idempotency key system is an
-      // additional safety net against double-fires.
-      for (let blockIndex = 0; blockIndex < parsed.blocks.length; blockIndex++) {
-        const block = parsed.blocks[blockIndex]!;
-        for (let actionIndex = 0; actionIndex < block.actions.length; actionIndex++) {
-          if (this.isStaleTurnToken(turnToken)) return;
-          const action = block.actions[actionIndex]!;
-          const actionKey = this.directiveActionKey(action, blockIndex, actionIndex);
-          if (preExecutedActions.has(actionKey)) continue;
-          const nextAction = block.actions[actionIndex + 1];
-          const nextActionKey = nextAction ? this.directiveActionKey(nextAction, blockIndex, actionIndex + 1) : undefined;
-          if (action.type === "dispatch_subagent" && nextAction && nextActionKey && !preExecutedActions.has(nextActionKey)) {
-            const mergedAckText = this.dispatchFollowupAckText(nextAction, event);
-            if (mergedAckText) {
-              const status = await this.executeDirective(action, event, { dispatchStatusText: this.formatDispatchSummary(action, mergedAckText), parentTurnId: turnId });
-              if (this.isUserFacingSendDirective(action) && status === "completed") userFacingDelivered = true;
-              if (status !== "failed") {
-                await this.skipDirective(nextAction, "merged_dispatch_ack");
-                actionIndex++;
-              }
-              continue;
-            }
-          }
-          const status = await this.executeDirective(action, event, { parentTurnId: turnId });
-          if (this.isUserFacingSendDirective(action) && status === "completed") userFacingDelivered = true;
-        }
-      }
+      const finalPass = await this.executePendingDirectives(parsed, preExecutedActions, event, turnId, turnToken);
+      if (finalPass.userFacingDelivered) userFacingDelivered = true;
+      if (finalPass.stale) return;
       for (const error of parsed.errors) {
         if (this.isStaleTurnToken(turnToken)) return;
         void this.enqueueSynthetic(`The previous assistant output contained an invalid codex-chat directive: ${error}`, { source: "system", turnId });
@@ -1551,6 +1497,103 @@ export class ServiceSupervisor {
     } finally {
       await this.removePersistedQueuedEvent(event);
     }
+  }
+
+  /**
+   * Drive the Codex stream for one turn, accumulating output and pre-executing
+   * streaming-safe directive actions as their fences close. Returns
+   * `stale: true` when the turn token went stale mid-stream (caller must bail
+   * without touching turn state). Iterator errors propagate to the caller.
+   */
+  private async consumeCodexStream(
+    event: UserEvent,
+    turnId: string,
+    turnToken: number,
+    prompt: string,
+    preExecutedActions: Set<string>
+  ): Promise<{ stale: boolean; output: string; hadError: boolean; errorMessage: string; errorRaw: unknown }> {
+    let output = "";
+    let hadError = false;
+    let errorMessage = "";
+    let errorRaw: unknown;
+    // Only re-run parseDirectives when the appended chunk could have completed
+    // a fenced block; re-parsing the whole accumulated output on every delta
+    // is quadratic in turn length.
+    const fenceScanner = new FenceCloseScanner();
+    for await (const codexEvent of this.codex.sendTurn({ text: prompt, attachments: event.attachments, source: event.source, turnId })) {
+      if (this.isStaleTurnToken(turnToken)) return { stale: true, output, hadError, errorMessage, errorRaw };
+      if (codexEvent.type === "delta") {
+        output += codexEvent.text;
+        // Incremental directive execution: scan for newly-complete fences
+        // and fire streaming-safe actions immediately (fire-and-forget)
+        // so react(👀) fires the moment the fence closes rather than
+        // waiting for the full turn to complete. User-facing actions wait
+        // for the final pass so malformed or incomplete directive output
+        // can be parsed consistently before anything is sent.
+        if (fenceScanner.append(codexEvent.text)) {
+          const parsed = parseDirectives(output);
+          parsed.blocks.forEach((block, blockIndex) => {
+            block.actions.forEach((action, actionIndex) => {
+              const actionKey = this.directiveActionKey(action, blockIndex, actionIndex);
+              if (!preExecutedActions.has(actionKey) && this.shouldPreExecuteDirective(action)) {
+                preExecutedActions.add(actionKey);
+                void this.executeDirective(action, event, { parentTurnId: turnId });
+              }
+            });
+          });
+        }
+      }
+      if (codexEvent.type === "final" && codexEvent.text.trim()) output = codexEvent.text;
+      if (codexEvent.type === "error") {
+        hadError = true;
+        errorMessage = codexEvent.message ?? "unknown error";
+        errorRaw = codexEvent.raw;
+        this.logger.error({ component: "codex", event: "turn_event_error", turnId, detail: codexEvent.message });
+      }
+    }
+    return { stale: false, output, hadError, errorMessage, errorRaw };
+  }
+
+  /**
+   * Final pass: execute any directive actions that were NOT already
+   * pre-executed during streaming. The idempotency key system is an
+   * additional safety net against double-fires. Returns `stale: true` when
+   * the turn token went stale mid-pass (caller must bail immediately).
+   */
+  private async executePendingDirectives(
+    parsed: DirectiveParseResult,
+    preExecutedActions: Set<string>,
+    event: UserEvent,
+    turnId: string,
+    turnToken: number
+  ): Promise<{ stale: boolean; userFacingDelivered: boolean }> {
+    let userFacingDelivered = false;
+    for (let blockIndex = 0; blockIndex < parsed.blocks.length; blockIndex++) {
+      const block = parsed.blocks[blockIndex]!;
+      for (let actionIndex = 0; actionIndex < block.actions.length; actionIndex++) {
+        if (this.isStaleTurnToken(turnToken)) return { stale: true, userFacingDelivered };
+        const action = block.actions[actionIndex]!;
+        const actionKey = this.directiveActionKey(action, blockIndex, actionIndex);
+        if (preExecutedActions.has(actionKey)) continue;
+        const nextAction = block.actions[actionIndex + 1];
+        const nextActionKey = nextAction ? this.directiveActionKey(nextAction, blockIndex, actionIndex + 1) : undefined;
+        if (action.type === "dispatch_subagent" && nextAction && nextActionKey && !preExecutedActions.has(nextActionKey)) {
+          const mergedAckText = this.dispatchFollowupAckText(nextAction, event);
+          if (mergedAckText) {
+            const status = await this.executeDirective(action, event, { dispatchStatusText: this.formatDispatchSummary(action, mergedAckText), parentTurnId: turnId });
+            if (this.isUserFacingSendDirective(action) && status === "completed") userFacingDelivered = true;
+            if (status !== "failed") {
+              await this.skipDirective(nextAction, "merged_dispatch_ack");
+              actionIndex++;
+            }
+            continue;
+          }
+        }
+        const status = await this.executeDirective(action, event, { parentTurnId: turnId });
+        if (this.isUserFacingSendDirective(action) && status === "completed") userFacingDelivered = true;
+      }
+    }
+    return { stale: false, userFacingDelivered };
   }
 
   private dispatchFollowupAckText(action: DirectiveAction, origin: UserEvent): string | undefined {

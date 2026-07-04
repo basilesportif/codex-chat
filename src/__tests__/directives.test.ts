@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { parseDirectives } from "../directives.js";
+import { FenceCloseScanner, parseDirectives } from "../directives.js";
 
 describe("directive parsing", () => {
   test("accepts a valid codex-chat fenced directive block", () => {
@@ -279,5 +279,40 @@ describe("react directive", () => {
 \`\`\``);
     expect(parsed.blocks).toHaveLength(0);
     expect(parsed.errors.length).toBeGreaterThan(0);
+  });
+});
+
+describe("FenceCloseScanner", () => {
+  test("triggers when a close fence completes as a full line", () => {
+    const scanner = new FenceCloseScanner();
+    expect(scanner.append("```codex-chat\n")).toBe(false);
+    expect(scanner.append('{"version":1}\n')).toBe(false);
+    expect(scanner.append("```\n")).toBe(true);
+    expect(scanner.append("more prose\n")).toBe(false);
+  });
+
+  test("triggers on a trailing close fence without a newline (matches parseDirectives semantics)", () => {
+    const scanner = new FenceCloseScanner();
+    expect(scanner.append("```codex-chat\n{}\n``")).toBe(false);
+    expect(scanner.append("`")).toBe(true);
+    // Same pending fence should not retrigger without new fence evidence.
+    expect(scanner.append("")).toBe(false);
+  });
+
+  test("a transient pending-fence match does not suppress a later real fence", () => {
+    const scanner = new FenceCloseScanner();
+    expect(scanner.append("```")).toBe(true);
+    // Pending line extends into a non-fence line: no new completion.
+    expect(scanner.append("codex-chat\n")).toBe(false);
+    expect(scanner.append('{"version":1}\n')).toBe(false);
+    expect(scanner.append("```\n")).toBe(true);
+  });
+
+  test("counts multiple fences across one chunk and handles split CRLF", () => {
+    const scanner = new FenceCloseScanner();
+    expect(scanner.append("```codex-chat\n{}\n```\nmid\n```codex-chat\n{}\n```\n")).toBe(true);
+    expect(scanner.append("tail\r")).toBe(false);
+    expect(scanner.append("\n```\r")).toBe(true);
+    expect(scanner.append("\n")).toBe(false);
   });
 });

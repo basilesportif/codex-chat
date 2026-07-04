@@ -97,9 +97,11 @@ reloadOnSighup = true
 
 [subagents]
 enabled = true
-# Production-safe default. Use Telegram command `agent backend app-server` or
-# set this to "codex_app_server" only after testing; recover with
-# `agent backend exec`.
+# Production-safe DEFAULT backend for new subagent jobs. A dispatch_subagent
+# directive may override it per job with `backend` ("codex_exec",
+# "codex_app_server", "claude_agent_sdk"; aliases "exec", "app-server",
+# "claude"). Use Telegram command `agent backend app-server` or set this to
+# "codex_app_server" only after testing; recover with `agent backend exec`.
 backend = "codex_exec"
 maxConcurrent = 5
 defaultModel = ""

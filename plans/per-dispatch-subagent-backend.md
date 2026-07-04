@@ -15,11 +15,11 @@ Backend selection is global-only: `effectiveBackend() = backendOverride ?? confi
 
 ## Implementation phases
 
-- [ ] Phase 1 — Directive schema + DispatchInput plumbing.
-- [ ] Phase 2 — Backend-aware validation/sanitization.
-- [ ] Phase 3 — Main-loop routing rules in `behavior/AGENTS.md`.
-- [ ] Phase 4 — Tests for mixed-backend dispatch.
-- [ ] Phase 5 — Docs (README, `docs/claude-agent-sdk-subagents.md`) + example config.
+- [x] Phase 1 — Directive schema + DispatchInput plumbing.
+- [x] Phase 2 — Backend-aware validation/sanitization.
+- [x] Phase 3 — Main-loop routing rules in `behavior/AGENTS.md`.
+- [x] Phase 4 — Tests for mixed-backend dispatch.
+- [x] Phase 5 — Docs (README, `docs/claude-agent-sdk-subagents.md`) + example config.
 
 ### Phase 1 — Schema and plumbing
 

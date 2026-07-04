@@ -1144,24 +1144,31 @@ export class ServiceSupervisor {
 
   private formatDispatchSummary(action: DispatchSubagentAction, followupText?: string): string {
     const summary = action.summary ?? action.prompt.split("\n").find((line) => line.trim())?.trim().slice(0, 160) ?? action.profile;
-    const model = action.model || this.subagents.resolveModel(action.model);
+    const isClaudeBackend = action.backend === "claude_agent_sdk";
+    const model = action.model || (isClaudeBackend ? "sdk-default" : this.subagents.resolveModel(action.model));
     const effort = action.effort || this.subagents.resolveEffort(action.effort);
     const tier = action.serviceTier || this.subagents.resolveServiceTier(action.serviceTier);
     const provider = action.modelProvider || this.subagents.resolveModelProvider(action.modelProvider);
     const codexProfile = action.codexProfile || this.subagents.resolveCodexProfile(action.codexProfile);
     const tierMode = this.subagents.resolveServiceTierMode(action.serviceTierMode, provider);
-    const showProviderDetails = this.shouldShowSubagentProviderDetails(codexProfile, provider);
+    const showProviderDetails = !isClaudeBackend && this.shouldShowSubagentProviderDetails(codexProfile, provider);
+    const backendText = action.backend ? ` · backend ${action.backend}` : "";
     const providerText = showProviderDetails ? [
       codexProfile ? `profile ${codexProfile}` : "",
       provider ? `provider ${provider}` : "",
       `tierMode ${tierMode}`
     ].filter(Boolean).join(" · ") : "";
-    const lines = [`Sub: ${summary}`, `${action.profile} · ${model} · ${effort} · ${tier}${providerText ? ` · ${providerText}` : ""}`];
+    const lines = [`Sub: ${summary}`, `${action.profile} · ${model} · ${effort} · ${tier}${backendText}${providerText ? ` · ${providerText}` : ""}`];
     if (followupText) lines.push("", followupText);
     return lines.join("\n");
   }
 
   private async sanitizeSubagentProviderOverride(action: DispatchSubagentAction, origin: UserEvent): Promise<{ action: DispatchSubagentAction; changed: boolean }> {
+    // An explicit per-dispatch Claude backend is self-authorizing: its model
+    // slug is a Claude ID, not a Codex provider override, so the Codex
+    // provider sanitizer must not rewrite it. SubagentManager rejects
+    // codexProfile/modelProvider on Claude-routed dispatches.
+    if (action.backend === "claude_agent_sdk") return { action, changed: false };
     const providerModelCandidates = await this.subagentProviderModelCandidates(action);
     const hasProviderSpecificModel = this.isProviderSpecificSubagentModel(action.model, providerModelCandidates);
     if (!this.hasSubagentProviderOverride(action, hasProviderSpecificModel)) return { action, changed: false };

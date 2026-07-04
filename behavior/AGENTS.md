@@ -289,7 +289,7 @@ For any reasoning, investigation, repo inspection, code or docs editing, code re
 
 Provider overrides are opt-in only. For normal subagents, do not include `codexProfile`, `modelProvider`, or `serviceTierMode`, and use the OpenAI/Codex model rubric below. If Tim explicitly asks for an OpenRouter/non-OpenAI/provider-specific subagent, include `codexProfile: "openrouter"`, `modelProvider: "openrouter"`, and `serviceTierMode: "omit"`. If Tim gives an exact model slug, put that slug in `model`; otherwise set `model: "gpt-5.5"` and the service will replace it with the configured OpenRouter model from `$CODEX_HOME/openrouter.config.toml`.
 
-Claude Agent SDK backend is opt-in and OAuth-only. Use it only when Tim explicitly asks for Claude/Claude Code/Claude Agent SDK or the service/backend status already indicates `claude_agent_sdk`. For Claude-backed dispatches, do not include Codex provider fields. Set `model` to a full Claude model ID for reproducibility: `claude-opus-4-8` for Opus 4.8, `claude-fable-5` for Fable 5, `claude-sonnet-5` for Sonnet 5, or `claude-haiku-4-5-20251001` (alias `claude-haiku-4-5`) for Haiku 4.5. Claude Code aliases include `opus`, `fable`, `sonnet`, `haiku`, and `best`, but aliases can change over time; prefer full IDs in directives. Effort `low|medium|high|xhigh` maps to Claude SDK effort; avoid `none`/`minimal` with `claude-fable-5` because Fable 5 has always-on adaptive thinking. `serviceTier` has no Claude equivalent; still include it for codex-chat observability, defaulting to `"fast"` unless Tim explicitly asks otherwise.
+Claude Agent SDK backend is opt-in, OAuth-only, and selected **per dispatch**. When Tim says "use Claude", "Claude SDK", "Claude Code", "Opus", "Fable", "Sonnet", "Haiku", or names a Claude model, include `backend: "claude_agent_sdk"` in that `dispatch_subagent` directive. That routes only that job to Claude; do not change the runtime backend with `agent backend claude` for a single job (the runtime override remains an admin canary/recovery tool). Jobs without a `backend` field keep using the configured default backend. For Claude-backed dispatches, do not include Codex provider fields (`codexProfile`, `modelProvider`, `serviceTierMode`); the service rejects them. Set `model` to a full Claude model ID for reproducibility: `claude-opus-4-8` for Opus 4.8, `claude-fable-5` for Fable 5, `claude-sonnet-5` for Sonnet 5, or `claude-haiku-4-5-20251001` (alias `claude-haiku-4-5`) for Haiku 4.5. Claude Code aliases include `opus`, `fable`, `sonnet`, `haiku`, and `best`, but aliases can change over time; prefer full IDs in directives. Effort `low|medium|high|xhigh` maps to Claude SDK effort; avoid `none`/`minimal` with `claude-fable-5` because Fable 5 has always-on adaptive thinking. `serviceTier` has no Claude equivalent; still include it for codex-chat observability, defaulting to `"fast"` unless Tim explicitly asks otherwise.
 
 ### Tim-owned repo publish/merge policy
 
@@ -321,6 +321,23 @@ Subagent directive shape:
   "summary": "Short user-visible task summary",
   "prompt": "Detailed subagent task",
   "model": "gpt-5.5",
+  "effort": "medium",
+  "serviceTier": "fast"
+}
+~~~
+
+Claude-backed subagent directive shape (only when Tim asks for Claude/Opus/Fable/etc.):
+
+~~~json
+{
+  "type": "dispatch_subagent",
+  "idempotencyKey": "stable-key",
+  "profile": "researcher",
+  "route": "return_to_main",
+  "summary": "Short user-visible task summary",
+  "prompt": "Detailed subagent task",
+  "backend": "claude_agent_sdk",
+  "model": "claude-opus-4-8",
   "effort": "medium",
   "serviceTier": "fast"
 }
@@ -400,6 +417,7 @@ Rules:
 - The block must be valid JSON.
 - Every side-effecting action needs an `idempotencyKey`.
 - `dispatch_subagent` actions must include `summary`, `model`, `effort`, and `serviceTier`; use `serviceTier: "fast"` by default and reserve `"standard"` for Tim's explicit standard/slow/deep request or an explicit config/workspace override.
+- `dispatch_subagent` accepts an optional `backend` field (`"codex_exec"`, `"codex_app_server"`, `"claude_agent_sdk"`; aliases `"exec"`, `"app-server"`, `"claude"` are normalized). Omit it for normal jobs; include `backend: "claude_agent_sdk"` when Tim asks for a Claude-backed subagent.
 - Keep normal user-facing text outside directive blocks.
 - Do not include secrets in directives.
 - Use local paths for `send_image` and `send_document`.
@@ -439,6 +457,7 @@ The following commands are intercepted by the service **before** they reach Code
 | `agent backend` | Show configured, runtime override, and effective subagent backend. |
 | `agent backend exec` | Recovery command: force new and queued subagents back to the safe `codex_exec` backend. |
 | `agent backend app-server` | Opt in new and queued subagents to the app-server child backend. |
+| `agent backend claude` | Opt in new and queued subagents to the Claude Agent SDK backend (canary/default flip; per-job routing uses the directive `backend` field instead). |
 | `agent backend config` | Clear the runtime override and use the configured backend. |
 | `help` | List all service-level commands. |
 | `update` / `deploy` | Pull latest and restart the service. |

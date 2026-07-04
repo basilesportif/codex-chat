@@ -46,6 +46,46 @@ After`);
   });
 
 
+  test.each([
+    ["claude_agent_sdk", "claude_agent_sdk"],
+    ["claude", "claude_agent_sdk"],
+    ["claude_code", "claude_agent_sdk"],
+    ["claude-agent-sdk", "claude_agent_sdk"],
+    ["exec", "codex_exec"],
+    ["codex_exec", "codex_exec"],
+    ["app-server", "codex_app_server"],
+    ["app_server", "codex_app_server"],
+    ["codex_app_server", "codex_app_server"]
+  ])("dispatch_subagent backend %s normalizes to %s", (alias, canonical) => {
+    const parsed = parseDirectives(`\`\`\`codex-chat
+{"version":1,"actions":[{"type":"dispatch_subagent","idempotencyKey":"job-backend","profile":"debugger","prompt":"Inspect","route":"return_to_main","summary":"Inspect","model":"claude-opus-4-8","effort":"medium","serviceTier":"fast","backend":"${alias}"}]}
+\`\`\``);
+
+    expect(parsed.errors).toEqual([]);
+    const action = parsed.blocks[0]?.actions[0];
+    expect(action?.type).toBe("dispatch_subagent");
+    if (action?.type === "dispatch_subagent") expect(action.backend).toBe(canonical);
+  });
+
+  test("dispatch_subagent backend is optional and defaults to undefined", () => {
+    const parsed = parseDirectives(`\`\`\`codex-chat
+{"version":1,"actions":[{"type":"dispatch_subagent","idempotencyKey":"job-no-backend","profile":"debugger","prompt":"Inspect","route":"return_to_main","summary":"Inspect","model":"gpt-5.5","effort":"medium","serviceTier":"fast"}]}
+\`\`\``);
+
+    expect(parsed.errors).toEqual([]);
+    const action = parsed.blocks[0]?.actions[0];
+    if (action?.type === "dispatch_subagent") expect(action.backend).toBeUndefined();
+  });
+
+  test("rejects unknown dispatch_subagent backend values", () => {
+    const parsed = parseDirectives(`\`\`\`codex-chat
+{"version":1,"actions":[{"type":"dispatch_subagent","idempotencyKey":"job-bad-backend","profile":"debugger","prompt":"Inspect","route":"return_to_main","summary":"Inspect","model":"gpt-5.5","effort":"medium","serviceTier":"fast","backend":"gemini"}]}
+\`\`\``);
+
+    expect(parsed.blocks).toHaveLength(0);
+    expect(parsed.errors).toHaveLength(1);
+  });
+
   test("rejects invalid dispatch_subagent serviceTier", () => {
     const parsed = parseDirectives(`\`\`\`codex-chat
 {"version":1,"actions":[{"type":"dispatch_subagent","idempotencyKey":"job-fast-bad","profile":"debugger","prompt":"Inspect","route":"return_to_main","summary":"Inspect","model":"gpt-5.5","effort":"medium","serviceTier":"priority"}]}

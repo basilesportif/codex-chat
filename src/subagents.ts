@@ -48,6 +48,7 @@ interface DispatchInput {
   defaultOutputTarget?: OutputTarget;
   resultTarget?: SubagentResultTarget;
   timeoutSec?: number;
+  backend?: SubagentBackendKind;
   model?: string;
   effort?: string;
   serviceTier?: ServiceTier;
@@ -226,6 +227,7 @@ export class SubagentManager {
       defaultOutputTarget: origin?.defaultOutputTarget,
       resultTarget: this.resultTargetForRoute(action.route),
       timeoutSec: action.timeoutSec,
+      backend: action.backend,
       model: action.model,
       effort: action.effort,
       serviceTier: action.serviceTier,
@@ -255,7 +257,8 @@ export class SubagentManager {
     }
     input.id = makeId("job");
     const artifactDir = resolveConfigPath(this.config, join(this.config.subagents.artifactDir, input.id));
-    const modelSpec = this.resolveSubagentModelSpec(input);
+    const backendKind = this.normalizeBackend(input.backend ?? this.effectiveBackend());
+    const modelSpec = this.resolveSubagentModelSpec(input, undefined, backendKind);
     const { model, effort, serviceTier, serviceTierMode, codexProfile, modelProvider } = modelSpec;
     const ownerType = this.normalizeOwnerType(input.ownerType);
     const ownerId = input.ownerId ?? this.defaultOwnerId(ownerType);
@@ -282,7 +285,8 @@ export class SubagentManager {
       serviceTierMode,
       codexProfile,
       modelProvider,
-      backend: this.effectiveBackend(),
+      backend: backendKind,
+      backendExplicit: input.backend ? true : undefined,
       summary: input.summary,
       enqueuedAt: nowIso(),
       originChatId: input.originChatId,
@@ -378,6 +382,9 @@ export class SubagentManager {
       if (!input.id) continue;
       const job = this.jobs.get(input.id);
       if (!job || job.status !== "queued") continue;
+      // Jobs that explicitly requested a backend in their dispatch directive
+      // keep it; the runtime override only re-stamps default-routed jobs.
+      if (job.backendExplicit) continue;
       job.backend = queuedBackend;
       await this.state.saveJob(job);
     }
@@ -660,9 +667,9 @@ export class SubagentManager {
     const stderrPath = join(artifactDir, "stderr.log");
     const appServerLogPath = join(artifactDir, "app-server.log");
     const timeoutSec = Math.min(input.timeoutSec ?? this.config.subagents.defaultTimeoutSec, this.config.subagents.maxTimeoutSec);
-    const modelSpec = this.resolveSubagentModelSpec(input, this.jobs.get(id));
+    const backendKind = this.backendForJob(id, input.backend);
+    const modelSpec = this.resolveSubagentModelSpec(input, this.jobs.get(id), backendKind);
     const { model, effort, serviceTier, serviceTierMode, codexProfile, modelProvider } = modelSpec;
-    const backendKind = this.backendForJob(id);
     const ownerType = this.normalizeOwnerType(input.ownerType ?? this.jobs.get(id)?.ownerType);
     const ownerId = input.ownerId ?? this.jobs.get(id)?.ownerId ?? this.defaultOwnerId(ownerType);
     const resultTarget = input.resultTarget ?? this.jobs.get(id)?.resultTarget ?? this.resultTargetForRoute(input.route);
@@ -689,6 +696,7 @@ export class SubagentManager {
       codexProfile,
       modelProvider,
       backend: backendKind,
+      backendExplicit: input.backend ? true : undefined,
       summary: input.summary,
       enqueuedAt: nowIso(),
       originChatId: input.originChatId,
@@ -949,7 +957,22 @@ export class SubagentManager {
     return modelProvider || this.config.subagents.defaultModelProvider || this.config.codex.modelProvider || "";
   }
 
-  private resolveSubagentModelSpec(input: Pick<DispatchInput, "model" | "effort" | "serviceTier" | "serviceTierMode" | "codexProfile" | "modelProvider">, existing?: SubagentJob): { model: string; effort: string; serviceTier: ServiceTier; serviceTierMode: ServiceTierMode; codexProfile: string; modelProvider: string } {
+  private resolveSubagentModelSpec(input: Pick<DispatchInput, "model" | "effort" | "serviceTier" | "serviceTierMode" | "codexProfile" | "modelProvider">, existing?: SubagentJob, backendKind?: SubagentBackendKind): { model: string; effort: string; serviceTier: ServiceTier; serviceTierMode: ServiceTierMode; codexProfile: string; modelProvider: string } {
+    if (backendKind === "claude_agent_sdk") {
+      // Codex provider machinery does not apply to Claude-backed jobs.
+      if (input.codexProfile) throw new Error("Subagent codexProfile is not supported with backend=claude_agent_sdk; omit it for Claude-backed dispatches.");
+      if (input.modelProvider) throw new Error("Subagent modelProvider is not supported with backend=claude_agent_sdk; omit it for Claude-backed dispatches.");
+      return {
+        // Empty model lets the Claude Agent SDK use its default model instead
+        // of inheriting a Codex model slug from config.
+        model: input.model || existing?.model || "",
+        effort: input.effort || existing?.effort || this.resolveEffort(),
+        serviceTier: input.serviceTier ?? existing?.serviceTier ?? this.resolveServiceTier(),
+        serviceTierMode: this.resolveServiceTierMode(input.serviceTierMode ?? existing?.serviceTierMode, ""),
+        codexProfile: "",
+        modelProvider: ""
+      };
+    }
     const defaultCodexProfile = existing?.codexProfile || this.config.subagents.defaultCodexProfile || this.config.codex.profile || "";
     const defaultModelProvider = existing?.modelProvider || this.config.subagents.defaultModelProvider || this.config.codex.modelProvider || "";
     const codexProfile = input.codexProfile || defaultCodexProfile;
@@ -981,9 +1004,9 @@ export class SubagentManager {
     return this.backendOverride ?? this.configuredBackend();
   }
 
-  private backendForJob(id: string): SubagentBackendKind {
+  private backendForJob(id: string, requested?: SubagentBackendKind): SubagentBackendKind {
     const existing = this.jobs.get(id)?.backend;
-    return this.normalizeBackend(existing ?? this.effectiveBackend());
+    return this.normalizeBackend(existing ?? requested ?? this.effectiveBackend());
   }
 
   private normalizeBackend(value: unknown): SubagentBackendKind {

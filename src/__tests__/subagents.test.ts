@@ -786,6 +786,114 @@ describe("subagents", () => {
     expect(manager.listJobs()[0]).toMatchObject({ id: queuedId, backend: "claude_agent_sdk", status: "queued" });
   });
 
+  test("per-dispatch backend routes one job to Claude without flipping the runtime default", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
+    tempDirs.push(root);
+    const { SubagentManager } = await import("../subagents.js");
+    const config = makeConfig(root, 2);
+    config.subagents.backend = "codex_app_server";
+    const appServerBackend = fakeBackend("codex_app_server", { activeTurnId: "turn_1", alive: true });
+    const claudeBackend = fakeBackend("claude_agent_sdk", { activeTurnId: "claude-agent-sdk-stream", alive: true });
+    const manager = new SubagentManager(
+      config,
+      { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") } as never,
+      { saveJob: vi.fn().mockResolvedValue(undefined) } as never,
+      fakeLogger() as never,
+      { onReturnToMain: vi.fn(), onSendToUser: vi.fn() },
+      { codex_app_server: appServerBackend, claude_agent_sdk: claudeBackend }
+    );
+
+    const defaultId = await manager.dispatch({ profile: "x", prompt: "codex work", route: "return_to_main" });
+    const claudeId = await manager.dispatch({
+      profile: "x",
+      prompt: "claude work",
+      route: "return_to_main",
+      backend: "claude_agent_sdk",
+      model: "claude-opus-4-8"
+    });
+    await waitFor(() => appServerBackend.starts.length === 1 && claudeBackend.starts.length === 1);
+
+    // Both jobs run concurrently, each on its own backend.
+    expect(manager.listJobs().find((job) => job.id === defaultId)).toMatchObject({
+      backend: "codex_app_server",
+      status: "running"
+    });
+    expect(manager.listJobs().find((job) => job.id === claudeId)).toMatchObject({
+      backend: "claude_agent_sdk",
+      backendExplicit: true,
+      model: "claude-opus-4-8",
+      codexProfile: "",
+      modelProvider: "",
+      status: "running"
+    });
+    // The runtime default is untouched by the per-dispatch backend.
+    expect(manager.backendStatus()).toMatchObject({ configured: "codex_app_server", effective: "codex_app_server" });
+
+    // Steering routes to the backend each job actually uses.
+    await expect(manager.steerJob(claudeId, "steer claude")).resolves.toMatchObject({ status: "success" });
+    expect(claudeBackend.steer).toHaveBeenCalledWith(claudeId, "steer claude");
+    await expect(manager.steerJob(defaultId, "steer codex")).resolves.toMatchObject({ status: "success" });
+    expect(appServerBackend.steer).toHaveBeenCalledWith(defaultId, "steer codex");
+    expect(claudeBackend.steer).toHaveBeenCalledTimes(1);
+  });
+
+  test("runtime override re-stamps queued default jobs but keeps explicitly routed backends", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
+    tempDirs.push(root);
+    const { SubagentManager } = await import("../subagents.js");
+    const config = makeConfig(root, 0);
+    config.subagents.backend = "codex_app_server";
+    const state = {
+      saveJob: vi.fn().mockResolvedValue(undefined),
+      setSubagentBackendOverride: vi.fn().mockResolvedValue(undefined)
+    };
+    const manager = new SubagentManager(
+      config,
+      { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") } as never,
+      state as never,
+      fakeLogger() as never,
+      { onReturnToMain: vi.fn(), onSendToUser: vi.fn() }
+    );
+
+    const defaultId = await manager.dispatch({ profile: "x", prompt: "default", route: "return_to_main" });
+    const claudeId = await manager.dispatch({ profile: "x", prompt: "claude", route: "return_to_main", backend: "claude_agent_sdk" });
+
+    await manager.setBackendOverride("codex_exec", "test");
+
+    expect(manager.listJobs().find((job) => job.id === defaultId)).toMatchObject({ backend: "codex_exec", status: "queued" });
+    expect(manager.listJobs().find((job) => job.id === claudeId)).toMatchObject({ backend: "claude_agent_sdk", backendExplicit: true, status: "queued" });
+  });
+
+  test("rejects Codex provider fields on Claude-routed dispatches", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
+    tempDirs.push(root);
+    const { SubagentManager } = await import("../subagents.js");
+    const config = makeConfig(root, 0);
+    config.subagents.allowProviderOverride = true;
+    const manager = new SubagentManager(
+      config,
+      { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") } as never,
+      { saveJob: vi.fn().mockResolvedValue(undefined) } as never,
+      fakeLogger() as never,
+      { onReturnToMain: vi.fn(), onSendToUser: vi.fn() }
+    );
+
+    await expect(manager.dispatch({
+      profile: "x",
+      prompt: "claude",
+      route: "return_to_main",
+      backend: "claude_agent_sdk",
+      codexProfile: "openrouter"
+    })).rejects.toThrow(/codexProfile is not supported with backend=claude_agent_sdk/);
+    await expect(manager.dispatch({
+      profile: "x",
+      prompt: "claude",
+      route: "return_to_main",
+      backend: "claude_agent_sdk",
+      modelProvider: "openrouter"
+    })).rejects.toThrow(/modelProvider is not supported with backend=claude_agent_sdk/);
+  });
+
   test("Claude jobs are steerable only while active and alive", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
     tempDirs.push(root);

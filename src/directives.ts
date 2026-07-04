@@ -4,6 +4,28 @@ const routeSchema = z.enum(["return_to_main", "send_to_user", "send_progress_and
 const serviceTierSchema = z.enum(["standard", "fast"]);
 const serviceTierModeSchema = z.enum(["auto", "always", "omit"]);
 
+const SUBAGENT_BACKEND_ALIASES = {
+  codex_exec: "codex_exec",
+  exec: "codex_exec",
+  codex_app_server: "codex_app_server",
+  "app-server": "codex_app_server",
+  app_server: "codex_app_server",
+  claude_agent_sdk: "claude_agent_sdk",
+  claude: "claude_agent_sdk",
+  claude_code: "claude_agent_sdk",
+  "claude-agent-sdk": "claude_agent_sdk"
+} as const;
+
+export type SubagentBackendAlias = keyof typeof SUBAGENT_BACKEND_ALIASES;
+
+export function normalizeSubagentBackendAlias(value: SubagentBackendAlias): (typeof SUBAGENT_BACKEND_ALIASES)[SubagentBackendAlias] {
+  return SUBAGENT_BACKEND_ALIASES[value];
+}
+
+const subagentBackendAliasSchema = z
+  .enum(Object.keys(SUBAGENT_BACKEND_ALIASES) as [SubagentBackendAlias, ...SubagentBackendAlias[]])
+  .transform(normalizeSubagentBackendAlias);
+
 const baseAction = z.object({
   type: z.string(),
   idempotencyKey: z.string().min(1).optional()
@@ -46,6 +68,7 @@ const dispatchSubagentAction = baseAction.extend({
   model: z.string().min(1),
   effort: z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]),
   serviceTier: serviceTierSchema,
+  backend: subagentBackendAliasSchema.optional(),
   codexProfile: z.string().min(1).optional(),
   modelProvider: z.string().min(1).optional(),
   serviceTierMode: serviceTierModeSchema.optional(),

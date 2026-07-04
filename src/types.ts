@@ -330,6 +330,8 @@ export interface SubagentJob {
   originChatId?: number;
   originMessageId?: number;
   backend?: SubagentBackendKind;
+  /** True when the dispatch directive explicitly requested this backend; runtime override re-stamping skips these jobs. */
+  backendExplicit?: boolean;
   backendThreadId?: string;
   activeTurnId?: string;
   socketPath?: string;

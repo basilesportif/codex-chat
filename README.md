@@ -187,7 +187,15 @@ set, and next/last run when available.
 
 ## Subagent Backend Flag
 
-`subagents.backend` controls new subagent jobs:
+`subagents.backend` sets the **default** backend for new subagent jobs. A
+`dispatch_subagent` directive may also carry an optional per-job `backend`
+field (`"codex_exec"`, `"codex_app_server"`, `"claude_agent_sdk"`; aliases
+`"exec"`, `"app-server"`, `"claude"` are normalized) that routes only that job,
+without changing the configured default or the runtime override. Explicitly
+routed queued jobs keep their backend even when an admin flips the runtime
+override. This is the primary way to run a single Claude-backed job.
+
+Backend kinds:
 
 - `codex_exec` is the production-safe default and preserves the historical
   `codex exec` child behavior.
@@ -209,7 +217,9 @@ and queued subagents use `codex_exec` even if config still says
 `codex_app_server` or `claude_agent_sdk`. Use `agent backend app-server` or
 `agent backend claude` to opt new/queued jobs into those backends. `agent
 backend` shows configured, override, and effective backend. `agent backend
-config` clears the runtime override.
+config` clears the runtime override. The override is a fleet-wide
+canary/recovery lever; targeted single jobs should use the per-dispatch
+`backend` field instead.
 
 Running jobs are not changed by the backend command. Use `agent kill <ref>` for
 any already-running bad child job, then dispatch again after rollback.

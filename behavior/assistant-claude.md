@@ -1,35 +1,32 @@
 # Assistant Skills
 
-The assistant-agent-logic repo will be cloned at `/home/tim/pkg/tim/assistant-agent-logic` (see docs/ASSISTANT_INTEGRATION_PLAN.md for setup). The workspace data lives at `/home/tim/.assistant-claude/workspace/`.
+The assistant-agent-logic repo is cloned at `/home/tim/pkg/tim/assistant-agent-logic`. The workspace data lives at `/home/tim/.assistant-claude/workspace/`.
 
-Scripts require env vars from `/home/tim/.assistant-claude/workspace/.env`. Always prefix script runs with:
+**The skill docs in that repo are the source of truth** for every capability: which script to run, its flags, and the required workflow. Do not run scripts from memory or from this file alone — read the relevant skill doc first (see the list below), then run exactly what it documents.
+
+Some scripts require env vars from `/home/tim/.assistant-claude/workspace/.env`. Load them in a subshell scoped to the single command — do not export the secrets file into your long-lived shell:
 
 ```bash
-set -a && source /home/tim/.assistant-claude/workspace/.env && set +a
+( set -a && source /home/tim/.assistant-claude/workspace/.env && set +a && node /home/tim/pkg/tim/assistant-agent-logic/scripts/<script>.js ... )
 ```
 
-## Available Scripts
+## Capabilities → skill docs
 
-Run these with `node <path>` from any directory:
+Run scripts with `node <absolute path>` from any directory. Script names and flags below are examples — the skill doc for each area lists the full, current set:
 
-- **Todos**: `node /home/tim/pkg/tim/assistant-agent-logic/scripts/todo-list.js` — list todos; `scripts/todo-add.js`, `scripts/todo-complete.js`
-- **Reminders**: `node /home/tim/pkg/tim/assistant-agent-logic/scripts/reminder-check.js` — check due reminders; `scripts/reminder-add.js`
-- **Calendar**: `node /home/tim/pkg/tim/assistant-agent-logic/scripts/calendar-today.js` — today's events; `scripts/calendar-week.js`
-- **Email**: `node /home/tim/pkg/tim/assistant-agent-logic/scripts/email-actionable.js` — actionable emails across providers
-- **CRM**: data at `~/.assistant-claude/workspace/data/crm.json`; read and write directly via JSON
-- **Betting**: data at `~/.assistant-claude/workspace/data/bets.json`; read and write directly via JSON
-- **Finance**: `node /home/tim/pkg/tim/assistant-agent-logic/scripts/finance-balances.js`
-- **Whoop**: `node /home/tim/pkg/tim/assistant-agent-logic/scripts/whoop-today.js`
+- **Todos** — `config/skills/todo.md` (e.g. `scripts/todo-list.js`, `scripts/todo-add.js`, `scripts/todo-delete.js`)
+- **Reminders** — `config/skills/reminders.md` (e.g. `scripts/reminder-check.js`, `scripts/reminder-add.js`)
+- **Calendar & Email** — `config/skills/composio.md` (e.g. `scripts/calendar-events.js`, `scripts/calendar-search.js`, `scripts/email-actionable.js`)
+- **CRM** — `config/skills/crm.md` (e.g. `scripts/crm-view.js`, `scripts/crm-update-person.js`)
+- **Betting** — `config/skills/betting.md` (e.g. `scripts/bet-list.js`, `scripts/bet-add.js`)
+- **Finance** — `config/skills/finance.md` (e.g. `scripts/finance-balances.js`)
+- **Whoop** — `config/skills/whoop.md` (e.g. `scripts/whoop-cycle.js`, `scripts/whoop-recovery.js`, `scripts/whoop-sleep.js`)
+
+**Never read or write the workspace JSON data files (`crm.json`, `bets.json`, `todos.json`, …) directly.** The scripts hold cross-process file locks and write atomically; ad-hoc JSON edits race them and corrupt state. Every read and every mutation goes through the documented scripts.
 
 ## Data Files
 
-All JSON data lives at `~/.assistant-claude/workspace/data/`:
-
-- `todos.json` — personal to-dos
-- `reminders.json` — scheduled reminders
-- `crm.json` — contacts and businesses
-- `bets.json` — sports bet tracking
-- `projects.json` — multi-step projects
+All JSON data lives at `~/.assistant-claude/workspace/data/` (`todos.json`, `reminders.json`, `crm.json`, `bets.json`, `projects.json`, …). These paths are for reference/debugging awareness only — access is always via scripts, per above.
 
 ## Workspace Sync
 

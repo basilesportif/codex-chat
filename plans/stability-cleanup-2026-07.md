@@ -16,10 +16,10 @@ Source: four-way audit (codex-chat concurrency, codex-chat cleanliness, assistan
 
 ## Phase 2 — data-loss windows (assistant-agent-logic)
 
-- [ ] **9. Scripts bypassing transaction lock** — B `scripts/`: `urgent-email.js`, `urgent-message.js`, `dismiss-email.js`, `dismiss-message.js`, `flag-event.js`, `calendar-allowlist.js`, `calendar-check-invites.js`, `protonmail-send.js` do load()…await network…save() as separate lock acquisitions. Convert each RMW to `store.transaction()`; do network fetches outside, apply inside.
-- [ ] **10. finance-sources atomic + no silent reset** — B `scripts/lib/finance-sources.js`, `finance-providers/plaid.js`: raw writeFileSync on Plaid tokens; corrupt file silently resets to empty. Use `writeJsonAtomic` + `withFileLock`; on parse failure preserve file as `.corrupt.<ts>` and throw labeled error.
-- [ ] **11. WHOOP token refresh lock** — B `scripts/lib/whoop-auth.js`: serialize check-expiry→refresh→save under `withFileLock`; unique temp name via json-store helpers.
-- [ ] **12. Misc atomic writes + corrupt-file handling** — B: `telegram-login.js` (messaging.yaml), `dictionary-deploy.js` via a new `writeFileAtomic` export; `json-store.js` load(): preserve corrupt file as `<name>.corrupt.<ts>` and throw a labeled error naming the preserved path.
+- [~] **9. Scripts bypassing transaction lock** (IN FLIGHT: background agent has uncommitted conversions for the eight scripts in B; if resuming, check `git status` in B and finish/commit that work) — B `scripts/`: `urgent-email.js`, `urgent-message.js`, `dismiss-email.js`, `dismiss-message.js`, `flag-event.js`, `calendar-allowlist.js`, `calendar-check-invites.js`, `protonmail-send.js` do load()…await network…save() as separate lock acquisitions. Convert each RMW to `store.transaction()`; do network fetches outside, apply inside.
+- [x] **10. finance-sources atomic + no silent reset** (B commit bc00d8d) — B `scripts/lib/finance-sources.js`, `finance-providers/plaid.js`: raw writeFileSync on Plaid tokens; corrupt file silently resets to empty. Use `writeJsonAtomic` + `withFileLock`; on parse failure preserve file as `.corrupt.<ts>` and throw labeled error.
+- [x] **11. WHOOP token refresh lock** (B commit 395ae9c) — B `scripts/lib/whoop-auth.js`: serialize check-expiry→refresh→save under `withFileLock`; unique temp name via json-store helpers.
+- [x] **12. Misc atomic writes + corrupt-file handling** (B commit f88e1bb; telegram-login/dictionary-deploy included) — B: `telegram-login.js` (messaging.yaml), `dictionary-deploy.js` via a new `writeFileAtomic` export; `json-store.js` load(): preserve corrupt file as `<name>.corrupt.<ts>` and throw a labeled error naming the preserved path.
 
 **Phase 2 boundary: commit + push B, tick + push A.**
 
@@ -39,7 +39,7 @@ Source: four-way audit (codex-chat concurrency, codex-chat cleanliness, assistan
 
 ## Phase 4 — remaining races + cleanliness (codex-chat)
 
-- [ ] **6. Employee turn serialization** — `src/employees.ts`: busy-check reads `stateFromDescriptor` which hardcodes `activeTurnId: undefined` (dead check); serialize turns per employee behind a promise chain; keep one canonical state object.
+- [x] **6. Employee turn serialization** (implemented as a synchronous per-employee turn lock at the busy-check points; fail-fast/store-for-later semantics preserved) — `src/employees.ts`: busy-check reads `stateFromDescriptor` which hardcodes `activeTurnId: undefined` (dead check); serialize turns per employee behind a promise chain; keep one canonical state object.
 - [x] **7. Filter Codex error notifications by turn** — `src/codex.ts:332,416`: `error` notifications broadcast into every active turn queue; filter by `turnId`/`threadId` when present.
 - [x] **8. Smaller race/leak fixes (bundle)**
   - [x] 8a. `requestCancel`/`finishJob`: re-check terminal status after awaits (mislabeled outcomes, double terminal writes).

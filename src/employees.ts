@@ -205,6 +205,28 @@ export function parseEmployeeCommand(text: string): EmployeeCommand {
 
 export class EmployeeManager {
   private readonly states = new Map<string, EmployeeRuntimeState>();
+  /**
+   * In-memory per-employee turn locks. The persisted activeTurnId field is
+   * display bookkeeping rebuilt from disk (stateFromDescriptor clears it), so
+   * it cannot serialize concurrent turns — two near-simultaneous steers or
+   * child results would both pass the busy-check and run two turns on one
+   * backend thread. Acquisition is synchronous, so there is no TOCTOU window.
+   */
+  private readonly activeTurnLocks = new Map<string, string>();
+
+  private acquireTurnLock(employeeId: string, label: string): boolean {
+    if (this.activeTurnLocks.has(employeeId)) return false;
+    this.activeTurnLocks.set(employeeId, label);
+    return true;
+  }
+
+  private currentTurnLock(employeeId: string): string | undefined {
+    return this.activeTurnLocks.get(employeeId);
+  }
+
+  private releaseTurnLock(employeeId: string): void {
+    this.activeTurnLocks.delete(employeeId);
+  }
   private readonly runningEmployees = new Set<string>();
 
   constructor(
@@ -449,8 +471,9 @@ export class EmployeeManager {
     if (!running.state || !running.state.backendThreadId || (running.status !== "started" && running.status !== "resumed")) return running;
     const state = running.state;
     const backendThreadId = state.backendThreadId as string;
-    if (state.activeTurnId) {
-      return { status: "failed", ref, employee, state, message: `Employee ${employee.id} already has active turn ${state.activeTurnId}; wait for it to finish before steering again.` };
+    if (!this.acquireTurnLock(employee.id, "steer")) {
+      const active = this.currentTurnLock(employee.id) ?? state.activeTurnId ?? "another turn";
+      return { status: "failed", ref, employee, state, message: `Employee ${employee.id} already has an active turn (${active}); wait for it to finish before steering again.` };
     }
 
     let output = "";
@@ -499,6 +522,8 @@ export class EmployeeManager {
       await this.saveRuntimeState(state);
       this.logger.warn({ component: "employees", event: "steer_failed", employeeId: employee.id, error }, "employee turn failed");
       return { status: "failed", ref, employee, state, message: `Employee ${employee.id} turn failed: ${message}` };
+    } finally {
+      this.releaseTurnLock(employee.id);
     }
   }
 
@@ -662,8 +687,8 @@ export class EmployeeManager {
       await this.storeChildResult(employee.id, job, result, state.backendThreadId ? "employee_not_running" : "employee_not_resumable");
       return;
     }
-    if (state.activeTurnId) {
-      await this.storeChildResult(employee.id, job, result, `employee_busy:${state.activeTurnId}`);
+    if (!this.acquireTurnLock(employee.id, `child_result:${job.id}`)) {
+      await this.storeChildResult(employee.id, job, result, `employee_busy:${this.currentTurnLock(employee.id) ?? state.activeTurnId ?? "turn"}`);
       return;
     }
 
@@ -705,6 +730,8 @@ export class EmployeeManager {
       await this.saveRuntimeState(state);
       await this.storeChildResult(employee.id, job, result, `delivery_failed:${message}`);
       this.logger.warn({ component: "employees", event: "child_result_delivery_failed", employeeId: employee.id, jobId: job.id, error }, "failed to deliver child subagent result to Employee runtime");
+    } finally {
+      this.releaseTurnLock(employee.id);
     }
   }
 

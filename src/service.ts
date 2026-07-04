@@ -1379,12 +1379,18 @@ export class ServiceSupervisor {
         turnClosed = true;
         return false;
       }
-      const current = await this.state.readJson<Record<string, unknown> | undefined>(`turns/${turnId}.json`, undefined);
-      if (current?.status === "aborted") {
+      let overwrittenByWatchdog = false;
+      await this.state.updateJson<Record<string, unknown> | undefined>(`turns/${turnId}.json`, undefined, (current) => {
+        if (current?.status === "aborted") {
+          overwrittenByWatchdog = true;
+          return undefined;
+        }
+        return value as Record<string, unknown>;
+      });
+      if (overwrittenByWatchdog) {
         turnClosed = true;
         return false;
       }
-      await this.state.writeJson(`turns/${turnId}.json`, value);
       await this.state.recordProgressEvent(createProgressEvent({
         type: value.status === "completed" ? "final_result" : "item_failed",
         message: value.status === "completed" ? "Run completed" : `Run ${String(value.status ?? "ended")}`,
@@ -2098,14 +2104,17 @@ export class ServiceSupervisor {
         if (!file.endsWith(".json")) continue;
         const path = join(turnsDir, file);
         try {
-          const raw = await readFile(path, "utf8");
-          const turn = JSON.parse(raw) as { status?: string };
-          if (turn.status === "running") {
+          let marked: { input?: UserEvent } | undefined;
+          await this.state.updateJson<Record<string, unknown> | undefined>(`turns/${file}`, undefined, (turn) => {
+            if (!turn || turn.status !== "running") return undefined;
             turn.status = "abandoned";
-            (turn as Record<string, unknown>).abandonedAt = nowIso();
-            await writeFile(path, JSON.stringify(turn, null, 2));
+            turn.abandonedAt = nowIso();
+            marked = turn as { input?: UserEvent };
+            return turn;
+          });
+          if (marked) {
             abandoned++;
-            await this.notifyRestartedUser(turn as { input?: UserEvent });
+            await this.notifyRestartedUser(marked);
           }
         } catch {
           // ignore individual file errors
@@ -2312,12 +2321,17 @@ export class ServiceSupervisor {
         if (!file.endsWith(".json")) continue;
         const path = join(turnsDir, file);
         try {
-          const raw = await readFile(path, "utf8");
-          const turn = JSON.parse(raw) as { status?: string; startedAt?: string; input?: { chatId?: number } };
-          if (turn.status === "running" && turn.startedAt && turn.startedAt < warnBefore) {
+          let timedOut: { status?: string; startedAt?: string; input?: { chatId?: number } } | undefined;
+          await this.state.updateJson<Record<string, unknown> | undefined>(`turns/${file}`, undefined, (current) => {
+            const turn = current as { status?: string; startedAt?: string; input?: { chatId?: number } } | undefined;
+            if (!turn || turn.status !== "running" || !turn.startedAt || turn.startedAt >= warnBefore) return undefined;
             turn.status = "timeout";
             (turn as Record<string, unknown>).timedOutAt = nowIso();
-            await writeFile(path, JSON.stringify(turn, null, 2));
+            timedOut = turn;
+            return current;
+          });
+          if (timedOut) {
+            const turn = timedOut;
             const chatId = turn.input?.chatId;
             if (chatId) {
               try {
@@ -2402,14 +2416,18 @@ export class ServiceSupervisor {
       if (!file.endsWith(".json")) continue;
       const path = join(turnsDir, file);
       try {
-        const turn = JSON.parse(await readFile(path, "utf8")) as { status?: string; input?: UserEvent } & Record<string, unknown>;
-        if (turn.status !== "running" && turn.status !== "timeout") continue;
-        const input = turn.input;
-        if (!input || input.source !== event.source || input.chatId !== event.chatId || input.messageId !== event.messageId || input.receivedAt !== event.receivedAt) continue;
-        turn.status = "aborted";
-        turn.abortedAt = nowIso();
-        await writeFile(path, JSON.stringify(turn, null, 2));
-        return;
+        let aborted = false;
+        await this.state.updateJson<Record<string, unknown> | undefined>(`turns/${file}`, undefined, (current) => {
+          const turn = current as ({ status?: string; input?: UserEvent } & Record<string, unknown>) | undefined;
+          if (!turn || (turn.status !== "running" && turn.status !== "timeout")) return undefined;
+          const input = turn.input;
+          if (!input || input.source !== event.source || input.chatId !== event.chatId || input.messageId !== event.messageId || input.receivedAt !== event.receivedAt) return undefined;
+          turn.status = "aborted";
+          turn.abortedAt = nowIso();
+          aborted = true;
+          return current;
+        });
+        if (aborted) return;
       } catch {
         // ignore individual file errors in watchdog cleanup
       }

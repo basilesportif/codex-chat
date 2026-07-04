@@ -457,13 +457,26 @@ class ClaudeAgentSdkSession {
   }
 
   async steer(text: string): Promise<void> {
-    if (!this.query || this.closed || !this.queue.isOpen() || !this.input.job.activeTurnId) {
-      throw new Error(`Subagent ${this.input.job.id} is not currently steerable; Claude Agent SDK input stream is not accepting messages.`);
-    }
+    this.assertSteerable();
+    // Build first: the session can settle during this await (image reads),
+    // and the counter/timer must only change together with a successful push.
+    const message = await this.buildUserMessage(text, []);
+    this.assertSteerable();
     this.clearSettleGraceTimer();
     this.pendingUserTurns += 1;
-    this.queue.push(await this.buildUserMessage(text, []));
+    try {
+      this.queue.push(message);
+    } catch (error) {
+      this.pendingUserTurns = Math.max(0, this.pendingUserTurns - 1);
+      throw error;
+    }
     await this.appendEvent({ event: "claude_steer_enqueued", at: nowIso(), backend: "claude_agent_sdk", jobId: this.input.job.id, pendingUserTurns: this.pendingUserTurns });
+  }
+
+  private assertSteerable(): void {
+    if (!this.query || this.closed || this.settled || !this.queue.isOpen() || !this.input.job.activeTurnId) {
+      throw new Error(`Subagent ${this.input.job.id} is not currently steerable; Claude Agent SDK input stream is not accepting messages.`);
+    }
   }
 
   async interrupt(reason?: string): Promise<void> {
@@ -956,7 +969,12 @@ class ChildAppServerSession {
         ? undefined
         : `codex app-server child exited before turn completed: code=${code ?? "null"} signal=${signal ?? "null"}`;
       this.rejectAll(new Error(error ?? "codex app-server child exited"));
-      this.settle({ code, signal: signal ?? null, error });
+      // A child that dies after its turn completed (self-restart, OOM) must
+      // not turn a successfully-delivered result into a failed job — the
+      // deferred settle in the turn/completed handler would report code 0.
+      const finishCode = this.turnCompleted && !this.stopping ? 0 : code;
+      const finishSignal = this.turnCompleted && !this.stopping ? null : signal ?? null;
+      this.settle({ code: finishCode, signal: finishSignal, error });
     });
 
     const startupExit = this.rejectOnStartupExit(child);

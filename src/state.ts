@@ -74,8 +74,21 @@ export class StateStore {
     const path = this.path(rel);
     const previous = this.queues.get(path) ?? Promise.resolve();
     const next = previous.then(() => atomicWriteJson(path, value));
-    this.queues.set(path, next.catch(() => undefined));
+    this.trackQueueTail(path, next.catch(() => undefined));
     await next;
+  }
+
+  /**
+   * Locked read-modify-write: fn receives the current value (or fallback) and
+   * returns the value to persist, or undefined to skip the write. Serialized
+   * against other updateJson/writeJson/withJsonFileLock calls for the path.
+   */
+  async updateJson<T>(rel: string, fallback: T, fn: (current: T) => T | undefined): Promise<void> {
+    await this.withJsonFileLock(rel, async (path) => {
+      const current = await readJsonFile<T>(path, fallback);
+      const next = fn(current);
+      if (next !== undefined) await atomicWriteJson(path, next);
+    });
   }
 
   async appendJsonl(rel: string, value: unknown): Promise<void> {
@@ -354,8 +367,20 @@ export class StateStore {
     const path = this.path(rel);
     const previous = this.queues.get(path) ?? Promise.resolve();
     const next = previous.then(() => fn(path), () => fn(path));
-    this.queues.set(path, next.then(() => undefined, () => undefined));
+    this.trackQueueTail(path, next.then(() => undefined, () => undefined));
     return next;
+  }
+
+  /**
+   * Store the per-path serialization tail and drop it once it settles while
+   * still being the tail — one-shot paths (jobs/<id>.json, turns/<id>.json)
+   * would otherwise accumulate a resolved-promise entry forever.
+   */
+  private trackQueueTail(path: string, tail: Promise<void>): void {
+    this.queues.set(path, tail);
+    void tail.finally(() => {
+      if (this.queues.get(path) === tail) this.queues.delete(path);
+    });
   }
 }
 

@@ -314,6 +314,7 @@ export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient 
     }
     let turnId = "";
     let accumulated = "";
+    const ownThreadId = this.sessionId;
     const handler = (message: JsonRpcMessage): void => {
       if (!message.method || typeof message.params !== "object" || message.params === null) return;
       const params = message.params as Record<string, unknown>;
@@ -330,7 +331,13 @@ export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient 
         }
       }
       if (message.method === "error") {
-        queue.push({ type: "error", message: JSON.stringify(params), raw: params });
+        // Error notifications carry turn/thread context when they belong to a
+        // specific turn; only route those to their own turn's queue. Errors
+        // with no turn context are global (connection-level) and go to all.
+        const errorTurnId = typeof params.turnId === "string" ? params.turnId : undefined;
+        const errorThreadId = typeof params.threadId === "string" ? params.threadId : undefined;
+        const belongsElsewhere = (errorTurnId !== undefined && errorTurnId !== turnId) || (errorTurnId === undefined && errorThreadId !== undefined && errorThreadId !== ownThreadId);
+        if (!belongsElsewhere) queue.push({ type: "error", message: JSON.stringify(params), raw: params });
       }
     };
     this.notificationHandlers.add(handler);
@@ -398,6 +405,7 @@ export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient 
     }
     let turnId = "";
     let accumulated = "";
+    const ownThreadId = input.backendThreadId;
     const handler = (message: JsonRpcMessage): void => {
       if (!message.method || typeof message.params !== "object" || message.params === null) return;
       const params = message.params as Record<string, unknown>;
@@ -414,7 +422,13 @@ export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient 
         }
       }
       if (message.method === "error") {
-        queue.push({ type: "error", message: JSON.stringify(params), raw: params });
+        // Error notifications carry turn/thread context when they belong to a
+        // specific turn; only route those to their own turn's queue. Errors
+        // with no turn context are global (connection-level) and go to all.
+        const errorTurnId = typeof params.turnId === "string" ? params.turnId : undefined;
+        const errorThreadId = typeof params.threadId === "string" ? params.threadId : undefined;
+        const belongsElsewhere = (errorTurnId !== undefined && errorTurnId !== turnId) || (errorTurnId === undefined && errorThreadId !== undefined && errorThreadId !== ownThreadId);
+        if (!belongsElsewhere) queue.push({ type: "error", message: JSON.stringify(params), raw: params });
       }
     };
     this.notificationHandlers.add(handler);

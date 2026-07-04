@@ -40,14 +40,14 @@ Source: four-way audit (codex-chat concurrency, codex-chat cleanliness, assistan
 ## Phase 4 — remaining races + cleanliness (codex-chat)
 
 - [ ] **6. Employee turn serialization** — `src/employees.ts`: busy-check reads `stateFromDescriptor` which hardcodes `activeTurnId: undefined` (dead check); serialize turns per employee behind a promise chain; keep one canonical state object.
-- [ ] **7. Filter Codex error notifications by turn** — `src/codex.ts:332,416`: `error` notifications broadcast into every active turn queue; filter by `turnId`/`threadId` when present.
-- [ ] **8. Smaller race/leak fixes (bundle)**
-  - [ ] 8a. `requestCancel`/`finishJob`: re-check terminal status after awaits (mislabeled outcomes, double terminal writes).
-  - [ ] 8b. watchdog `turns/*.json` writes via `state.writeJson` instead of raw `writeFile` (service.ts:2087/2301/2392) + re-check status inside lock in closeTurn.
-  - [ ] 8c. `setBackendOverride`: snapshot `[...this.queue]` before await-per-entry iteration.
-  - [ ] 8d. Claude `steer()`: build message first; mutate `pendingUserTurns`/timer synchronously around push; roll back on throw.
-  - [ ] 8e. app-server session: exit-after-`turnCompleted` settles `{code:0}` (job wrongly marked failed).
-  - [ ] 8f. `StateStore.queues` unbounded growth: delete entry in `.finally` when tail.
+- [x] **7. Filter Codex error notifications by turn** — `src/codex.ts:332,416`: `error` notifications broadcast into every active turn queue; filter by `turnId`/`threadId` when present.
+- [x] **8. Smaller race/leak fixes (bundle)**
+  - [x] 8a. `requestCancel`/`finishJob`: re-check terminal status after awaits (mislabeled outcomes, double terminal writes).
+  - [x] 8b. watchdog `turns/*.json` writes via `state.writeJson` instead of raw `writeFile` (service.ts:2087/2301/2392) + re-check status inside lock in closeTurn.
+  - [x] 8c. `setBackendOverride`: snapshot `[...this.queue]` before await-per-entry iteration.
+  - [x] 8d. Claude `steer()`: build message first; mutate `pendingUserTurns`/timer synchronously around push; roll back on throw.
+  - [x] 8e. app-server session: exit-after-`turnCompleted` settles `{code:0}` (job wrongly marked failed).
+  - [x] 8f. `StateStore.queues` unbounded growth: delete entry in `.finally` when tail.
 - [ ] **17. Config defaults declared 3-4×** — `src/config.ts` + `DEFAULT_CLAUDE_SUBAGENT_CONFIG`: derive defaults from the zod schema (`configSchema.parse({})`, export claude sub-schema); verify deepMerge semantics with partial TOML tables.
 - [ ] **18. Structural dedup (bundle)**
   - [ ] 18a. generic session-map backend base for CodexAppServer/ClaudeAgentSdk backend classes.

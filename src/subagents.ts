@@ -368,8 +368,7 @@ export class SubagentManager {
   }
 
   async loadRuntimeBackendOverride(): Promise<SubagentBackendStatus> {
-    const getter = (this.state as StateStore & { getSubagentBackendOverride?: () => Promise<SubagentBackendKind | undefined> }).getSubagentBackendOverride;
-    this.backendOverride = getter ? await getter.call(this.state) : undefined;
+    this.backendOverride = await this.state.getSubagentBackendOverride();
     return this.backendStatus();
   }
 
@@ -384,10 +383,10 @@ export class SubagentManager {
 
   async setBackendOverride(backend: SubagentBackendKind | undefined, updatedBy?: string): Promise<SubagentBackendStatus> {
     this.backendOverride = backend;
-    const setter = (this.state as StateStore & { setSubagentBackendOverride?: (value: SubagentBackendKind | undefined, updatedBy?: string) => Promise<void> }).setSubagentBackendOverride;
-    if (setter) await setter.call(this.state, backend, updatedBy);
+    await this.state.setSubagentBackendOverride(backend, updatedBy);
     const queuedBackend = this.effectiveBackend();
-    for (const input of this.queue) {
+    // Snapshot: drain() shifts entries off this.queue during the awaits below.
+    for (const input of [...this.queue]) {
       if (!input.id) continue;
       const job = this.jobs.get(input.id);
       if (!job || job.status !== "queued") continue;
@@ -805,21 +804,25 @@ export class SubagentManager {
     // Never let a finishJob failure (e.g. transient FS error in saveJob)
     // become an unhandled rejection — that would take down the whole service.
     void child.finished
-      .then((finish) => this.finishJob(id, finish))
+      .then((finish) => this.finishJob(id, finish, nowIso()))
       .catch((error) => {
         this.logger.error({ component: "subagents", event: "finish_job_failed", jobId: id, error }, "finishJob failed after child settled");
       });
     if (job.pid || job.activeTurnId || job.backendThreadId) void this.state.saveJob(job);
   }
 
-  private async finishJob(jobId: string, finish: ChildAgentFinish): Promise<void> {
+  private async finishJob(jobId: string, finish: ChildAgentFinish, settledAt?: string): Promise<void> {
     const running = this.running.get(jobId);
     if (!running) return;
     this.running.delete(jobId);
     clearTimeout(running.timeout);
     if (running.killTimer) clearTimeout(running.killTimer);
     const job = running.job;
-    if (job.status === "cancelling") job.status = job.cancelReason === "timeout" ? "timed_out" : "cancelled";
+    // A cancel that raced in AFTER the child had already settled must not
+    // relabel a natural finish as cancelled.
+    const cancelledBeforeSettle = job.status === "cancelling"
+      && (!settledAt || !job.cancelRequestedAt || job.cancelRequestedAt <= settledAt);
+    if (cancelledBeforeSettle) job.status = job.cancelReason === "timeout" ? "timed_out" : "cancelled";
     else job.status = finish.code === 0 && !finish.error ? "completed" : "failed";
     job.completedAt = nowIso();
     job.exitCode = finish.code;

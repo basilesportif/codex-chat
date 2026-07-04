@@ -86,6 +86,14 @@ export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient 
   private connected = false;
   private startupComplete = false;
   /**
+   * Set when a stored thread was resumed but the behavior pack on disk no
+   * longer matches the hash recorded when that thread last saw it. Holds the
+   * freshly assembled bootstrap prompt; the service consumes it after start()
+   * and enqueues a behavior-refresh turn so the long-lived session learns the
+   * updated rules instead of following the stale inlined copy in its history.
+   */
+  private pendingBehaviorRefresh?: string;
+  /**
    * In-memory ring buffer of recent app-server stdout/stderr lines. Exposed
    * via getRecentLogs() so the `get_logs` directive can show Tim what the
    * Codex app-server has been emitting without him having to SSH in.
@@ -555,6 +563,7 @@ export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient 
   private async resumeThread(sessionId: string): Promise<void> {
     const bootstrap = await this.behavior.loadBootstrapPrompt();
     const hash = await this.behavior.hash();
+    const storedHash = await this.state.getCodexSessionBehaviorHash(this.config.codex.mainSessionName);
     await this.request("thread/resume", {
       threadId: sessionId,
       ...this.mainThreadModelParams(),
@@ -566,6 +575,13 @@ export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient 
       persistExtendedHistory: true
     });
     this.sessionId = sessionId;
+    if (storedHash !== undefined && storedHash !== hash) {
+      this.logger.info(
+        { component: "codex", event: "behavior_pack_changed", sessionId, storedHash, hash },
+        "behavior pack changed since this thread last saw it; queueing behavior-refresh turn"
+      );
+      this.pendingBehaviorRefresh = bootstrap;
+    }
     await this.state.setCodexSession(this.config.codex.mainSessionName, {
       sessionId,
       transport: "app-server",
@@ -574,6 +590,16 @@ export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient 
       effort: this.config.codex.effort,
       behaviorHash: hash
     });
+  }
+
+  /**
+   * One-shot accessor for a behavior-refresh detected during thread resume.
+   * Returns the new bootstrap prompt once, then clears it.
+   */
+  consumePendingBehaviorRefresh(): string | undefined {
+    const refresh = this.pendingBehaviorRefresh;
+    this.pendingBehaviorRefresh = undefined;
+    return refresh;
   }
 
   private async connectWithRetry(url: string): Promise<void> {

@@ -169,6 +169,15 @@ export interface ActiveSubagentSnapshot {
   omitted: number;
 }
 
+const CLAUDE_MODEL_ALIASES = new Set(["opus", "fable", "sonnet", "haiku"]);
+
+/** True when a model slug can only run on the Claude Agent SDK backend. */
+export function isClaudeModelSlug(model: string | undefined): boolean {
+  if (!model) return false;
+  const normalized = model.trim().toLowerCase();
+  return normalized.startsWith("claude") || CLAUDE_MODEL_ALIASES.has(normalized);
+}
+
 const ACTIVE_JOB_STATUSES = new Set<SubagentJob["status"]>(["queued", "running", "cancelling"]);
 const TERMINAL_JOB_STATUSES = new Set<SubagentJob["status"]>(["completed", "failed", "cancelled", "timed_out", "abandoned"]);
 
@@ -257,7 +266,7 @@ export class SubagentManager {
     }
     input.id = makeId("job");
     const artifactDir = resolveConfigPath(this.config, join(this.config.subagents.artifactDir, input.id));
-    const backendKind = this.normalizeBackend(input.backend ?? this.effectiveBackend());
+    const { backend: backendKind, explicit: backendExplicit } = this.resolveDispatchBackend(input);
     const modelSpec = this.resolveSubagentModelSpec(input, undefined, backendKind);
     const { model, effort, serviceTier, serviceTierMode, codexProfile, modelProvider } = modelSpec;
     const ownerType = this.normalizeOwnerType(input.ownerType);
@@ -286,7 +295,7 @@ export class SubagentManager {
       codexProfile,
       modelProvider,
       backend: backendKind,
-      backendExplicit: input.backend ? true : undefined,
+      backendExplicit: backendExplicit || undefined,
       summary: input.summary,
       enqueuedAt: nowIso(),
       originChatId: input.originChatId,
@@ -973,6 +982,10 @@ export class SubagentManager {
         modelProvider: ""
       };
     }
+    const resolvedModel = input.model || existing?.model || this.resolveModel();
+    if (isClaudeModelSlug(resolvedModel)) {
+      throw new Error(`Subagent model '${resolvedModel}' is a Claude model and cannot run on backend=${backendKind ?? this.effectiveBackend()}; dispatch with backend=claude_agent_sdk.`);
+    }
     const defaultCodexProfile = existing?.codexProfile || this.config.subagents.defaultCodexProfile || this.config.codex.profile || "";
     const defaultModelProvider = existing?.modelProvider || this.config.subagents.defaultModelProvider || this.config.codex.modelProvider || "";
     const codexProfile = input.codexProfile || defaultCodexProfile;
@@ -982,7 +995,7 @@ export class SubagentManager {
     if (input.modelProvider && input.modelProvider !== defaultModelProvider) this.assertProviderOverrideAllowed("modelProvider", input.modelProvider, this.config.subagents.allowedModelProviders);
 
     return {
-      model: input.model || existing?.model || this.resolveModel(),
+      model: resolvedModel,
       effort: input.effort || existing?.effort || this.resolveEffort(),
       serviceTier: input.serviceTier ?? existing?.serviceTier ?? this.resolveServiceTier(),
       serviceTierMode: this.resolveServiceTierMode(input.serviceTierMode ?? existing?.serviceTierMode, modelProvider),
@@ -1007,6 +1020,33 @@ export class SubagentManager {
   private backendForJob(id: string, requested?: SubagentBackendKind): SubagentBackendKind {
     const existing = this.jobs.get(id)?.backend;
     return this.normalizeBackend(existing ?? requested ?? this.effectiveBackend());
+  }
+
+  /**
+   * Resolve the backend for a new dispatch. A Claude model slug with no
+   * explicit backend auto-routes to claude_agent_sdk (a dispatch naming a
+   * Claude model but omitting the backend field would otherwise land on a
+   * Codex backend and fail with an opaque 400); a Claude model with an
+   * explicitly-requested Codex backend is rejected loudly so the error goes
+   * back to the dispatching loop instead of to Codex.
+   */
+  private resolveDispatchBackend(input: DispatchInput): { backend: SubagentBackendKind; explicit: boolean } {
+    const requested = input.backend !== undefined ? this.normalizeBackend(input.backend) : undefined;
+    const claudeModel = isClaudeModelSlug(input.model);
+    if (requested !== undefined) {
+      if (claudeModel && requested !== "claude_agent_sdk") {
+        throw new Error(`Subagent model '${input.model}' is a Claude model but backend=${requested} was requested; use backend=claude_agent_sdk (or omit backend) for Claude models.`);
+      }
+      return { backend: requested, explicit: true };
+    }
+    if (claudeModel && this.effectiveBackend() !== "claude_agent_sdk") {
+      this.logger.info(
+        { component: "subagents", event: "backend_auto_routed", model: input.model, profile: input.profile },
+        "Claude model requested without backend field; auto-routing dispatch to claude_agent_sdk"
+      );
+      return { backend: "claude_agent_sdk", explicit: true };
+    }
+    return { backend: this.effectiveBackend(), explicit: false };
   }
 
   private normalizeBackend(value: unknown): SubagentBackendKind {

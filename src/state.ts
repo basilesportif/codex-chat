@@ -275,6 +275,11 @@ export class StateStore {
     return sessions[name]?.sessionId;
   }
 
+  async getCodexSessionBehaviorHash(name: string): Promise<string | undefined> {
+    const sessions = await this.readJson<Record<string, { behaviorHash?: string }>>("codex_sessions.json", {});
+    return sessions[name]?.behaviorHash;
+  }
+
   async setCodexSession(name: string, value: Record<string, unknown>): Promise<void> {
     const sessions = await this.readJson<Record<string, Record<string, unknown>>>("codex_sessions.json", {});
     sessions[name] = { ...sessions[name], ...value, updatedAt: nowIso() };

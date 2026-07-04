@@ -431,6 +431,7 @@ export class ServiceSupervisor {
     if (this.config.loops.enabled) await syncCron(this.config, this.logger).catch((error) => this.logger.warn({ component: "loops", event: "cron_sync_failed", error: error instanceof Error ? { message: error.message, stack: error.stack } : String(error) }, "cron sync failed; loops will not fire on schedule until this is resolved"));
     await this.loops.processSpooled().catch((error) => this.logger.warn({ component: "loops", event: "spool_process_failed", error }));
     await this.monitors.start();
+    await this.enqueueBehaviorRefreshIfPending();
     this.heartbeat.start();
     this.watchdogInterval = setInterval(() => void this.checkTurnTimeout(), 5_000);
     this.injectInterval = setInterval(() => void this.pollInjectFile(), 1_000);
@@ -574,6 +575,28 @@ export class ServiceSupervisor {
     ensureEventRuntimeContext(event);
     await this.createOrResumeConversationSession(event);
     await this.enqueueMainEvent(this.queueKeyForEvent(event), event);
+  }
+
+  /**
+   * The main thread is long-lived and its bootstrap (with the behavior pack
+   * inlined) sits far back in its history. When the pack on disk changed
+   * since the resumed thread last saw it, send the updated pack as a
+   * synthetic turn — otherwise the model keeps following the stale copy.
+   */
+  private async enqueueBehaviorRefreshIfPending(): Promise<void> {
+    const refresh = (this.codex as AppServerCodexClient).consumePendingBehaviorRefresh();
+    if (!refresh) return;
+    this.logger.info({ component: "service", event: "behavior_refresh_enqueued" }, "enqueueing behavior-refresh turn for resumed main session");
+    await this.enqueueSynthetic(
+      [
+        "Behavior pack update: the behavior pack on disk has changed since this session was bootstrapped.",
+        "Disregard any behavior-pack contents shown earlier in this conversation and follow this version instead.",
+        "Acknowledge briefly; do not repeat the pack contents back.",
+        "",
+        refresh
+      ].join("\n"),
+      { source: "system" }
+    );
   }
 
   private async enqueueAudioIngestionForCodex(event: AudioIngestionCompletedEvent): Promise<void> {
@@ -1889,6 +1912,7 @@ export class ServiceSupervisor {
       await this.telegram.notifyOps(
         `Codex restarted cleanly.\ntransport: ${health.transport}\nsession: ${health.sessionId ?? "unknown"}\n${CONTEXT_RESET_OPS_NOTE}`
       ).catch(() => undefined);
+      await this.enqueueBehaviorRefreshIfPending();
       if (activeTurn?.activeChatId) {
         try {
           await this.telegram.sendText(

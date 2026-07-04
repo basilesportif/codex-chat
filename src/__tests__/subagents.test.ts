@@ -864,6 +864,65 @@ describe("subagents", () => {
     expect(manager.listJobs().find((job) => job.id === claudeId)).toMatchObject({ backend: "claude_agent_sdk", backendExplicit: true, status: "queued" });
   });
 
+  test("auto-routes Claude model slugs to claude_agent_sdk when backend is omitted", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
+    tempDirs.push(root);
+    const { SubagentManager } = await import("../subagents.js");
+    const config = makeConfig(root, 0);
+    config.subagents.backend = "codex_app_server";
+    const state = {
+      saveJob: vi.fn().mockResolvedValue(undefined),
+      setSubagentBackendOverride: vi.fn().mockResolvedValue(undefined)
+    };
+    const manager = new SubagentManager(
+      config,
+      { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") } as never,
+      state as never,
+      fakeLogger() as never,
+      { onReturnToMain: vi.fn(), onSendToUser: vi.fn() }
+    );
+
+    const slugId = await manager.dispatch({ profile: "x", prompt: "claude", route: "return_to_main", model: "claude-opus-4-8" });
+    const aliasId = await manager.dispatch({ profile: "x", prompt: "claude", route: "return_to_main", model: "opus" });
+
+    expect(manager.listJobs().find((job) => job.id === slugId)).toMatchObject({ backend: "claude_agent_sdk", backendExplicit: true, model: "claude-opus-4-8", status: "queued" });
+    expect(manager.listJobs().find((job) => job.id === aliasId)).toMatchObject({ backend: "claude_agent_sdk", backendExplicit: true, status: "queued" });
+    expect(manager.backendStatus()).toMatchObject({ effective: "codex_app_server" });
+
+    // Auto-routed jobs count as explicit: a later global override must not re-stamp them.
+    await manager.setBackendOverride("codex_exec", "test");
+    expect(manager.listJobs().find((job) => job.id === slugId)).toMatchObject({ backend: "claude_agent_sdk", status: "queued" });
+  });
+
+  test("rejects a Claude model combined with an explicit Codex backend", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
+    tempDirs.push(root);
+    const { SubagentManager } = await import("../subagents.js");
+    const config = makeConfig(root, 0);
+    const manager = new SubagentManager(
+      config,
+      { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") } as never,
+      { saveJob: vi.fn().mockResolvedValue(undefined) } as never,
+      fakeLogger() as never,
+      { onReturnToMain: vi.fn(), onSendToUser: vi.fn() }
+    );
+
+    await expect(manager.dispatch({
+      profile: "x",
+      prompt: "claude",
+      route: "return_to_main",
+      backend: "codex_exec",
+      model: "claude-opus-4-8"
+    })).rejects.toThrow(/Claude model but backend=codex_exec/);
+    await expect(manager.dispatch({
+      profile: "x",
+      prompt: "claude",
+      route: "return_to_main",
+      backend: "codex_app_server",
+      model: "fable"
+    })).rejects.toThrow(/Claude model but backend=codex_app_server/);
+  });
+
   test("rejects Codex provider fields on Claude-routed dispatches", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
     tempDirs.push(root);

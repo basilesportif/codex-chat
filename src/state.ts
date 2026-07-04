@@ -281,15 +281,19 @@ export class StateStore {
   }
 
   async setCodexSession(name: string, value: Record<string, unknown>): Promise<void> {
-    const sessions = await this.readJson<Record<string, Record<string, unknown>>>("codex_sessions.json", {});
-    sessions[name] = { ...sessions[name], ...value, updatedAt: nowIso() };
-    await this.writeJson("codex_sessions.json", sessions);
+    await this.withJsonFileLock("codex_sessions.json", async (path) => {
+      const sessions = await readJsonFile<Record<string, Record<string, unknown>>>(path, {});
+      sessions[name] = { ...sessions[name], ...value, updatedAt: nowIso() };
+      await atomicWriteJson(path, sessions);
+    });
   }
 
   async clearCodexSession(name: string): Promise<void> {
-    const sessions = await this.readJson<Record<string, Record<string, unknown>>>("codex_sessions.json", {});
-    delete sessions[name];
-    await this.writeJson("codex_sessions.json", sessions);
+    await this.withJsonFileLock("codex_sessions.json", async (path) => {
+      const sessions = await readJsonFile<Record<string, Record<string, unknown>>>(path, {});
+      delete sessions[name];
+      await atomicWriteJson(path, sessions);
+    });
   }
 
   async getSubagentBackendOverride(): Promise<SubagentBackendKind | undefined> {
@@ -298,13 +302,15 @@ export class StateStore {
   }
 
   async setSubagentBackendOverride(backend: SubagentBackendKind | undefined, updatedBy?: string): Promise<void> {
-    const current = await this.readJson<SubagentRuntimeState>(subagentRuntimePath, {});
-    await this.writeJson(subagentRuntimePath, {
-      ...current,
-      backendOverride: backend,
-      updatedAt: nowIso(),
-      updatedBy
-    } satisfies SubagentRuntimeState);
+    await this.withJsonFileLock(subagentRuntimePath, async (path) => {
+      const current = await readJsonFile<SubagentRuntimeState>(path, {});
+      await atomicWriteJson(path, {
+        ...current,
+        backendOverride: backend,
+        updatedAt: nowIso(),
+        updatedBy
+      } satisfies SubagentRuntimeState);
+    });
   }
 
 
@@ -317,12 +323,16 @@ export class StateStore {
   }
 
   async addTelegramIdentity(userId: number, chatId: number, isAdmin: boolean): Promise<void> {
-    const users = await this.listTelegramUsers();
-    if (!users.some((user) => user.userId === userId)) users.push({ userId, isAdmin, pairedAt: nowIso() });
-    const chats = await this.listTelegramChats();
-    if (!chats.some((chat) => chat.chatId === chatId)) chats.push({ chatId, pairedAt: nowIso() });
-    await this.writeJson("telegram_users.json", users);
-    await this.writeJson("telegram_chats.json", chats);
+    await this.withJsonFileLock("telegram_users.json", async (path) => {
+      const users = await readJsonFile<Array<{ userId: number; isAdmin?: boolean; pairedAt?: string }>>(path, []);
+      if (!users.some((user) => user.userId === userId)) users.push({ userId, isAdmin, pairedAt: nowIso() });
+      await atomicWriteJson(path, users);
+    });
+    await this.withJsonFileLock("telegram_chats.json", async (path) => {
+      const chats = await readJsonFile<Array<{ chatId: number; pairedAt?: string }>>(path, []);
+      if (!chats.some((chat) => chat.chatId === chatId)) chats.push({ chatId, pairedAt: nowIso() });
+      await atomicWriteJson(path, chats);
+    });
   }
 
   async readPairingCode(): Promise<string | undefined> {

@@ -854,8 +854,13 @@ describe("service supervisor", () => {
     };
 
     await (service as unknown as {
-      handleSubagentReturnToMain(job: SubagentJob, result: string): Promise<void>;
-    }).handleSubagentReturnToMain(job, "Subagent job_failed00000000000000000000000000 (implementer) failed: child exited with code 1.\n\npartial failure details");
+      handleSubagentReturnToMain(result: { job: SubagentJob; body: string; header?: string; text: string }): Promise<void>;
+    }).handleSubagentReturnToMain({
+      job,
+      body: "partial failure details",
+      header: "Subagent job_failed00000000000000000000000000 (implementer) failed: child exited with code 1.",
+      text: "Subagent job_failed00000000000000000000000000 (implementer) failed: child exited with code 1.\n\npartial failure details"
+    });
 
     expect(sendTurn).not.toHaveBeenCalled();
     expect(notifyOps).not.toHaveBeenCalled();
@@ -887,8 +892,13 @@ describe("service supervisor", () => {
     };
 
     await (service as unknown as {
-      handleSubagentReturnToMain(job: SubagentJob, result: string): Promise<void>;
-    }).handleSubagentReturnToMain(job, "Subagent job_timeout0000000000000000000000000 (debugger) timed out: exit code null signal SIGTERM.");
+      handleSubagentReturnToMain(result: { job: SubagentJob; body: string; header?: string; text: string }): Promise<void>;
+    }).handleSubagentReturnToMain({
+      job,
+      body: "",
+      header: "Subagent job_timeout0000000000000000000000000 (debugger) timed out: exit code null signal SIGTERM.",
+      text: "Subagent job_timeout0000000000000000000000000 (debugger) timed out: exit code null signal SIGTERM."
+    });
 
     expect(sendTurn).not.toHaveBeenCalled();
     expect(sendText).not.toHaveBeenCalled();

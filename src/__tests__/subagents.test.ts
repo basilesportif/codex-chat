@@ -345,8 +345,12 @@ describe("subagents", () => {
 
     expect(onReturnToMain).not.toHaveBeenCalled();
     expect(onReturnToEmployee).toHaveBeenCalledWith(
-      expect.objectContaining({ id, ownerType: "employee", ownerId: "email-calendar", ownerRequestId: "req-1", resultTarget: "employee", status: "completed" }),
-      "child result"
+      expect.objectContaining({
+        job: expect.objectContaining({ id, ownerType: "employee", ownerId: "email-calendar", ownerRequestId: "req-1", resultTarget: "employee", status: "completed" }),
+        body: "child result",
+        header: undefined,
+        text: "child result"
+      })
     );
   });
 
@@ -1232,7 +1236,11 @@ describe("subagents", () => {
 
     expect((manager as unknown as { running: Map<string, unknown> }).running.has(id)).toBe(false);
     expect(manager.listJobs()[0]).toMatchObject({ id, status: "cancelled", exitCode: null, signal: "SIGTERM" });
-    expect(onReturnToMain).toHaveBeenCalledWith(expect.objectContaining({ id, status: "cancelled" }), expect.stringContaining("was cancelled"));
+    expect(onReturnToMain).toHaveBeenCalledWith(expect.objectContaining({
+      job: expect.objectContaining({ id, status: "cancelled" }),
+      header: expect.stringContaining("was cancelled"),
+      text: expect.stringContaining("was cancelled")
+    }));
   });
 
   test("timeouts finalize as timed_out when the child exits", async () => {
@@ -1269,7 +1277,11 @@ describe("subagents", () => {
     await waitFor(() => onReturnToMain.mock.calls.length === 1);
 
     expect(manager.listJobs()[0]).toMatchObject({ id, status: "timed_out", exitCode: null, signal: "SIGTERM" });
-    expect(onReturnToMain).toHaveBeenCalledWith(expect.objectContaining({ id, status: "timed_out" }), expect.stringContaining("timed out"));
+    expect(onReturnToMain).toHaveBeenCalledWith(expect.objectContaining({
+      job: expect.objectContaining({ id, status: "timed_out" }),
+      header: expect.stringContaining("timed out"),
+      text: expect.stringContaining("timed out")
+    }));
   });
 
   test("loads persisted jobs and marks stale active jobs abandoned on startup", async () => {
@@ -1347,13 +1359,16 @@ describe("subagents", () => {
 
     expect(onReturnToMain).toHaveBeenCalledWith(
       expect.objectContaining({
-        id: job.id,
-        status: "failed",
-        originChatId: 253768951,
-        originMessageId: 702
-      }),
-      expect.stringContaining("partial failure details")
+        job: expect.objectContaining({
+          id: job.id,
+          status: "failed",
+          originChatId: 253768951,
+          originMessageId: 702
+        }),
+        body: expect.stringContaining("partial failure details"),
+        text: expect.stringContaining("partial failure details")
+      })
     );
-    expect(onReturnToMain.mock.calls[0]?.[1]).toContain("failed");
+    expect(onReturnToMain.mock.calls[0]?.[0]?.text).toContain("failed");
   });
 });

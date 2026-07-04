@@ -61,11 +61,27 @@ interface DispatchInput {
   originMessageId?: number;
 }
 
+/**
+ * Structured terminal result handed to delivery callbacks. The delivery
+ * layer formats the user/main-facing message once from these parts instead
+ * of reverse-parsing a pre-joined string.
+ */
+export interface SubagentTerminalResult {
+  /** The terminal job (the same object the manager tracks). */
+  job: SubagentJob;
+  /** Trimmed final message body from the child; may be empty. */
+  body: string;
+  /** Status header for failed/timed_out/cancelled or empty-completed jobs. */
+  header?: string;
+  /** Header and body joined with a blank line — the legacy single-string form. */
+  text: string;
+}
+
 interface SubagentCallbacks {
-  onReturnToMain(job: SubagentJob, result: string): Promise<void>;
-  onSendToUser(job: SubagentJob, result: string): Promise<void>;
-  onReturnToEmployee?(job: SubagentJob, result: string): Promise<void>;
-  onSendToAdmins?(job: SubagentJob, result: string): Promise<void>;
+  onReturnToMain(result: SubagentTerminalResult): Promise<void>;
+  onSendToUser(result: SubagentTerminalResult): Promise<void>;
+  onReturnToEmployee?(result: SubagentTerminalResult): Promise<void>;
+  onSendToAdmins?(result: SubagentTerminalResult): Promise<void>;
 }
 
 interface RunningJob {
@@ -660,7 +676,7 @@ export class SubagentManager {
               failed.error = error instanceof Error ? error.message : String(error);
               failed.completedAt = nowIso();
               await this.state.saveJob(failed);
-              await this.deliverTerminalResult(failed, this.formatTerminalResult(failed, "", undefined, undefined));
+              await this.deliverTerminalResult(this.formatTerminalResult(failed, "", undefined, undefined));
             }
           } catch (cleanupError) {
             // The failure-bookkeeping path must not throw out of drain() —
@@ -818,42 +834,39 @@ export class SubagentManager {
         return "";
       });
     }
-    result = this.formatTerminalResult(job, result, finish.code, finish.signal);
+    const terminalResult = this.formatTerminalResult(job, result, finish.code, finish.signal);
     await this.state.saveJob(job);
-    await this.deliverTerminalResult(job, result);
+    await this.deliverTerminalResult(terminalResult);
     this.scheduleArtifactCleanup(job);
     void this.drain();
   }
 
-  private formatTerminalResult(job: SubagentJob, result: string, code: number | null | undefined, signal: NodeJS.Signals | null | undefined): string {
-    const trimmed = result.trim();
+  private formatTerminalResult(job: SubagentJob, result: string, code: number | null | undefined, signal: NodeJS.Signals | null | undefined): SubagentTerminalResult {
+    const body = result.trim();
+    let header: string | undefined;
     if (job.status === "failed") {
       const detail = job.error ?? `exit code ${code ?? "null"} signal ${signal ?? "null"}`;
-      const header = `Subagent ${job.id} (${job.profile}) failed: ${detail}.`;
-      return trimmed ? `${header}\n\n${trimmed}` : header;
+      header = `Subagent ${job.id} (${job.profile}) failed: ${detail}.`;
+    } else if (job.status === "timed_out") {
+      header = `Subagent ${job.id} (${job.profile}) timed out: exit code ${code ?? "null"} signal ${signal ?? "null"}.`;
+    } else if (job.status === "cancelled") {
+      header = `Subagent ${job.id} (${job.profile}) was cancelled: exit code ${code ?? "null"} signal ${signal ?? "null"}.`;
+    } else if (job.status === "completed" && !body) {
+      header = `Subagent ${job.id} (${job.profile}) completed but produced no final message.`;
     }
-    if (job.status === "timed_out") {
-      const header = `Subagent ${job.id} (${job.profile}) timed out: exit code ${code ?? "null"} signal ${signal ?? "null"}.`;
-      return trimmed ? `${header}\n\n${trimmed}` : header;
-    }
-    if (job.status === "cancelled") {
-      const header = `Subagent ${job.id} (${job.profile}) was cancelled: exit code ${code ?? "null"} signal ${signal ?? "null"}.`;
-      return trimmed ? `${header}\n\n${trimmed}` : header;
-    }
-    if (job.status === "completed" && !trimmed) {
-      return `Subagent ${job.id} (${job.profile}) completed but produced no final message.`;
-    }
-    return trimmed;
+    const text = header ? (body ? `${header}\n\n${body}` : header) : body;
+    return { job, body, header, text };
   }
 
-  private async deliverTerminalResult(job: SubagentJob, result: string): Promise<void> {
+  private async deliverTerminalResult(result: SubagentTerminalResult): Promise<void> {
+    const job = result.job;
     try {
       if (!["completed", "failed", "cancelled", "timed_out"].includes(job.status)) return;
       const target = jobResultTarget(job);
-      if (target === "main") await this.callbacks.onReturnToMain(job, result);
-      if (target === "user") await this.callbacks.onSendToUser(job, result);
-      if (target === "employee") await this.callbacks.onReturnToEmployee?.(job, result);
-      if (target === "admins") await this.callbacks.onSendToAdmins?.(job, result);
+      if (target === "main") await this.callbacks.onReturnToMain(result);
+      if (target === "user") await this.callbacks.onSendToUser(result);
+      if (target === "employee") await this.callbacks.onReturnToEmployee?.(result);
+      if (target === "admins") await this.callbacks.onSendToAdmins?.(result);
     } catch (error) {
       this.logger.error({ component: "subagents", event: "callback_failed", jobId: job.id, route: job.route, resultTarget: jobResultTarget(job), error }, "subagent result delivery failed");
     }

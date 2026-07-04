@@ -45,7 +45,8 @@ import {
   type ActiveSubagentJobSnapshot,
   type CancelJobResult,
   type SteerJobResult,
-  type SubagentBackendStatus
+  type SubagentBackendStatus,
+  type SubagentTerminalResult
 } from "./subagents.js";
 import { DisabledTranscriber, OpenAITranscriber, Transcriber, type TranscriptionMode, type TranscriptionSpeakerSegment } from "./transcription.js";
 import { sanitizeChildProcessEnv } from "./env.js";
@@ -323,18 +324,18 @@ export class ServiceSupervisor {
       this.state,
       logger,
       {
-        onReturnToMain: async (job: SubagentJob, result: string) => {
-          await this.handleSubagentReturnToMain(job, result);
+        onReturnToMain: async (result: SubagentTerminalResult) => {
+          await this.handleSubagentReturnToMain(result);
         },
-        onSendToUser: async (job: SubagentJob, result: string) => {
-          if (job.defaultOutputTarget) await this.sendTextToOutputTarget(job.defaultOutputTarget, result);
-          else if (job.originChatId !== undefined) await this.sendTextToOutputTarget(telegramOutputTarget({ chatId: job.originChatId, messageId: job.originMessageId }), result);
+        onSendToUser: async ({ job, text }: SubagentTerminalResult) => {
+          if (job.defaultOutputTarget) await this.sendTextToOutputTarget(job.defaultOutputTarget, text);
+          else if (job.originChatId !== undefined) await this.sendTextToOutputTarget(telegramOutputTarget({ chatId: job.originChatId, messageId: job.originMessageId }), text);
         },
-        onReturnToEmployee: async (job: SubagentJob, result: string) => {
-          await this.employees.deliverChildSubagentResult(job, result);
+        onReturnToEmployee: async ({ job, text }: SubagentTerminalResult) => {
+          await this.employees.deliverChildSubagentResult(job, text);
         },
-        onSendToAdmins: async (_job: SubagentJob, result: string) => {
-          await this.telegram.notifyOps(result);
+        onSendToAdmins: async ({ text }: SubagentTerminalResult) => {
+          await this.telegram.notifyOps(text);
         }
       }
     );
@@ -1631,19 +1632,20 @@ export class ServiceSupervisor {
     return `Subagent ${job.id} (${job.profile}) ${status}.\n\nResult path: ${job.lastMessagePath ?? "unknown"}\n\n${result}`;
   }
 
-  private async handleSubagentReturnToMain(job: SubagentJob, result: string): Promise<void> {
+  private async handleSubagentReturnToMain(result: SubagentTerminalResult): Promise<void> {
+    const job = result.job;
     if (!await this.authorizeSubagentResult(job, "main")) return;
     if (this.shouldDirectDeliverTerminalSubagent(job)) {
-      await this.deliverDirectTerminalSubagent(job, result);
+      await this.deliverDirectTerminalSubagent(result);
       return;
     }
     this.recordSlackSubagentRoutingIfNeeded(job);
-    await this.enqueueSynthetic(this.formatSubagentCallbackText(job, result), {
+    await this.enqueueSynthetic(this.formatSubagentCallbackText(job, result.text), {
       source: "subagent",
       jobId: job.id,
       profile: job.profile,
       subagentStatus: job.status,
-      subagentResult: result,
+      subagentResult: result.text,
       originChatId: job.originChatId,
       originMessageId: job.originMessageId,
       originTarget: job.originTarget,
@@ -1657,9 +1659,10 @@ export class ServiceSupervisor {
     return job.status === "failed" || job.status === "cancelled" || job.status === "timed_out";
   }
 
-  private async deliverDirectTerminalSubagent(job: SubagentJob, result: string): Promise<void> {
+  private async deliverDirectTerminalSubagent(result: SubagentTerminalResult): Promise<void> {
+    const job = result.job;
     if (!await this.authorizeSubagentResult(job, "user")) return;
-    const text = this.formatDirectTerminalSubagentText(job, result);
+    const text = this.formatDirectTerminalSubagentText(result);
     if (job.defaultOutputTarget || job.originChatId !== undefined) {
       this.recordSlackSubagentRoutingIfNeeded(job);
       await this.sendTextToOutputTarget(
@@ -1704,7 +1707,8 @@ export class ServiceSupervisor {
     return decision.allowed;
   }
 
-  private formatDirectTerminalSubagentText(job: SubagentJob, result: string): string {
+  private formatDirectTerminalSubagentText(result: SubagentTerminalResult): string {
+    const job = result.job;
     const label = job.status === "timed_out"
       ? "timed out"
       : job.status === "cancelled" ? "cancelled" : "failed";
@@ -1719,23 +1723,11 @@ export class ServiceSupervisor {
     if (job.exitCode !== undefined || job.signal !== undefined) {
       lines.push(`exit: ${job.exitCode ?? "null"} signal: ${job.signal ?? "null"}`);
     }
-    const preview = this.subagentTerminalResultPreview(job, result);
+    // The structured result separates header and body, so no header
+    // reverse-parsing is needed here — preview the body directly.
+    const preview = result.body ? this.truncateSubagentNotice(result.body, 1400) : "";
     if (preview) lines.push("", preview);
     return lines.join("\n");
-  }
-
-  private subagentTerminalResultPreview(job: SubagentJob, result: string): string {
-    const trimmed = result.trim();
-    if (!trimmed) return "";
-    const escapedId = job.id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const escapedProfile = job.profile.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const headerPattern = new RegExp(
-      `^Subagent\\s+${escapedId}\\s+\\(${escapedProfile}\\)\\s+(?:failed|timed out|was cancelled):[^\\n]*(?:\\n\\n)?`,
-      "i"
-    );
-    const withoutHeader = trimmed.replace(headerPattern, "").trim();
-    if (withoutHeader !== trimmed) return withoutHeader ? this.truncateSubagentNotice(withoutHeader, 1400) : "";
-    return this.truncateSubagentNotice(trimmed, 1400);
   }
 
   private truncateSubagentNotice(text: string, maxChars: number): string {

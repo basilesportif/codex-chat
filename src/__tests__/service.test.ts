@@ -1429,12 +1429,10 @@ describe("incremental directive execution", () => {
     vi.spyOn(service.telegram, "sendText").mockResolvedValue();
 
     const turnPromise = service.enqueueUserEvent(userEvent(42));
-    // Flush microtasks so the streaming loop reaches our deferred pause point
-    for (let i = 0; i < 10; i++) await flush();
-
-    // At this point the stream is paused after the react fence delta.
-    // The pre-execution should have already fired the react.
-    expect(reactFired).toEqual(["👀"]);
+    // The stream is paused after the react fence delta; pre-execution now
+    // includes async Brain authorization (store read + audit write), so wait
+    // for the reaction rather than counting flush rounds.
+    await vi.waitFor(() => expect(reactFired).toEqual(["👀"]));
 
     // Allow the stream to finish
     afterReactDeferred.resolve();
@@ -1508,22 +1506,13 @@ describe("incremental directive execution", () => {
     vi.spyOn(service.telegram, "sendText").mockResolvedValue();
 
     await service.enqueueUserEvent(userEvent(10));
-    for (let i = 0; i < 10; i++) await flush();
-
-    // After fence1 delta, only the first reaction should have fired
-    expect(reactionOrder).toEqual(["👀"]);
+    // Pre-execution now includes async Brain authorization, so wait for the
+    // first reaction instead of counting flush rounds.
+    await vi.waitFor(() => expect(reactionOrder).toEqual(["👀"]));
 
     afterFence1.resolve();
-    // Wait for turn to fully complete
-    for (let i = 0; i < 30; i++) {
-      const running = (service as unknown as { turnRunning: boolean }).turnRunning;
-      if (!running) break;
-      await flush();
-    }
-    // Give fire-and-forget directive writes time to settle
-    for (let i = 0; i < 10; i++) await flush();
-
     // Both reactions fire in order, each exactly once
-    expect(reactionOrder).toEqual(["👀", "✅"]);
+    await vi.waitFor(() => expect(reactionOrder).toEqual(["👀", "✅"]));
+    await vi.waitFor(() => expect((service as unknown as { turnRunning: boolean }).turnRunning).toBe(false));
   });
 });

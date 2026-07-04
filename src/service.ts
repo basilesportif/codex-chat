@@ -2180,17 +2180,16 @@ export class ServiceSupervisor {
   }
 
   /**
-   * Brain capability enforcement is scoped to Slack-surface traffic (and
-   * Brain-authenticated IPC). Telegram keeps its numeric allowlist and
-   * internal system/loop/subagent paths keep local trust — the Brain store
-   * does not carry grants for those, and Telegram must keep working even if
-   * the Brain store is missing.
+   * Brain capability enforcement covers the user surfaces (Telegram and
+   * Slack, fail-closed against the Brain store) and Brain-authenticated IPC.
+   * Internal system/loop/subagent paths keep local trust. The Telegram
+   * numeric allowlist remains as an outer gate in front of Brain.
    */
   private brainEnforcementApplies(event?: Pick<UserEvent, "source" | "actor" | "outputTarget"> | undefined, target?: UserEvent["outputTarget"]): boolean {
     if (!this.config.brain.enforcementEnabled) return false;
-    if (event?.source === "slack") return true;
+    if (event?.source === "slack" || event?.source === "telegram") return true;
     const surface = target?.surfaceKind ?? event?.outputTarget?.surfaceKind ?? event?.actor?.surfaceKind;
-    return surface === "slack";
+    return surface === "slack" || surface === "telegram";
   }
 
   private async authorizeAndRecord(event: UserEvent, operation: string, reason: string, caller: string): Promise<CapabilityDecision> {
@@ -2744,7 +2743,7 @@ export class ServiceSupervisor {
 
   private async sendTextToOutputTarget(target: UserEvent["outputTarget"], text: string, format?: "text" | "markdown" | "markdownv2", preserveFormatArgument = false): Promise<void> {
     const actor = this.activeTurnEvent?.actor ?? this.sideEffectEvent?.actor;
-    if (actor && this.brainEnforcementApplies(this.activeTurnEvent ?? this.sideEffectEvent, target) && target?.surfaceKind === "slack") {
+    if (actor && this.brainEnforcementApplies(this.activeTurnEvent ?? this.sideEffectEvent, target) && (target?.surfaceKind === "slack" || target?.surfaceKind === "telegram")) {
       const decision = await authorizeOutput({
         actor,
         target,
@@ -2783,7 +2782,7 @@ export class ServiceSupervisor {
   }
 
   private async sendImageToOutputTarget(target: UserEvent["outputTarget"], input: Parameters<TelegramGateway["sendImage"]>[1]): Promise<void> {
-    if ((this.activeTurnEvent?.actor ?? this.sideEffectEvent?.actor) && this.brainEnforcementApplies(this.activeTurnEvent ?? this.sideEffectEvent, target) && target?.surfaceKind === "slack") {
+    if ((this.activeTurnEvent?.actor ?? this.sideEffectEvent?.actor) && this.brainEnforcementApplies(this.activeTurnEvent ?? this.sideEffectEvent, target) && (target?.surfaceKind === "slack" || target?.surfaceKind === "telegram")) {
       const decision = await authorizeOutput({
         actor: this.activeTurnEvent?.actor ?? this.sideEffectEvent?.actor,
         target,
@@ -2801,7 +2800,7 @@ export class ServiceSupervisor {
   }
 
   private async sendDocumentToOutputTarget(target: UserEvent["outputTarget"], input: Parameters<TelegramGateway["sendDocument"]>[1]): Promise<void> {
-    if ((this.activeTurnEvent?.actor ?? this.sideEffectEvent?.actor) && this.brainEnforcementApplies(this.activeTurnEvent ?? this.sideEffectEvent, target) && target?.surfaceKind === "slack") {
+    if ((this.activeTurnEvent?.actor ?? this.sideEffectEvent?.actor) && this.brainEnforcementApplies(this.activeTurnEvent ?? this.sideEffectEvent, target) && (target?.surfaceKind === "slack" || target?.surfaceKind === "telegram")) {
       const decision = await authorizeOutput({
         actor: this.activeTurnEvent?.actor ?? this.sideEffectEvent?.actor,
         target,

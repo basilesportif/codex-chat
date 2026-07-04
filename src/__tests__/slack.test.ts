@@ -593,7 +593,7 @@ describe("Slack runtime foundation", () => {
     expect(history).not.toHaveBeenCalled();
   });
 
-  test("Telegram path is unaffected by missing Brain capability store", async () => {
+  test("Telegram is fail-closed too when the Brain capability store is missing", async () => {
     const config = await slackConfig();
     process.env.BRAIN_CAPABILITY_STORE_PATH = join(config.rootDir, "missing-capabilities.json");
     const logger = createLogger("silent");
@@ -610,14 +610,14 @@ describe("Slack runtime foundation", () => {
       userId: 253768951,
       username: "tim",
       messageId: 123,
-      text: "telegram should still work",
+      text: "telegram uses the same Brain enforcement",
       attachments: [],
       receivedAt: "2026-07-01T00:00:00.000Z",
     });
     await waitForIdle(service);
 
-    expect(codexTurn).toHaveBeenCalledTimes(1);
-    expect(telegramSend).toHaveBeenCalledWith(253768951, "Telegram answer.", 123);
+    expect(codexTurn).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(telegramSend).toHaveBeenCalledWith(253768951, CAPABILITY_DENIED_MESSAGE, 123, "text"));
   });
 
   test("Slack Events API rejects invalid signatures", async () => {

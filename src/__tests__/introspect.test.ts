@@ -219,7 +219,7 @@ describe("dispatch_subagent status", () => {
         effort: "high",
         serviceTier: "fast"
       },
-      { source: "telegram", text: "x", attachments: [], receivedAt: new Date().toISOString(), chatId: 123, messageId: 456 }
+      { source: "telegram", text: "x", attachments: [], receivedAt: new Date().toISOString(), chatId: 123, userId: 253768951, messageId: 456 }
     );
 
     expect(sendText).toHaveBeenCalledWith(123, "Sub: inspect routing\nresearcher · gpt-5.5 · high · fast", 456);
@@ -238,7 +238,7 @@ describe("cancel_job directive", () => {
 
     const status = await (service as unknown as { executeDirective(action: unknown, origin: unknown): Promise<string> }).executeDirective(
       { type: "cancel_job", idempotencyKey: "cancel-missing", jobId: "feedface" },
-      { source: "telegram", text: "x", attachments: [], receivedAt: new Date().toISOString(), chatId: 123, messageId: 456 }
+      { source: "telegram", text: "x", attachments: [], receivedAt: new Date().toISOString(), chatId: 123, userId: 253768951, messageId: 456 }
     );
 
     expect(status).toBe("failed");
@@ -259,7 +259,7 @@ describe("cancel_job directive", () => {
 
     const status = await (service as unknown as { executeDirective(action: unknown, origin: unknown): Promise<string> }).executeDirective(
       { type: "cancel_job", idempotencyKey: "cancel-ambiguous", jobId: "dead" },
-      { source: "telegram", text: "x", attachments: [], receivedAt: new Date().toISOString(), chatId: 123, messageId: 456 }
+      { source: "telegram", text: "x", attachments: [], receivedAt: new Date().toISOString(), chatId: 123, userId: 253768951, messageId: 456 }
     );
 
     expect(status).toBe("failed");

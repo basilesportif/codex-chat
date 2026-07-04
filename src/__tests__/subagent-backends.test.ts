@@ -151,11 +151,11 @@ async function waitFor(predicate: () => boolean, attempts = 50): Promise<void> {
   expect(predicate()).toBe(true);
 }
 
-function fakeClaudeInitMessage(sessionId = "claude-session") {
+function fakeClaudeInitMessage(sessionId = "claude-session", apiKeySource = "oauth") {
   return {
     type: "system",
     subtype: "init",
-    apiKeySource: "oauth",
+    apiKeySource,
     claude_code_version: "2.1.200",
     cwd: "/tmp",
     tools: [],
@@ -501,6 +501,59 @@ describe("Claude Agent SDK subagent backend", () => {
     expect(events).toContain("serviceTierIgnored");
     expect(events).not.toContain("oauth-secret-value");
     expect(events).not.toContain("anthropic-api-secret");
+    await backend.shutdown();
+  });
+
+  test("accepts subscription OAuth when SDK init event reports apiKeySource none", async () => {
+    vi.resetModules();
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-subagent-claude-"));
+    tempDirs.push(root);
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "oauth-secret-value";
+    const queryMock = vi.fn((params: { prompt: AsyncIterable<unknown> }) => {
+      async function* messages() {
+        const iterator = params.prompt[Symbol.asyncIterator]();
+        await iterator.next();
+        yield fakeClaudeInitMessage("claude-session-none", "none");
+        yield {
+          type: "result",
+          subtype: "success",
+          result: "final answer",
+          errors: [],
+          uuid: "00000000-0000-4000-8000-000000000005",
+          session_id: "claude-session-none"
+        };
+      }
+      return Object.assign(messages(), {
+        initializationResult: vi.fn().mockResolvedValue({
+          account: { apiProvider: "firstParty", subscriptionType: "Claude Max" },
+          fast_mode_state: "off"
+        }),
+        interrupt: vi.fn().mockResolvedValue(undefined),
+        close: vi.fn()
+      });
+    });
+    vi.doMock("@anthropic-ai/claude-agent-sdk", () => ({ query: queryMock }));
+
+    const { ClaudeAgentSdkChildAgentBackend } = await import("../subagent-backends.js");
+    const backend = new ClaudeAgentSdkChildAgentBackend(enableClaude(testConfig(root)), fakeLogger() as never);
+    const job = subagentJob(root, "job_claudeapikeynone000000000000000");
+    const started = await backend.start({
+      job,
+      assembledPrompt: "do claude work",
+      lastMessagePath: join(root, "last-message.md"),
+      stdoutPath: join(root, "events.jsonl"),
+      stderrPath: join(root, "stderr.log"),
+      appServerLogPath: join(root, "app-server.log"),
+      model: "claude-opus-4-8",
+      effort: "medium",
+      serviceTier: "fast",
+      images: [],
+      onJobUpdated: vi.fn().mockResolvedValue(undefined)
+    });
+
+    await expect(started.finished).resolves.toMatchObject({ code: 0, signal: null });
+    expect(job.backendThreadId).toBe("claude-session-none");
+    await expect(readFile(join(root, "last-message.md"), "utf8")).resolves.toBe("final answer");
     await backend.shutdown();
   });
 

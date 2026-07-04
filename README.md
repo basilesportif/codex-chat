@@ -200,6 +200,8 @@ set, and next/last run when available.
   keys, Bedrock/Vertex/Foundry/gateway provider env vars, and configured Codex
   provider API keys are stripped from the Claude child environment; the backend
   fails readiness if OAuth is not present.
+  See `docs/claude-agent-sdk-subagents.md` for the current Claude model strings,
+  alias notes, OAuth-only canary workflow, and version requirements.
 
 Telegram recovery path: send `agent backend exec` from an admin account. That
 sets a persisted runtime override in `data/state/subagent_runtime.json` so new
@@ -218,11 +220,15 @@ app-server- or Claude-backed running jobs with an active turn, `agent steer
 steering is implemented with the SDK streaming input session as a follow-up user
 message in the same session.
 
-Claude model/effort/tier notes: `model` is passed through to Claude unchanged;
-`low|medium|high|xhigh` map to Claude SDK effort; `none|minimal` disable
-Claude thinking. Codex `serviceTier` has no Claude equivalent, so it is recorded
-on launch and otherwise ignored except that Fast requests apply Claude Code
-`fastMode` settings when the installed SDK supports them.
+Claude model/effort/tier notes: `model` is passed through to Claude unchanged.
+Use pinned model strings such as `claude-opus-4-8` for Opus 4.8 and
+`claude-fable-5` for Fable 5; Claude Code aliases include `opus`, `fable`,
+`sonnet`, `haiku`, and `best`, but aliases can move over time. `low|medium|high|xhigh`
+map to Claude SDK effort; `none|minimal` disable Claude thinking and should not
+be used with `claude-fable-5` because Fable 5 uses always-on adaptive thinking.
+Codex `serviceTier` has no Claude equivalent, so it is recorded on launch and
+otherwise ignored except that Fast requests apply Claude Code `fastMode`
+settings when the installed SDK supports them.
 
 ## Durable Employees
 

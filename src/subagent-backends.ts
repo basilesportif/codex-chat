@@ -365,6 +365,7 @@ class ClaudeAgentSdkSession {
   private partialText = "";
   private finalMessage = "";
   private killSignal: NodeJS.Signals | null = null;
+  private oauthInitializationVerified = false;
   private resolveFinished!: (finish: ChildAgentFinish) => void;
   private redactionEnv: ChildEnvSource = {};
   private readonly finishedPromise = new Promise<ChildAgentFinish>((resolve) => {
@@ -579,9 +580,10 @@ class ClaudeAgentSdkSession {
     if (summary.apiProvider && summary.apiProvider !== "firstParty") {
       throw new Error(`Claude Agent SDK backend requires first-party subscription OAuth; SDK reported apiProvider=${summary.apiProvider}.`);
     }
-    if (summary.apiKeySource && summary.apiKeySource !== "oauth") {
+    if (summary.apiKeySource && summary.apiKeySource !== "oauth" && summary.apiKeySource !== "none") {
       throw new Error(`Claude Agent SDK backend requires OAuth credentials; SDK reported apiKeySource=${summary.apiKeySource}.`);
     }
+    this.oauthInitializationVerified = true;
   }
 
   private accountSummary(account: {
@@ -633,7 +635,8 @@ class ClaudeAgentSdkSession {
   private async handleSdkMessage(message: ClaudeSdkMessage): Promise<void> {
     await this.appendEvent({ event: "claude_sdk_message", at: nowIso(), backend: "claude_agent_sdk", raw: message });
     if (message.type === "system" && message.subtype === "init") {
-      if (message.apiKeySource !== "oauth") {
+      const apiKeySource = typeof message.apiKeySource === "string" ? message.apiKeySource : "";
+      if ((apiKeySource && apiKeySource !== "oauth" && apiKeySource !== "none") || !this.oauthInitializationVerified) {
         const error = `Claude Agent SDK backend requires OAuth credentials; SDK init reported apiKeySource=${message.apiKeySource}.`;
         this.query?.close();
         throw new Error(error);

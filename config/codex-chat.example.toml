@@ -129,6 +129,17 @@ cleanupArtifacts = true
 # with `claude auth login` (local ~/.claude credentials) or
 # `claude setup-token` / CLAUDE_CODE_OAUTH_TOKEN. API keys and provider
 # auth env vars are stripped/rejected for this backend.
+#
+# Model strings are passed through unchanged to the Claude Agent SDK. Prefer
+# pinned Claude IDs for reproducible subagent launches:
+#   claude-opus-4-8   # Opus 4.8; Claude Code alias `opus`
+#   claude-fable-5    # Fable 5; Claude Code alias `fable`
+#   claude-sonnet-5   # Sonnet 5; Claude Code alias `sonnet`
+#   claude-haiku-4-5-20251001  # alias `claude-haiku-4-5`
+# Claude Code aliases (`best`, `opus`, `fable`, `sonnet`, `haiku`, etc.) are
+# accepted by Claude Code/SDK but can change over time; use full IDs in docs,
+# tests, and canaries. Avoid effort `none`/`minimal` with Fable 5 because it
+# has always-on adaptive thinking.
 enabled = false
 pathToClaudeCodeExecutable = ""
 permissionMode = "bypassPermissions"

@@ -127,6 +127,55 @@ userIds = [12345]
     expect(config.rootDir).toBe(resolve(path, "../.."));
   });
 
+  test("fills schema defaults for partially-specified TOML tables", async () => {
+    const path = await tempConfig(`
+version = 1
+
+[subagents.claude]
+maxTurns = 7
+
+[slack]
+enabled = true
+
+[slack.context]
+maxThreadMessages = 5
+`);
+
+    const config = await loadConfig(path);
+
+    // Partial [subagents.claude]: the overridden key sticks, everything else defaults.
+    expect(config.subagents.claude).toEqual({
+      enabled: false,
+      pathToClaudeCodeExecutable: "",
+      permissionMode: "bypassPermissions",
+      allowDangerouslySkipPermissions: true,
+      allowedTools: ["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep"],
+      disallowedTools: [],
+      maxTurns: 7,
+      settingSources: [],
+      fastMode: true,
+      steerSettleGraceMs: 10_000,
+    });
+    // Partial [slack] / [slack.context] tables keep defaults for unspecified fields.
+    expect(config.slack.enabled).toBe(true);
+    expect(config.slack.eventsPath).toBe("/api/slack/events");
+    expect(config.slack.publicBaseUrl).toBe("https://brain.decisive-outcomes.com");
+    expect(config.slack.signingSecretEnv).toBe("SLACK_SIGNING_SECRET");
+    expect(config.slack.botTokenEnv).toBe("SLACK_BOT_TOKEN");
+    expect(config.slack.appTokenEnv).toBe("SLACK_APP_TOKEN");
+    expect(config.slack.context).toEqual({
+      enabled: true,
+      maxChannelMessages: 15,
+      maxThreadMessages: 5,
+      maxMessageChars: 700,
+      maxTotalChars: 6_000,
+      fetchTimeoutMs: 2_500,
+    });
+    // Untouched sections still materialize fully-defaulted.
+    expect(config.subagents.backend).toBe("codex_exec");
+    expect(config.telegram.allowlist).toEqual({ userIds: [], chatIds: [], adminUserIds: [] });
+  });
+
   test("rejects invalid required config values", async () => {
     const path = await tempConfig("version = 2\n");
 

@@ -15,7 +15,7 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import WebSocket from "ws";
 import type { Logger } from "pino";
-import { resolveConfigPath, type AppConfig } from "./config.js";
+import { defaultClaudeSubagentConfig, resolveConfigPath, type AppConfig } from "./config.js";
 import { loadCodexProfileConfig } from "./codex-profiles.js";
 import { CLAUDE_NON_OAUTH_AUTH_ENV, CLAUDE_OAUTH_CHILD_ENV, sanitizeClaudeAgentSdkChildProcessEnv, sanitizeCodexChildProcessEnv, type ChildEnvSource } from "./env.js";
 import type { ServiceTier, ServiceTierMode, SubagentBackendKind, SubagentJob } from "./types.js";
@@ -70,18 +70,8 @@ export interface ChildAgentBackend {
 
 type ClaudeSubagentConfig = NonNullable<AppConfig["subagents"]["claude"]>;
 
-const DEFAULT_CLAUDE_SUBAGENT_CONFIG: ClaudeSubagentConfig = {
-  enabled: false,
-  pathToClaudeCodeExecutable: "",
-  permissionMode: "bypassPermissions",
-  allowDangerouslySkipPermissions: true,
-  allowedTools: ["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep"],
-  disallowedTools: [],
-  maxTurns: 100,
-  settingSources: [],
-  fastMode: true,
-  steerSettleGraceMs: 10_000
-};
+// Derived from the config schema so the defaults are declared exactly once.
+const DEFAULT_CLAUDE_SUBAGENT_CONFIG: ClaudeSubagentConfig = defaultClaudeSubagentConfig();
 
 const CLAUDE_SYNTHETIC_ACTIVE_TURN_ID = "claude-agent-sdk-stream";
 

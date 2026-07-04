@@ -46,7 +46,7 @@ const employeeMemoryPolicySchema = z
     retentionDays: z.number().int().positive().optional(),
     notes: z.string().default(""),
   })
-  .default({ enabled: true, persistRawLogs: false, notes: "" });
+  .prefault({});
 
 const employeeCompactionPolicySchema = z
   .object({
@@ -56,7 +56,7 @@ const employeeCompactionPolicySchema = z
     maxBriefingBytes: z.number().int().positive().optional(),
     notes: z.string().default(""),
   })
-  .default({ compactAfterTask: true, interval: "manual", notes: "" });
+  .prefault({});
 
 const employeeCapabilitiesPolicySchema = z
   .object({
@@ -65,7 +65,7 @@ const employeeCapabilitiesPolicySchema = z
     denied: z.array(z.string()).default([]),
     notes: z.string().default(""),
   })
-  .default({ allowed: [], denied: [], notes: "" });
+  .prefault({});
 
 const employeeAclPolicySchema = z
   .object({
@@ -74,7 +74,7 @@ const employeeAclPolicySchema = z
     adminUserIds: z.array(telegramUserIdSchema).default([]),
     notes: z.string().default(""),
   })
-  .default({ telegramUserIds: [], adminUserIds: [], notes: "" });
+  .prefault({});
 
 const employeeDefinitionSchema = z
   .object({
@@ -104,6 +104,32 @@ const employeeDefinitionSchema = z
   })
   .strict();
 
+const claudeSubagentSchema = z.object({
+  enabled: z.boolean().default(false),
+  pathToClaudeCodeExecutable: z.string().default(""),
+  permissionMode: claudePermissionModeSchema.default("bypassPermissions"),
+  allowDangerouslySkipPermissions: z.boolean().default(true),
+  allowedTools: z.array(z.string()).default(["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep"]),
+  disallowedTools: z.array(z.string()).default([]),
+  maxTurns: z.number().int().positive().default(100),
+  // Empty by default so SDK subagents do not load user/project settings
+  // that could contain apiKeyHelper or other non-OAuth auth sources.
+  settingSources: z.array(claudeSettingSourceSchema).default([]),
+  fastMode: z.boolean().default(true),
+  // How long to wait after a turn result before settling a job that
+  // still has outstanding steers. A steer absorbed into the in-flight
+  // run produces no extra result message; if the SDK stays silent for
+  // this window, the recorded result is treated as final.
+  steerSettleGraceMs: z.number().int().positive().default(10_000),
+});
+
+export type ClaudeSubagentConfig = z.infer<typeof claudeSubagentSchema>;
+
+/** Fully-defaulted [subagents.claude] config, derived from the schema. */
+export function defaultClaudeSubagentConfig(): ClaudeSubagentConfig {
+  return claudeSubagentSchema.parse({});
+}
+
 const configSchema = z.object({
   version: z.literal(1).default(1),
   service: z.object({
@@ -113,7 +139,7 @@ const configSchema = z.object({
     logLevel: z.string().default("info"),
     timezone: z.string().default("Etc/UTC"),
     ipcSocket: z.string().default("data/run/codex-chat.sock"),
-  }),
+  }).prefault({}),
   codex: z.object({
     binary: z.string().default("codex"),
     transport: z.string().default("app-server"),
@@ -139,7 +165,7 @@ const configSchema = z.object({
     maxRestartAttempts: z.number().int().positive().default(8),
     restartBackoffBaseMs: z.number().int().positive().default(2000),
     restartBackoffMaxMs: z.number().int().positive().default(60000),
-  }),
+  }).prefault({}),
   telegram: z.object({
     mode: z.enum(["polling", "webhook"]).default("polling"),
     botTokenEnv: z.string().default("TELEGRAM_BOT_TOKEN"),
@@ -154,8 +180,8 @@ const configSchema = z.object({
         chatIds: z.array(z.number().int()).default([]),
         adminUserIds: z.array(telegramUserIdSchema).default([]),
       })
-      .default({ userIds: [], chatIds: [], adminUserIds: [] }),
-  }),
+      .prefault({}),
+  }).prefault({}),
   slack: z
     .object({
       enabled: z.boolean().default(false),
@@ -179,47 +205,25 @@ const configSchema = z.object({
           maxTotalChars: z.number().int().positive().max(20_000).default(6_000),
           fetchTimeoutMs: z.number().int().positive().max(10_000).default(2_500),
         })
-        .default({
-          enabled: true,
-          maxChannelMessages: 15,
-          maxThreadMessages: 30,
-          maxMessageChars: 700,
-          maxTotalChars: 6_000,
-          fetchTimeoutMs: 2_500,
-        }),
+        .prefault({}),
     })
-    .default({
-      enabled: false,
-      eventsPath: "/api/slack/events",
-      publicBaseUrl: "https://brain.decisive-outcomes.com",
-      signingSecretEnv: "SLACK_SIGNING_SECRET",
-      botTokenEnv: "SLACK_BOT_TOKEN",
-      appTokenEnv: "SLACK_APP_TOKEN",
-      context: {
-        enabled: true,
-        maxChannelMessages: 15,
-        maxThreadMessages: 30,
-        maxMessageChars: 700,
-        maxTotalChars: 6_000,
-        fetchTimeoutMs: 2_500,
-      },
-    }),
+    .prefault({}),
   brain: z.object({
     enforcementEnabled: z.boolean().default(true),
     storePath: z.string().default("/home/tim/.brain/control-plane/capabilities.json"),
     decisionAuditDir: z.string().default("capability_decisions"),
-  }),
+  }).prefault({}),
   api: z.object({
     enabled: z.boolean().default(false),
     host: z.string().default("127.0.0.1"),
     port: z.number().int().min(0).max(65535).default(49346),
     allowNonLocalhost: z.boolean().default(false),
-  }),
+  }).prefault({}),
   behavior: z.object({
     dir: z.string().default("behavior"),
     entrypoint: z.string().default("AGENTS.md"),
     reloadOnSighup: z.boolean().default(true),
-  }),
+  }).prefault({}),
   subagents: z.object({
     enabled: z.boolean().default(true),
     backend: subagentBackendSchema.default("codex_exec"),
@@ -242,38 +246,8 @@ const configSchema = z.object({
     childInterruptGraceMs: z.number().int().positive().default(5000),
     allowedProfiles: z.array(z.string()).default([]),
     cleanupArtifacts: z.boolean().default(true),
-    claude: z
-      .object({
-        enabled: z.boolean().default(false),
-        pathToClaudeCodeExecutable: z.string().default(""),
-        permissionMode: claudePermissionModeSchema.default("bypassPermissions"),
-        allowDangerouslySkipPermissions: z.boolean().default(true),
-        allowedTools: z.array(z.string()).default(["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep"]),
-        disallowedTools: z.array(z.string()).default([]),
-        maxTurns: z.number().int().positive().default(100),
-        // Empty by default so SDK subagents do not load user/project settings
-        // that could contain apiKeyHelper or other non-OAuth auth sources.
-        settingSources: z.array(claudeSettingSourceSchema).default([]),
-        fastMode: z.boolean().default(true),
-        // How long to wait after a turn result before settling a job that
-        // still has outstanding steers. A steer absorbed into the in-flight
-        // run produces no extra result message; if the SDK stays silent for
-        // this window, the recorded result is treated as final.
-        steerSettleGraceMs: z.number().int().positive().default(10_000),
-      })
-      .default({
-        enabled: false,
-        pathToClaudeCodeExecutable: "",
-        permissionMode: "bypassPermissions",
-        allowDangerouslySkipPermissions: true,
-        allowedTools: ["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep"],
-        disallowedTools: [],
-        maxTurns: 100,
-        settingSources: [],
-        fastMode: true,
-        steerSettleGraceMs: 10_000,
-      }),
-  }),
+    claude: claudeSubagentSchema.prefault({}),
+  }).prefault({}),
   employees: z.object({
     enabled: z.boolean().default(false),
     rootDir: z.string().default("data/employees"),
@@ -284,23 +258,23 @@ const configSchema = z.object({
     definitions: z
       .record(employeeIdSchema, employeeDefinitionSchema)
       .default({}),
-  }),
+  }).prefault({}),
   loops: z.object({
     enabled: z.boolean().default(true),
     path: z.string().default("config/loops.json"),
     namespace: z.string().default("codex-chat"),
     runnerCommand: z.string().default("codex-chat loop run"),
-  }),
+  }).prefault({}),
   monitors: z.object({
     enabled: z.boolean().default(true),
     path: z.string().default("config/monitors.json"),
     maxRestartBackoffSec: z.number().int().positive().default(300),
-  }),
+  }).prefault({}),
   files: z.object({
     dir: z.string().default("data/files"),
     artifactDir: z.string().default("data/artifacts"),
     allowedSendRoots: z.array(z.string()).default(["data", process.cwd()]),
-  }),
+  }).prefault({}),
   transcription: z.object({
     enabled: z.boolean().default(true),
     provider: z.enum(["openai"]).default("openai"),
@@ -309,19 +283,19 @@ const configSchema = z.object({
     apiKeyEnv: z.string().default("OPENAI_API_KEY"),
     language: z.string().default(""),
     promptPath: z.string().default(""),
-  }),
+  }).prefault({}),
   ingest: z.object({
     apiKeysEnv: z.string().default("CODEXCHAT_INGEST_API_KEYS"),
     apiKeys: z
       .array(z.object({ identity: z.string(), hash: z.string() }))
       .default([]),
     audioMaxMb: z.number().positive().default(100),
-  }),
+  }).prefault({}),
   security: z.object({
     redactSecretsInLogs: z.boolean().default(true),
     requireLocalFileForSend: z.boolean().default(true),
     allowShellActionsFromDirectives: z.boolean().default(false),
-  }),
+  }).prefault({}),
 });
 
 export type AppConfig = z.infer<typeof configSchema> & {
@@ -335,162 +309,9 @@ export type AppConfig = z.infer<typeof configSchema> & {
 };
 export type EmployeeDefinitionConfig = z.infer<typeof employeeDefinitionSchema>;
 
-const defaultConfig = configSchema.parse({
-  version: 1,
-  service: {
-    name: "codex-chat",
-    workspace: process.cwd(),
-    stateDir: "data/state",
-    logLevel: "info",
-    timezone: "Etc/UTC",
-    ipcSocket: "data/run/codex-chat.sock",
-  },
-  codex: {
-    binary: "codex",
-    transport: "app-server",
-    appServerHost: "127.0.0.1",
-    appServerPort: 49345,
-    model: "gpt-5.5",
-    effort: "medium",
-    serviceTier: "fast",
-    serviceTierMode: "auto",
-    profile: "",
-    modelProvider: "",
-    providerApiKeyEnvNames: ["OPENROUTER_API_KEY"],
-    sandbox: "danger-full-access",
-    approvalPolicy: "never",
-    mainSessionName: "codex-chat-main",
-    startupTimeoutSec: 60,
-    turnTimeoutSec: 3600,
-    keepAliveSec: 60,
-    extraConfig: ['model_reasoning_effort="medium"'],
-    addDirs: [],
-    maxRestartAttempts: 8,
-    restartBackoffBaseMs: 2000,
-    restartBackoffMaxMs: 60000,
-  },
-  telegram: {
-    mode: "polling",
-    botTokenEnv: "TELEGRAM_BOT_TOKEN",
-    parseMode: "plain",
-    pairingEnabledOnEmptyAllowlist: true,
-    downloadMaxBytes: 52_428_800,
-    sendProgressUpdates: true,
-    opsChatId: 0,
-    allowlist: { userIds: [], chatIds: [], adminUserIds: [] },
-  },
-  slack: {
-    enabled: false,
-    eventsPath: "/api/slack/events",
-    publicBaseUrl: "https://brain.decisive-outcomes.com",
-    signingSecretEnv: "SLACK_SIGNING_SECRET",
-    botTokenEnv: "SLACK_BOT_TOKEN",
-    appTokenEnv: "SLACK_APP_TOKEN",
-    context: {
-      enabled: true,
-      maxChannelMessages: 15,
-      maxThreadMessages: 30,
-      maxMessageChars: 700,
-      maxTotalChars: 6_000,
-      fetchTimeoutMs: 2_500,
-    },
-  },
-  brain: {
-    enforcementEnabled: true,
-    storePath: "/home/tim/.brain/control-plane/capabilities.json",
-    decisionAuditDir: "capability_decisions",
-  },
-  api: {
-    enabled: false,
-    host: "127.0.0.1",
-    port: 49346,
-    allowNonLocalhost: false,
-  },
-  behavior: {
-    dir: "behavior",
-    entrypoint: "AGENTS.md",
-    reloadOnSighup: true,
-  },
-  subagents: {
-    enabled: true,
-    backend: "codex_exec",
-    maxConcurrent: 5,
-    defaultModel: "",
-    defaultEffort: "medium",
-    defaultServiceTier: "fast",
-    defaultCodexProfile: "",
-    defaultModelProvider: "",
-    serviceTierMode: "auto",
-    allowProviderOverride: false,
-    allowedCodexProfiles: [],
-    allowedModelProviders: [],
-    defaultTimeoutSec: 1800,
-    maxTimeoutSec: 7200,
-    maxPromptBytes: 262_144,
-    artifactDir: "data/subagents",
-    childSocketDir: "data/run/subagents",
-    childStartupTimeoutSec: 60,
-    childInterruptGraceMs: 5000,
-    allowedProfiles: [],
-    cleanupArtifacts: true,
-    claude: {
-      enabled: false,
-      pathToClaudeCodeExecutable: "",
-      permissionMode: "bypassPermissions",
-      allowDangerouslySkipPermissions: true,
-      allowedTools: ["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep"],
-      disallowedTools: [],
-      maxTurns: 100,
-      settingSources: [],
-      fastMode: true,
-      steerSettleGraceMs: 10_000,
-    },
-  },
-  employees: {
-    enabled: false,
-    rootDir: "data/employees",
-    socketDir: "data/run/employees",
-    defaultModel: "gpt-5.5",
-    defaultEffort: "medium",
-    maxActive: 2,
-    definitions: {},
-  },
-  loops: {
-    enabled: true,
-    path: "config/loops.json",
-    namespace: "codex-chat",
-    runnerCommand: "codex-chat loop run",
-  },
-  monitors: {
-    enabled: true,
-    path: "config/monitors.json",
-    maxRestartBackoffSec: 300,
-  },
-  files: {
-    dir: "data/files",
-    artifactDir: "data/artifacts",
-    allowedSendRoots: ["data", process.cwd()],
-  },
-  transcription: {
-    enabled: true,
-    provider: "openai",
-    model: "gpt-4o-transcribe",
-    diarizeModel: "gpt-4o-transcribe-diarize",
-    apiKeyEnv: "OPENAI_API_KEY",
-    language: "",
-    promptPath: "",
-  },
-  ingest: {
-    apiKeysEnv: "CODEXCHAT_INGEST_API_KEYS",
-    apiKeys: [],
-    audioMaxMb: 100,
-  },
-  security: {
-    redactSecretsInLogs: true,
-    requireLocalFileForSend: true,
-    allowShellActionsFromDirectives: false,
-  },
-});
+// Every default lives on the schema fields above; parsing an empty object
+// materializes the fully-defaulted config used as the deepMerge base.
+const defaultConfig = configSchema.parse({});
 
 function deepMerge<T>(base: T, override: unknown): T {
   if (!override || typeof override !== "object" || Array.isArray(override))

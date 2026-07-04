@@ -282,6 +282,8 @@ export class ServiceSupervisor {
   private injectPolling = false;
   private stopping = false;
   private restartingCodex = false;
+  /** Crash reason reported while restartCodex was already running; triggers one follow-up restart pass. */
+  private crashDuringRestart?: string;
   private seenIdempotency = new Map<string, number>();
 
   constructor(
@@ -1858,8 +1860,17 @@ export class ServiceSupervisor {
     info?: CodexCrashInfo,
     activeTurn?: { activeChatId?: number; activeMessageId?: number }
   ): Promise<void> {
-    if (this.restartingCodex || this.stopping) return;
+    if (this.stopping) return;
+    if (this.restartingCodex) {
+      // A crash arriving while a restart is already in flight (e.g. the fresh
+      // app-server dying during the recovery tail) must not be dropped — the
+      // child's exit event fires only once, so nothing else would retry.
+      this.crashDuringRestart = reason;
+      this.logger.warn({ component: "service", event: "crash_during_restart", reason }, "Codex crash reported while a restart is in progress; will re-check after");
+      return;
+    }
     this.restartingCodex = true;
+    this.crashDuringRestart = undefined;
     const wasKilled = info?.wasKilled ?? false;
     const crashHeader = wasKilled
       ? `⚠️ Codex was SIGKILL'd (likely OOM kill) — signal=${info?.signal ?? "SIGKILL"} code=${info?.code ?? "null"}`
@@ -1943,6 +1954,14 @@ export class ServiceSupervisor {
       // queue would burn through every queued message with "Codex is not
       // available" replies, making the outage worse.
       if (recovered) this.drainQueue();
+      const missedCrash = this.crashDuringRestart;
+      this.crashDuringRestart = undefined;
+      if (missedCrash && !this.stopping) {
+        this.logger.warn({ component: "service", event: "restart_reentered", reason: missedCrash }, "re-running Codex restart for a crash reported during recovery");
+        void this.restartCodex(missedCrash).catch((error) => {
+          this.logger.error({ component: "service", event: "restart_failed", error }, "Codex re-restart failed");
+        });
+      }
     }
   }
 

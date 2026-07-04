@@ -355,6 +355,37 @@ describe("service supervisor", () => {
     expect(calls).toEqual([1, 2, 3]);
   });
 
+  test("a crash reported during an in-flight restart triggers a follow-up restart pass", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+    vi.spyOn(service.telegram, "notifyOps").mockResolvedValue();
+    vi.spyOn(service.codex, "stop").mockResolvedValue();
+    vi.spyOn(service.codex, "health").mockResolvedValue({ ok: true, transport: "app-server", sessionId: "s", detail: "connected" });
+    vi.spyOn((service as unknown as { employees: { recoverRuntimesOnStartup(): Promise<void> } }).employees, "recoverRuntimesOnStartup").mockResolvedValue();
+    const firstStart = deferred();
+    let startCalls = 0;
+    const start = vi.spyOn(service.codex, "start").mockImplementation(async () => {
+      startCalls += 1;
+      if (startCalls === 1) await firstStart.promise;
+    });
+
+    const internal = service as unknown as { restartCodex(reason: string): Promise<void> };
+    const first = internal.restartCodex("crash one");
+    await flush();
+    // Second crash arrives while the first restart is still in flight.
+    const second = internal.restartCodex("crash two");
+    await flush();
+    expect(startCalls).toBe(1);
+
+    firstStart.resolve();
+    await first;
+    await second;
+    await vi.waitFor(() => expect(start).toHaveBeenCalledTimes(2));
+  });
+
   test("watchdog aborts main-loop turns after 80 seconds", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");

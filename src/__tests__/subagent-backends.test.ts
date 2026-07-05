@@ -491,6 +491,19 @@ describe("Claude Agent SDK subagent backend", () => {
     expect(options.env.CLAUDE_CODE_OAUTH_TOKEN).toBe("oauth-secret-value");
     expect(options.env).not.toHaveProperty("ANTHROPIC_API_KEY");
     expect(options.env).not.toHaveProperty("OPENROUTER_API_KEY");
+    expect(options.tools).toEqual(["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep", "Agent"]);
+    expect(options.allowedTools).toEqual(options.tools);
+    expect(options.disallowedTools).toEqual([]);
+    expect(options.agents).toMatchObject({
+      reviewer: {
+        description: expect.stringContaining("Review code changes"),
+        model: "claude-opus-4-8",
+        effort: "high",
+        tools: ["Read", "Glob", "Grep", "Bash"],
+        disallowedTools: ["Write", "Edit", "MultiEdit"],
+        prompt: expect.stringContaining("findings first")
+      }
+    });
     expect(prompts[0]).toMatchObject({
       type: "user",
       message: { role: "user", content: [{ type: "text", text: "do claude work" }] }
@@ -502,6 +515,57 @@ describe("Claude Agent SDK subagent backend", () => {
     expect(events).toContain("serviceTierIgnored");
     expect(events).not.toContain("oauth-secret-value");
     expect(events).not.toContain("anthropic-api-secret");
+    await backend.shutdown();
+  });
+
+  test("forces the native Agent tool even when a stale config narrows or disallows it", async () => {
+    vi.resetModules();
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-subagent-claude-"));
+    tempDirs.push(root);
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "oauth-secret-value";
+    const queryMock = vi.fn((params: { prompt: AsyncIterable<unknown>; options: Record<string, unknown> }) => {
+      async function* messages() {
+        await params.prompt[Symbol.asyncIterator]().next();
+        yield fakeClaudeInitMessage();
+        yield { type: "result", subtype: "success", result: "done", errors: [], uuid: "00000000-0000-4000-8000-000000000009", session_id: "claude-session" };
+      }
+      return Object.assign(messages(), {
+        initializationResult: vi.fn().mockResolvedValue({ account: { apiKeySource: "oauth", apiProvider: "firstParty", tokenSource: "oauth" } }),
+        interrupt: vi.fn().mockResolvedValue(undefined),
+        close: vi.fn()
+      });
+    });
+    vi.doMock("@anthropic-ai/claude-agent-sdk", () => ({ query: queryMock }));
+
+    const { ClaudeAgentSdkChildAgentBackend } = await import("../subagent-backends.js");
+    const config = enableClaude(testConfig(root));
+    config.subagents.claude!.allowedTools = ["Read"];
+    config.subagents.claude!.disallowedTools = ["Agent", "Bash"];
+    const backend = new ClaudeAgentSdkChildAgentBackend(config, fakeLogger() as never);
+    const job = subagentJob(root, "job_claudeagenttool0000000000000000");
+    const started = await backend.start({
+      job,
+      assembledPrompt: "do claude work",
+      lastMessagePath: join(root, "last-message.md"),
+      stdoutPath: join(root, "events.jsonl"),
+      stderrPath: join(root, "stderr.log"),
+      appServerLogPath: join(root, "app-server.log"),
+      model: "claude-opus-4-8",
+      effort: "high",
+      serviceTier: "fast",
+      serviceTierMode: "auto",
+      images: [],
+      onJobUpdated: vi.fn().mockResolvedValue(undefined)
+    });
+
+    await expect(started.finished).resolves.toMatchObject({ code: 0, signal: null });
+    const options = queryMock.mock.calls[0]?.[0].options as Record<string, unknown>;
+    expect(options.tools).toEqual(["Read", "Agent"]);
+    expect(options.allowedTools).toEqual(["Read", "Agent"]);
+    expect(options.disallowedTools).toEqual(["Bash"]);
+    const events = await readFile(join(root, "events.jsonl"), "utf8");
+    expect(events).toContain('"agentToolEnabled":true');
+    expect(events).toContain('"nativeAgents":["reviewer"]');
     await backend.shutdown();
   });
 

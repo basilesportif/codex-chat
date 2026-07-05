@@ -146,6 +146,10 @@ enabled = false
 pathToClaudeCodeExecutable = ""
 permissionMode = "bypassPermissions"
 allowDangerouslySkipPermissions = true
+# codex-chat also injects the Claude SDK native "Agent" tool for all
+# Claude-backed jobs so they can launch service-owned programmatic SDK agents.
+# The built-in native "reviewer" agent is pinned to claude-opus-4-8 with high
+# effort and a read/search/shell-only review toolset.
 allowedTools = ["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep"]
 disallowedTools = []
 maxTurns = 100

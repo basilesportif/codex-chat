@@ -6,6 +6,7 @@ import { homedir } from "node:os";
 import { extname, join } from "node:path";
 import {
   query as queryClaudeAgentSdk,
+  type AgentDefinition as ClaudeAgentDefinition,
   type EffortLevel as ClaudeEffortLevel,
   type Options as ClaudeAgentSdkOptions,
   type Query as ClaudeAgentSdkQuery,
@@ -76,6 +77,36 @@ const DEFAULT_CLAUDE_SUBAGENT_CONFIG: ClaudeSubagentConfig = defaultClaudeSubage
 const CLAUDE_SYNTHETIC_ACTIVE_TURN_ID = "claude-agent-sdk-stream";
 
 const CLAUDE_FAST_MODE_MODEL_PREFIXES = ["claude-opus-4-7", "claude-opus-4-8"];
+const CLAUDE_AGENT_TOOL_NAME = "Agent";
+const CLAUDE_NATIVE_REVIEWER_AGENT_NAME = "reviewer";
+const CLAUDE_NATIVE_REVIEWER_MODEL = "claude-opus-4-8";
+
+const CLAUDE_NATIVE_REVIEWER_AGENT: ClaudeAgentDefinition = {
+  description: "Review code changes for bugs, regressions, missing tests, and operational risks.",
+  model: CLAUDE_NATIVE_REVIEWER_MODEL,
+  effort: "high",
+  tools: ["Read", "Glob", "Grep", "Bash"],
+  disallowedTools: ["Write", "Edit", "MultiEdit"],
+  prompt: [
+    "You are a Claude-native reviewer subagent launched via the Claude Agent SDK Agent tool from a codex-chat Claude-backed child session.",
+    "Review code changes for bugs, regressions, missing tests, and operational risks.",
+    "Focus on actionable findings only. Do not edit files unless explicitly instructed by the parent session.",
+    "When reviewing a diff or changed paths, inspect the relevant files and tests before concluding.",
+    "Output findings first, ordered by severity, with file and line references when possible. If no issues are found, say so and mention any residual uncertainty."
+  ].join("\n")
+};
+
+function uniqueToolNames(tools: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const raw of tools) {
+    const tool = raw.trim();
+    if (!tool || seen.has(tool)) continue;
+    seen.add(tool);
+    result.push(tool);
+  }
+  return result;
+}
 
 /**
  * Claude fast mode is a premium speed tier available only on Opus 4.8/4.7.
@@ -417,7 +448,9 @@ class ClaudeAgentSdkSession {
       oauthEnvPresent: ready.oauthEnvPresent,
       credentialFiles: ready.credentialFiles,
       strippedNonOAuthEnv: ready.strippedNonOAuthEnv,
-      settingSources: claudeSubagentConfig(this.config).settingSources
+      settingSources: claudeSubagentConfig(this.config).settingSources,
+      agentToolEnabled: Array.isArray(options.tools) ? options.tools.includes(CLAUDE_AGENT_TOOL_NAME) : false,
+      nativeAgents: Object.keys(options.agents ?? {})
     });
 
     const query = queryClaudeAgentSdk({ prompt: this.queue, options });
@@ -560,6 +593,9 @@ class ClaudeAgentSdkSession {
     const settings = this.shouldApplyFastMode()
       ? { fastMode: true, fastModePerSessionOptIn: true }
       : undefined;
+    const tools = this.claudeSdkTools(cfg);
+    const disallowedTools = this.claudeSdkDisallowedTools(cfg);
+    const agents = this.claudeSdkAgents();
     const options: ClaudeAgentSdkOptions = {
       cwd: this.config.service.workspace,
       env: {
@@ -568,9 +604,10 @@ class ClaudeAgentSdkSession {
       },
       permissionMode: cfg.permissionMode,
       allowDangerouslySkipPermissions: cfg.permissionMode === "bypassPermissions" ? cfg.allowDangerouslySkipPermissions : undefined,
-      tools: cfg.allowedTools,
-      allowedTools: cfg.allowedTools,
-      disallowedTools: cfg.disallowedTools,
+      tools,
+      allowedTools: tools,
+      disallowedTools,
+      agents,
       maxTurns: cfg.maxTurns,
       settingSources: cfg.settingSources,
       strictMcpConfig: true,
@@ -588,6 +625,28 @@ class ClaudeAgentSdkSession {
     if (effort) options.effort = effort;
     if (thinking) options.thinking = thinking;
     return options;
+  }
+
+  private claudeSdkTools(cfg: ClaudeSubagentConfig): string[] {
+    // Native SDK subagents are part of the Claude-backed codex-chat backend,
+    // not top-level codex-chat-managed routing. Always expose the Agent tool
+    // so every Claude-backed child session can launch the programmatic agents
+    // below, even if the parent tool list is otherwise narrowed for a canary.
+    return uniqueToolNames([...cfg.allowedTools, CLAUDE_AGENT_TOOL_NAME]);
+  }
+
+  private claudeSdkDisallowedTools(cfg: ClaudeSubagentConfig): string[] {
+    // The Agent tool is service-owned for Claude-backed children. Avoid a
+    // contradictory tools/disallowedTools payload if a stale config attempts
+    // to block it; agent definitions still control what each native agent can
+    // do once launched.
+    return uniqueToolNames(cfg.disallowedTools.filter((tool) => tool.trim() !== CLAUDE_AGENT_TOOL_NAME));
+  }
+
+  private claudeSdkAgents(): Record<string, ClaudeAgentDefinition> {
+    return {
+      [CLAUDE_NATIVE_REVIEWER_AGENT_NAME]: CLAUDE_NATIVE_REVIEWER_AGENT
+    };
   }
 
   private shouldApplyFastMode(): boolean {

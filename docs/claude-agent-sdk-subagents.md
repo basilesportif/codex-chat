@@ -42,6 +42,25 @@ Anthropic's current model-ID convention for Claude 4.6 and later uses dateless p
 - Claude has no Codex `serviceTier` equivalent. codex-chat records the requested tier for observability. When `serviceTier: "fast"` and `[subagents.claude].fastMode = true`, codex-chat passes Claude Code fast-mode settings when the installed SDK supports them; otherwise tier is ignored.
 - `codexProfile` and `modelProvider` are Codex-provider concepts; the service **rejects** a Claude-routed dispatch that includes them. `serviceTierMode` is resolved for observability only.
 - The backend is steerable while its SDK streaming input session is active; `agent steer <ref> <text>` enqueues a follow-up user message in the same Claude session.
+- Every Claude-backed codex-chat child session gets the SDK native `Agent` tool plus programmatic agent definitions. This is intentionally separate from codex-chat-managed top-level routing: a Claude child can ask its own SDK session to launch a nested native agent, but Telegram/service dispatch semantics are unchanged.
+- The built-in native `reviewer` agent is pinned to `claude-opus-4-8`, uses Claude `high` effort, and is prompted for findings-first code review. Its tool list is intentionally narrower than the parent (`Read`, `Glob`, `Grep`, `Bash`) and explicitly disallows edit tools.
+
+## Fable to GPT-5.5 coding helper evaluation
+
+A Claude SDK option that lets Fable ask GPT-5.5 for coding help was evaluated but not implemented in this pass. The safe shape is a narrow SDK/MCP tool exposed only to Claude-backed sessions, not a raw `Bash`/CLI escape hatch and not a codex-chat-managed child dispatch. Existing codex-chat Codex launch paths are split between `codex exec` (`CodexExecChildAgentBackend.buildArgs`) and the app-server backend; both already centralize sandbox, approval, fast-mode, profile/provider, and sanitized Codex environment handling.
+
+Concrete follow-up plan:
+
+1. Add a service-owned Claude SDK MCP tool such as `codex_gpt55_coding_help` with a schema limited to `{question, files?, diff?, maxPromptBytes?}` and no arbitrary command field.
+2. Execute through an internal wrapper that reuses `sanitizeCodexChildProcessEnv`, fixed `codex exec --json --output-last-message ... --model gpt-5.5 -c model_reasoning_effort=high -c features.fast_mode=true -c service_tier=fast --sandbox <configured> -c ask_for_approval=<configured>`, with workspace pinned to `config.service.workspace` and artifacts written under the parent Claude job directory.
+3. Capture stdout/stderr/last-message and a JSONL tool event so the parent Claude job and codex-chat job status expose what ran; redact provider credentials exactly like the existing Codex child path.
+4. Wire cancellation to the parent Claude SDK job so an interrupted/killed Claude child also kills any nested Codex helper process tree; enforce one helper call at a time per Claude job plus timeout/max bytes limits.
+5. Add cost/rate-limit controls before enabling by default: explicit config flag, model allowlist, concurrency limit, timeout, and a clear error surface when the Codex provider rejects `gpt-5.5` or Fast tier.
+
+Tradeoffs:
+
+- Claude-native nested `Agent`: best visibility inside Claude, clean cancellation within the SDK, and no cross-provider secret surface, but it cannot call GPT models.
+- SDK tool shelling out to Codex: enables Fable→GPT coding consultation and can reuse existing Codex env sanitization, but it adds nested process lifecycle, cost/rate-limit, artifact retention, and observability responsibilities. It should be implemented only as the narrow audited wrapper above.
 
 ## Low-risk canary pattern
 

@@ -7,7 +7,7 @@ import { loadConfig, ensureConfiguredDirectories, writeDefaultConfigFilesIfMissi
 import { sanitizeChildProcessEnv } from "./env.js";
 import { createLogger } from "./logger.js";
 import { EmployeeManager } from "./employees.js";
-import { sendIpcMessage, type IpcMessage } from "./ipc.js";
+import { readIpcToken, sendIpcMessage, type IpcMessage } from "./ipc.js";
 import { formatLoopsStatus, runLoopCli, syncCron, validateLoops } from "./loops.js";
 import { validateMonitors } from "./monitors.js";
 import { injectFilePath, INJECT_TELEGRAM_USER_ID, ServiceSupervisor } from "./service.js";
@@ -16,6 +16,8 @@ import { installUserService, uninstallUserService } from "./systemd.js";
 import { atomicWriteJson, nowIso, pathExists } from "./util.js";
 
 const program = new Command();
+
+class CliUserError extends Error {}
 
 program
   .name("codex-chat")
@@ -263,7 +265,8 @@ jobs.command("cancel")
   });
 
 program.parseAsync(process.argv).catch((error) => {
-  process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
+  if (error instanceof CliUserError) process.stderr.write(`${error.message}\n`);
+  else process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
   process.exit(1);
 });
 
@@ -300,9 +303,10 @@ async function sendEmployeeIpc(
   const config = await loadConfig(program.opts().config);
   const socketPath = resolveConfigPath(config, config.service.ipcSocket);
   try {
-    return await sendIpcMessage(socketPath, { type, ...payload } as IpcMessage);
+    const token = await readIpcToken(socketPath);
+    return await sendIpcMessage(socketPath, { type, ...payload, token } as IpcMessage);
   } catch (error) {
-    throw new Error(`Could not reach running codex-chat service at ${socketPath}; start the service before using employees start/stop/steer. ${error instanceof Error ? error.message : String(error)}`);
+    throw new CliUserError(`Could not reach running codex-chat service at ${socketPath}; start the service before using employees start/stop/steer. ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 

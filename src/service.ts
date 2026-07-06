@@ -6,6 +6,8 @@ import { ApiGateway, type AudioIngestionCompletedEvent } from "./api.js";
 import type { AudioIngestMetadata } from "./audio-ingest.js";
 import { classifyBackendLimitError, type BackendLimitErrorKind } from "./backend-errors.js";
 import { AppConfig, ensureConfiguredDirectories, resolveConfigPath } from "./config.js";
+import { persistEnvEntries, resolveEnvStorePath, validateConfigEntries } from "./config-store.js";
+import { RuntimeEventLog } from "./runtime-events.js";
 import { BehaviorPack } from "./behavior.js";
 import { CAPABILITY_DENIED_MESSAGE, assertBrainCapabilitySourceAvailable, authorize, authorizeOutput, brainCapabilityStorePath, capabilityGrantFromDecision, outOfScopeAllowedDecision, requirementForInboundEvent } from "./capabilities.js";
 import { AppServerCodexClient, CodexCrashInfo } from "./codex.js";
@@ -267,6 +269,7 @@ export class ServiceSupervisor {
   readonly api: ApiGateway;
   private readonly heartbeat: CodexHeartbeat;
   private readonly ipc: LocalIpcServer;
+  private readonly runtimeEvents: RuntimeEventLog;
   private readonly subagents: SubagentManager;
   private readonly employees: EmployeeManager;
   private messageQueue = new Map<string, QueuedEvent[]>();
@@ -296,6 +299,7 @@ export class ServiceSupervisor {
     this.files = new FileStore(config, this.state);
     const transcriber = this.createTranscriber();
     this.slack = new SlackGateway(config, logger);
+    this.runtimeEvents = new RuntimeEventLog(this.state, logger);
     this.api = new ApiGateway(config, this.state, this.files, transcriber, logger, {
       onAudioIngestionCompleted: (event) => this.enqueueAudioIngestionForCodex(event),
       onSlackUserEvent: async (event) => {
@@ -304,7 +308,7 @@ export class ServiceSupervisor {
         void this.addImmediateSlackReaction(event);
         await this.enqueueUserEvent(event);
       }
-    });
+    }, this.runtimeEvents);
     if (config.codex.transport !== "app-server") {
       throw new Error(DISABLED_EXEC_RESUME_MESSAGE);
     }
@@ -416,6 +420,7 @@ export class ServiceSupervisor {
         return result;
       }
       if (message.type === "employee_status") return this.employees.formatStatus(message.employeeId);
+      if (message.type === "set_config") return this.handleSetConfig(message.entries);
       if (message.type === "ping") return { pong: true };
       throw new Error(`Unknown IPC message type: ${(message as { type?: string }).type ?? "unknown"}`);
     });
@@ -436,9 +441,11 @@ export class ServiceSupervisor {
       ? "ipc.loop.run"
       : message.type === "subagent_steer"
         ? "ipc.subagent.steer"
-        : message.type?.startsWith("employee_")
-          ? "ipc.employee.manage"
-          : "ipc.unknown";
+        : message.type === "set_config"
+          ? "system.config.write"
+          : message.type?.startsWith("employee_")
+            ? "ipc.employee.manage"
+            : "ipc.unknown";
     const decision = await authorize(actor, {
       operation,
       action: operation.split(".").at(-1) ?? operation,
@@ -448,6 +455,23 @@ export class ServiceSupervisor {
     }, { storePath: brainCapabilityStorePath(this.config), caller: "service.ipc" });
     await this.recordCapabilityDecision(decision);
     if (!decision.allowed) throw new Error(`IPC capability denied for ${message.type}: ${decision.reason ?? "denied"}`);
+  }
+
+  /**
+   * Persist config/env entries to codex-chat's own env store (plan §6.7).
+   * Validates against codex-chat's own schema, writes atomically, and reports
+   * restart-needed. Secrets are write-only: values are never returned and only
+   * key names are ever logged.
+   */
+  private async handleSetConfig(entries: Record<string, string>): Promise<{ ok: boolean; fieldErrors?: Record<string, string>; restartRequired: true }> {
+    const validation = validateConfigEntries(this.config, entries);
+    if (validation.fieldErrors) {
+      this.logger.warn({ component: "ipc", event: "set_config_rejected", invalidKeys: Object.keys(validation.fieldErrors) }, "set_config rejected: invalid entries");
+      return { ok: false, fieldErrors: validation.fieldErrors, restartRequired: true };
+    }
+    await persistEnvEntries(resolveEnvStorePath(), validation.sanitized);
+    this.logger.info({ component: "ipc", event: "set_config_applied", keys: Object.keys(validation.sanitized) }, "set_config applied; restart required to take effect");
+    return { ok: true, restartRequired: true };
   }
 
   async start(): Promise<void> {
@@ -2882,6 +2906,7 @@ export class ServiceSupervisor {
   }
 
   private recordSlackTelemetry(observation: SlackTelemetryObservation): void {
+    this.runtimeEvents.emitSlackObservation(observation);
     void this.state.recordSlackTelemetryObservation(observation).catch((error) => {
       this.logger.warn({ component: "slack", event: "telemetry_record_failed", error }, "Slack telemetry observation was dropped");
     });

@@ -23,6 +23,7 @@ import {
   type SlackEventEnvelope,
 } from "./slack.js";
 import { slackInboundTelemetryObservation, type SlackTelemetryObservation } from "./slack-telemetry.js";
+import type { RuntimeEvent, RuntimeEventLog } from "./runtime-events.js";
 import type { UserEvent } from "./types.js";
 
 const MULTIPART_OVERHEAD_BYTES = 1024 * 1024;
@@ -76,6 +77,7 @@ export class ApiGateway {
     transcriber: Transcriber,
     private readonly logger: Logger,
     private readonly hooks: ApiGatewayHooks = {},
+    private readonly runtimeEvents?: RuntimeEventLog,
   ) {
     this.audioIngestion = new AudioIngestionService(
       state,
@@ -179,7 +181,85 @@ export class ApiGateway {
       await this.handleAudioIngest(request, response);
       return;
     }
+    if (request.method === "GET" && url.pathname === "/api/events/tail") {
+      this.handleEventsTail(request, response, url);
+      return;
+    }
     this.sendJson(response, 404, { error: "not_found" });
+  }
+
+  /**
+   * Agent-only live tail of the structured runtime event log (plan §6.3).
+   * Authenticated exactly like /api/ingest/audio (ingest API key) and refuses
+   * when unauthenticated. Streams Server-Sent Events; the admin UI never uses
+   * this and Brain does not proxy it — it is for agents on the same host.
+   */
+  private handleEventsTail(
+    request: IncomingMessage,
+    response: ServerResponse,
+    url: URL,
+  ): void {
+    const auth = authenticateIngestRequest(
+      request,
+      this.config.ingest.apiKeys as readonly IngestApiKey[],
+    );
+    if (!auth.authorized || !auth.identity) {
+      this.sendJson(response, 401, { error: "unauthorized" });
+      return;
+    }
+    if (!this.runtimeEvents) {
+      this.sendJson(response, 503, { error: "runtime_events_unavailable" });
+      return;
+    }
+    const afterSeq = parseRuntimeEventSeq(
+      url.searchParams.get("afterSeq") ?? firstHeaderValue(request.headers["last-event-id"]),
+    );
+    const afterTs = afterSeq === undefined ? url.searchParams.get("afterTs") ?? undefined : undefined;
+    response.statusCode = 200;
+    response.setHeader("content-type", "text/event-stream; charset=utf-8");
+    response.setHeader("cache-control", "no-cache, no-transform");
+    response.setHeader("connection", "keep-alive");
+    response.setHeader("x-accel-buffering", "no");
+    response.flushHeaders();
+    response.write(": connected\n\n");
+    const sentSeqs = new Set<number>();
+    const write = (event: RuntimeEvent): void => {
+      if (response.writableEnded) return;
+      if (sentSeqs.has(event.seq)) return;
+      sentSeqs.add(event.seq);
+      response.write(`id: ${event.seq}\nevent: runtime_event\ndata: ${JSON.stringify(event)}\n\n`);
+    };
+    const shouldDeliver = (event: RuntimeEvent): boolean => {
+      if (afterSeq !== undefined) return event.seq > afterSeq;
+      if (!afterTs) return true;
+      const cutoff = Date.parse(afterTs);
+      if (!Number.isFinite(cutoff)) return true;
+      return Date.parse(event.ts) > cutoff;
+    };
+    const queuedLive: RuntimeEvent[] = [];
+    let replaying = true;
+    const unsubscribe = this.runtimeEvents.subscribe((event) => {
+      if (!shouldDeliver(event)) return;
+      if (replaying) queuedLive.push(event);
+      else write(event);
+    });
+    const buffered = afterSeq !== undefined ? this.runtimeEvents.recentAfterSeq(afterSeq) : this.runtimeEvents.recentAfter(afterTs);
+    for (const event of buffered) write(event);
+    replaying = false;
+    for (const event of queuedLive) write(event);
+    const heartbeat = setInterval(() => {
+      if (!response.writableEnded) response.write(`: keep-alive ${Date.now()}\n\n`);
+    }, 15_000);
+    const cleanup = (): void => {
+      clearInterval(heartbeat);
+      unsubscribe();
+    };
+    request.on("close", cleanup);
+    response.on("close", cleanup);
+    this.logger.info(
+      { component: "api", event: "events_tail_subscribed", keyIdentity: auth.identity },
+      "runtime events tail subscribed",
+    );
   }
 
   private async handleSlackEvents(
@@ -527,6 +607,7 @@ export class ApiGateway {
   }
 
   private recordSlackTelemetry(observation: SlackTelemetryObservation): void {
+    this.runtimeEvents?.emitSlackObservation(observation);
     void this.state.recordSlackTelemetryObservation(observation).catch((error) => {
       this.logger.warn(
         { component: "slack", event: "telemetry_record_failed", error },
@@ -675,6 +756,13 @@ function parseContentDisposition(value: string): {
 
 function firstHeaderValue(value: string | string[] | undefined): string {
   return Array.isArray(value) ? (value[0] ?? "") : (value ?? "");
+}
+
+function parseRuntimeEventSeq(value: string | undefined): number | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed || !/^\d+$/.test(trimmed)) return undefined;
+  const parsed = Number(trimmed);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
 }
 
 async function readJsonBody(

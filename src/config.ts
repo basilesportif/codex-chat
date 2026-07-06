@@ -453,15 +453,21 @@ function normalizeParsedEmployeeConfig(parsed: unknown): unknown {
   return parsed;
 }
 
-function collectEnvOverrides(
-  env: NodeJS.ProcessEnv = process.env,
-): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  const specs: Array<{
-    name: string;
-    path: string[];
-    parse?: (value: string) => unknown;
-  }> = [
+export type EnvOverrideSpec = {
+  name: string;
+  path: string[];
+  parse?: (value: string) => unknown;
+};
+
+export type ConfigEnvValueKind = "string" | "boolean" | "number" | "csv";
+
+/**
+ * The canonical set of environment-variable overrides codex-chat understands,
+ * mapped to their config paths. Exported so the IPC `set_config` writer can
+ * validate incoming keys/types against the same source of truth loadConfig
+ * uses — there is no second registry to drift.
+ */
+export const ENV_OVERRIDE_SPECS: EnvOverrideSpec[] = [
     { name: "CODEX_CHAT_WORKSPACE", path: ["service", "workspace"] },
     { name: "CODEX_CHAT_STATE_DIR", path: ["service", "stateDir"] },
     { name: "CODEX_CHAT_LOG_LEVEL", path: ["service", "logLevel"] },
@@ -539,8 +545,21 @@ function collectEnvOverrides(
       path: ["ingest", "audioMaxMb"],
       parse: parseNumberEnv,
     },
-  ];
-  for (const spec of specs) {
+];
+
+/** The value shape a given env override expects, derived from its parser. */
+export function configEnvValueKind(spec: EnvOverrideSpec): ConfigEnvValueKind {
+  if (spec.parse === parseBooleanEnv) return "boolean";
+  if (spec.parse === parseNumberEnv) return "number";
+  if (spec.parse === splitCsvEnv) return "csv";
+  return "string";
+}
+
+function collectEnvOverrides(
+  env: NodeJS.ProcessEnv = process.env,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const spec of ENV_OVERRIDE_SPECS) {
     const value = env[spec.name];
     if (value !== undefined)
       setDeep(out, spec.path, spec.parse ? spec.parse(value) : value);

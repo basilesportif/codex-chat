@@ -1,9 +1,9 @@
-import { access, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import type { AppConfig } from "../config.js";
-import { buildManagedCronText, formatLoopsStatus, generateCronLines, loadLoopsConfig, LoopManager, type LoopsConfig } from "../loops.js";
+import { buildManagedCronText, formatLoopsStatus, generateCronLines, loadLoopsConfig, LoopManager, runLoopCli, type LoopsConfig } from "../loops.js";
 import { StateStore } from "../state.js";
 
 const tempDirs: string[] = [];
@@ -12,7 +12,7 @@ function testConfig(rootDir: string): AppConfig {
   return {
     rootDir,
     configPath: join(rootDir, "config", "codex-chat.toml"),
-    service: { workspace: rootDir, stateDir: "data/state" },
+    service: { workspace: rootDir, stateDir: "data/state", ipcSocket: "data/run/codex-chat.sock" },
     transcription: { apiKeyEnv: "CUSTOM_TRANSCRIPTION_API_KEY" },
     loops: {
       enabled: true,
@@ -195,6 +195,31 @@ test("strips OpenAI and transcription env from loop command subprocesses", async
   const match = delivered[0]?.match(/\{"openai"[^\n]+\}/);
   expect(match?.[0]).toBeTruthy();
   expect(JSON.parse(match?.[0] ?? "{}")).toEqual({ openai: false, transcription: false, other: "keep-me" });
+});
+
+test("spools a durable loop run when reading the IPC token fails", async () => {
+  const config = await writeLoops({
+    version: 1,
+    loops: [{
+      id: "daily",
+      enabled: true,
+      schedule: "*/5 * * * *",
+      type: "prompt",
+      prompt: "ok",
+      route: "store_only",
+      durable: true
+    }]
+  });
+  await mkdir(join(config.rootDir, "data", "run", "ipc.token"), { recursive: true });
+
+  await runLoopCli(config, "daily");
+
+  const spoolDir = join(config.rootDir, "data", "spool", "loops");
+  const [spoolFile] = await readdir(spoolDir);
+  expect(spoolFile).toContain("daily");
+  const payload = JSON.parse(await readFile(join(spoolDir, spoolFile ?? ""), "utf8")) as { loopId?: string; error?: string };
+  expect(payload.loopId).toBe("daily");
+  expect(payload.error).toContain("EISDIR");
 });
 
 describe("loop spool replay", () => {

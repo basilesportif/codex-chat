@@ -125,6 +125,20 @@ export const directiveBlockSchema = z.object({
 export type DirectiveAction = z.infer<typeof directiveActionSchema>;
 export type DirectiveBlock = z.infer<typeof directiveBlockSchema>;
 
+export const DIRECTIVE_ACTION_TYPES = [
+  "send_text",
+  "send_image",
+  "send_document",
+  "dispatch_subagent",
+  "cancel_job",
+  "steer_subagent",
+  "notify_owner",
+  "react",
+  "enqueue_main",
+] as const satisfies readonly DirectiveAction["type"][];
+type MissingDirectiveActionType = Exclude<DirectiveAction["type"], (typeof DIRECTIVE_ACTION_TYPES)[number]>;
+const _directiveActionTypesAreExhaustive: Record<MissingDirectiveActionType, never> = {};
+
 export interface DirectiveParseResult {
   cleanText: string;
   blocks: DirectiveBlock[];

@@ -111,6 +111,11 @@ export type EmployeeCommand =
   | { isEmployee: true; action: "start" | "stop"; id: string }
   | { isEmployee: true; action: "steer"; id: string; text: string };
 
+type EmployeeCommandAction = Exclude<EmployeeCommand, { isEmployee: false }>["action"];
+export const EMPLOYEE_COMMAND_ACTIONS = ["list", "status", "start", "stop", "steer"] as const satisfies readonly EmployeeCommandAction[];
+type MissingEmployeeCommandAction = Exclude<EmployeeCommandAction, (typeof EMPLOYEE_COMMAND_ACTIONS)[number]>;
+const _employeeCommandActionsAreExhaustive: Record<MissingEmployeeCommandAction, never> = {};
+
 export interface EmployeeDescriptor {
   id: string;
   name: string;

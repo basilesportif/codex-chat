@@ -151,6 +151,22 @@ async function configureOpenRouterSubagentOverrides(config: Awaited<ReturnType<t
   config.subagents.allowedModelProviders = ["openrouter"];
 }
 
+async function grantSystemConfigWrite(storePath: string): Promise<void> {
+  const store = JSON.parse(await readFile(storePath, "utf8")) as { grants: unknown[] };
+  store.grants.push({
+    id: "grant_person_tim_system_config_write",
+    subjectId: "person:person_tim",
+    capabilityId: "system.config.write",
+    grantKind: "capability",
+    resource: { kind: "global", id: "*", selectors: { command: "*" } },
+    actions: ["write"],
+    status: "active",
+    enforcement: "enforcing",
+    grantedAt: "2026-07-04T00:00:00.000Z"
+  });
+  await writeFile(storePath, JSON.stringify(store, null, 2));
+}
+
 afterEach(async () => {
   delete process.env.CODEX_HOME;
   vi.restoreAllMocks();
@@ -163,6 +179,22 @@ describe("service supervisor", () => {
     const logger = createLogger("silent");
 
     expect(() => new ServiceSupervisor(config, logger)).toThrow("exec-resume transport is disabled. Only app-server (OAuth) is supported. Run 'codex login' to authenticate.");
+  });
+
+  test("requires a Brain capability for set_config when a Brain subject is asserted", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    const authorizeIpcMessage = (service as unknown as {
+      authorizeIpcMessage(message: { type?: string; brainSubjectId?: string }): Promise<void>;
+    }).authorizeIpcMessage.bind(service);
+
+    await expect(authorizeIpcMessage({ type: "set_config" })).resolves.toBeUndefined();
+    await expect(authorizeIpcMessage({ type: "set_config", brainSubjectId: "person:person_tim" })).rejects.toThrow(/IPC capability denied for set_config/);
+
+    await grantSystemConfigWrite(config.brain.storePath);
+    await expect(authorizeIpcMessage({ type: "set_config", brainSubjectId: "person:person_tim" })).resolves.toBeUndefined();
   });
 
   test("polls inject.json, queues a synthetic Telegram message, and deletes the file", async () => {

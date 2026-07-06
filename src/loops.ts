@@ -6,7 +6,7 @@ import { z } from "zod";
 import type { Logger } from "pino";
 import { AppConfig, resolveConfigPath } from "./config.js";
 import { sanitizeChildProcessEnv } from "./env.js";
-import { sendIpcMessage } from "./ipc.js";
+import { readIpcToken, sendIpcMessage } from "./ipc.js";
 import { StateStore } from "./state.js";
 import { LoopRun, Route } from "./types.js";
 import { atomicWriteText, ensureDir, makeId, nowIso, pathExists } from "./util.js";
@@ -102,7 +102,8 @@ export async function runLoopCli(config: AppConfig, loopId: string): Promise<voi
   if (!loop) throw new Error(`Loop not found or disabled: ${loopId}`);
   const socket = resolveConfigPath(config, config.service.ipcSocket);
   try {
-    await sendIpcMessage(socket, { type: "loop_run", loopId, scheduledAt: nowIso() });
+    const token = await readIpcToken(socket);
+    await sendIpcMessage(socket, { type: "loop_run", loopId, scheduledAt: nowIso(), token });
   } catch (error) {
     if (loop.durable) {
       const spoolDir = resolveConfigPath(config, "data/spool/loops");

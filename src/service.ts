@@ -4,6 +4,7 @@ import { readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ApiGateway, type AudioIngestionCompletedEvent } from "./api.js";
 import type { AudioIngestMetadata } from "./audio-ingest.js";
+import { classifyBackendLimitError, type BackendLimitErrorKind } from "./backend-errors.js";
 import { AppConfig, ensureConfiguredDirectories, resolveConfigPath } from "./config.js";
 import { BehaviorPack } from "./behavior.js";
 import { CAPABILITY_DENIED_MESSAGE, assertBrainCapabilitySourceAvailable, authorize, authorizeOutput, brainCapabilityStorePath, capabilityGrantFromDecision, outOfScopeAllowedDecision, requirementForInboundEvent } from "./capabilities.js";
@@ -1469,7 +1470,7 @@ export class ServiceSupervisor {
         const closed = await closeTurn({ id: turnId, status: "error", input: event, errorMessage, completedAt: nowIso() });
         if (!closed) return;
         if (this.canSendTextToOutputTarget(event.outputTarget)) {
-          await this.sendTextToOutputTarget(event.outputTarget, `Codex encountered an error: ${brief}. Please try again.`);
+          await this.sendTextToOutputTarget(event.outputTarget, this.codexBackendLimitMessage(`${errorMessage}\n${JSON.stringify(errorRaw ?? "")}`) ?? `Codex encountered an error: ${brief}. Please try again.`);
         }
         return;
       }
@@ -1642,9 +1643,7 @@ export class ServiceSupervisor {
   private shouldResetMainCodexSession(errorMessage: string, raw: unknown): boolean {
     const event = this.codexErrorRecord(raw) ?? this.codexErrorRecordFromMessage(errorMessage);
     const text = `${errorMessage}\n${JSON.stringify(event ?? raw ?? "")}`.toLowerCase();
-    if (text.includes("usagelimitexceeded") || text.includes("insufficient_quota") || text.includes("you've hit your usage limit")) {
-      return false;
-    }
+    if (classifyBackendLimitError(text) === "usage-limit") return false;
     if (event && event.willRetry !== false) return false;
     return text.includes("stream disconnected before completion") || text.includes("responsestreamdisconnected");
   }
@@ -2430,8 +2429,22 @@ export class ServiceSupervisor {
   private codexUnavailableMessage(error: unknown): string {
     if (this.restartingCodex) return CODEX_RESTARTING_MESSAGE;
     const text = error instanceof Error ? error.message : String(error);
+    const classified = this.codexBackendLimitMessage(text);
+    if (classified) return classified;
     if (/websocket|not connected|reconnecting|closed|timed out/i.test(text)) return CODEX_TEMPORARILY_UNAVAILABLE_MESSAGE;
     return CODEX_UNAVAILABLE_MESSAGE;
+  }
+
+  private codexBackendLimitMessage(text: string): string | undefined {
+    const kind = classifyBackendLimitError(text);
+    if (!kind) return undefined;
+    return this.codexBackendLimitMessageForKind(kind);
+  }
+
+  private codexBackendLimitMessageForKind(kind: BackendLimitErrorKind): string {
+    if (kind === "usage-limit") return "Codex has hit its usage limit - this usually resets within a few hours. Try again later.";
+    if (kind === "rate-limit") return "Codex is being rate limited or overloaded. Please wait a few minutes and try again.";
+    return "Codex authentication failed or expired. Run 'codex login' on the server, then try again.";
   }
 
   private hasSeenIdempotency(key: string): boolean {

@@ -1372,4 +1372,67 @@ describe("subagents", () => {
     );
     expect(onReturnToMain.mock.calls[0]?.[0]?.text).toContain("failed");
   });
+
+  test("codex_exec failed jobs classify usage limits from stderr tail", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
+    tempDirs.push(root);
+    const children: ReturnType<typeof fakeChild>[] = [];
+    const spawn = vi.fn(() => {
+      const child = fakeChild();
+      children.push(child);
+      return child;
+    });
+    vi.doMock("node:child_process", async () => {
+      const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+      return { ...actual, spawn };
+    });
+    const { SubagentManager } = await import("../subagents.js");
+    const config = makeConfig(root, 1);
+    const onReturnToMain = vi.fn().mockResolvedValue(undefined);
+    const manager = new SubagentManager(
+      config,
+      { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") } as never,
+      { saveJob: vi.fn().mockResolvedValue(undefined) } as never,
+      fakeLogger() as never,
+      { onReturnToMain, onSendToUser: vi.fn() }
+    );
+
+    await manager.dispatch({ profile: "x", prompt: "a", route: "return_to_main" });
+    await waitFor(() => children.length === 1);
+    const job = manager.listJobs()[0]!;
+    await writeFile(join(job.artifactDir, "stderr.log"), `${"x".repeat(3000)}\nYou've hit your usage limit.\n`);
+
+    children[0]!.emit("exit", 1, null);
+    await waitFor(() => onReturnToMain.mock.calls.length === 1);
+
+    expect(manager.listJobs()[0]).toMatchObject({
+      status: "failed",
+      error: "Codex backend hit a usage limit; try again later"
+    });
+    expect(onReturnToMain.mock.calls[0]?.[0]?.header).toContain("Codex backend hit a usage limit");
+  });
+
+  test("Claude failed jobs classify terminal rate-limit errors", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
+    tempDirs.push(root);
+    const { SubagentManager } = await import("../subagents.js");
+    const config = makeConfig(root, 1);
+    const claudeBackend = fakeBackend("claude_agent_sdk");
+    const onReturnToMain = vi.fn().mockResolvedValue(undefined);
+    const manager = new SubagentManager(
+      config,
+      { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") } as never,
+      { saveJob: vi.fn().mockResolvedValue(undefined) } as never,
+      fakeLogger() as never,
+      { onReturnToMain, onSendToUser: vi.fn() },
+      { claude_agent_sdk: claudeBackend }
+    );
+
+    await manager.dispatch({ profile: "x", prompt: "a", route: "return_to_main", backend: "claude_agent_sdk" });
+    await waitFor(() => claudeBackend.starts.length === 1);
+    claudeBackend.finish({ code: 1, signal: null, error: "overloaded_error: overloaded" });
+    await waitFor(() => onReturnToMain.mock.calls.length === 1);
+
+    expect(onReturnToMain.mock.calls[0]?.[0]?.header).toContain("Claude backend hit a rate limit");
+  });
 });

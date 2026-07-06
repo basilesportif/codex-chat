@@ -1,6 +1,7 @@
 import { appendFile, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Logger } from "pino";
+import { classifyBackendLimitError, type BackendLimitErrorKind } from "./backend-errors.js";
 import { AppConfig, resolveConfigPath } from "./config.js";
 import { BehaviorPack } from "./behavior.js";
 import { DirectiveAction } from "./directives.js";
@@ -834,6 +835,7 @@ export class SubagentManager {
         return "";
       });
     }
+    await this.classifyCodexExecStderrIfNeeded(job, finish);
     const terminalResult = this.formatTerminalResult(job, result, finish.code, finish.signal);
     await this.state.saveJob(job);
     await this.deliverTerminalResult(terminalResult);
@@ -845,7 +847,7 @@ export class SubagentManager {
     const body = result.trim();
     let header: string | undefined;
     if (job.status === "failed") {
-      const detail = job.error ?? `exit code ${code ?? "null"} signal ${signal ?? "null"}`;
+      const detail = this.backendLimitFailureDetail(job, `${job.error ?? ""}\n${body}`) ?? job.error ?? `exit code ${code ?? "null"} signal ${signal ?? "null"}`;
       header = `Subagent ${job.id} (${job.profile}) failed: ${detail}.`;
     } else if (job.status === "timed_out") {
       header = `Subagent ${job.id} (${job.profile}) timed out: exit code ${code ?? "null"} signal ${signal ?? "null"}.`;
@@ -856,6 +858,25 @@ export class SubagentManager {
     }
     const text = header ? (body ? `${header}\n\n${body}` : header) : body;
     return { job, body, header, text };
+  }
+
+  private async classifyCodexExecStderrIfNeeded(job: SubagentJob, finish: ChildAgentFinish): Promise<void> {
+    if (job.backend !== "codex_exec" || job.error || finish.error || finish.code === 0 || finish.code === null) return;
+    const stderrPath = join(job.artifactDir, "stderr.log");
+    const stderr = await readFile(stderrPath, "utf8").catch(() => "");
+    const kind = classifyBackendLimitError(stderr.slice(-2048));
+    if (kind) job.error = this.backendLimitFailureDetail(job, kind);
+  }
+
+  private backendLimitFailureDetail(job: SubagentJob, value: string | BackendLimitErrorKind): string | undefined {
+    const kind = value === "usage-limit" || value === "rate-limit" || value === "auth"
+      ? value
+      : classifyBackendLimitError(value);
+    if (!kind) return undefined;
+    const backend = job.backend === "claude_agent_sdk" ? "Claude" : "Codex";
+    if (kind === "usage-limit") return `${backend} backend hit a usage limit; try again later`;
+    if (kind === "rate-limit") return `${backend} backend hit a rate limit or overloaded condition; try again shortly`;
+    return `${backend} backend authentication failed or expired`;
   }
 
   private async deliverTerminalResult(result: SubagentTerminalResult): Promise<void> {

@@ -1218,12 +1218,29 @@ describe("service supervisor", () => {
       };
       yield { type: "final", text: "" };
     });
-    vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
 
     await service.enqueueUserEvent(userEvent(512, "hello"));
     await waitForIdle(service);
 
     expect(resetSession).not.toHaveBeenCalled();
+    expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("Codex has hit its usage limit"), 512);
+  });
+
+  test("surfaces Codex rate limits when the turn stream throws", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
+      throw new Error("rate_limit_exceeded: 429 Too Many Requests");
+    });
+    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+
+    await service.enqueueUserEvent(userEvent(513, "hello"));
+    await waitForIdle(service);
+
+    expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("Codex is being rate limited or overloaded"), 513);
   });
 
   test("dispatches a subagent when Codex chooses subagent routing for a research prompt", async () => {

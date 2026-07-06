@@ -431,7 +431,7 @@ export interface EmployeePendingChildResult {
 export interface LoopRun {
   id: string;
   loopId: string;
-  status: "queued" | "running" | "completed" | "failed" | "dropped";
+  status: "queued" | "running" | "completed" | "failed" | "cancelled" | "dropped";
   scheduledAt: string;
   startedAt?: string;
   completedAt?: string;

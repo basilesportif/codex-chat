@@ -4,12 +4,13 @@ import { basename, join } from "node:path";
 import { CronExpressionParser } from "cron-parser";
 import { z } from "zod";
 import type { Logger } from "pino";
+import type { ChildProcess } from "node:child_process";
 import { AppConfig, resolveConfigPath } from "./config.js";
 import { sanitizeChildProcessEnv } from "./env.js";
 import { readIpcToken, sendIpcMessage } from "./ipc.js";
 import { StateStore } from "./state.js";
 import { LoopRun, Route } from "./types.js";
-import { atomicWriteText, ensureDir, makeId, nowIso, pathExists } from "./util.js";
+import { atomicWriteText, ensureDir, killProcessTree, makeId, nowIso, pathExists } from "./util.js";
 
 const routeSchema = z.enum(["return_to_main", "send_to_admins", "store_only", "dispatch_subagent"]);
 const effortSchema = z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]);
@@ -60,6 +61,8 @@ const loopsConfigSchema = z.object({
 
 export type LoopDefinition = z.infer<typeof loopSchema>;
 export type LoopsConfig = z.infer<typeof loopsConfigSchema>;
+
+const LOOP_SHUTDOWN_DRAIN_MS = 10_000;
 
 interface LoopCallbacks {
   enqueueMain(text: string, metadata?: Record<string, unknown>): Promise<void>;
@@ -174,6 +177,9 @@ function formatNextRun(loop: LoopDefinition, loops: LoopsConfig, now: Date): str
 
 export class LoopManager {
   private readonly activeLoopIds = new Set<string>();
+  private readonly activeCommandChildren = new Set<ChildProcess>();
+  private readonly activeRunPromises = new Set<Promise<void>>();
+  private shuttingDown = false;
 
   constructor(
     private readonly config: AppConfig,
@@ -182,7 +188,56 @@ export class LoopManager {
     private readonly callbacks: LoopCallbacks
   ) {}
 
-  async handleRun(loopId: string, scheduledAt = nowIso()): Promise<void> {
+  handleRun(loopId: string, scheduledAt = nowIso()): Promise<void> {
+    const promise = this.executeRun(loopId, scheduledAt);
+    this.activeRunPromises.add(promise);
+    return promise.finally(() => {
+      this.activeRunPromises.delete(promise);
+    });
+  }
+
+  prepareForServiceShutdown(reason = "shutdown"): void {
+    if (this.shuttingDown) return;
+    this.shuttingDown = true;
+    for (const child of this.activeCommandChildren) killProcessTree(child, "SIGTERM");
+    this.logger.info(
+      { component: "loops", event: "service_shutdown_prepare", activeCommands: this.activeCommandChildren.size, activeRuns: this.activeRunPromises.size, reason },
+      "marking active loop runs interrupted before service shutdown"
+    );
+  }
+
+  async shutdown(): Promise<void> {
+    this.prepareForServiceShutdown("shutdown");
+    if (this.activeRunPromises.size === 0) return;
+    const active = Promise.allSettled([...this.activeRunPromises]);
+    const timeout = new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), LOOP_SHUTDOWN_DRAIN_MS));
+    const result = await Promise.race([active, timeout]);
+    if (result === "timeout") {
+      this.logger.warn(
+        { component: "loops", event: "shutdown_drain_timeout", activeRuns: this.activeRunPromises.size },
+        "timed out waiting for interrupted loop runs to settle"
+      );
+    }
+  }
+
+  async reconcileStaleRunningRuns(): Promise<number> {
+    const runs = await this.state.listLoopRuns();
+    let reconciled = 0;
+    for (const run of runs) {
+      if (run.status !== "running") continue;
+      run.status = "cancelled";
+      run.completedAt = run.completedAt ?? nowIso();
+      run.error = run.error ?? "Interrupted by service shutdown before completion.";
+      await this.state.saveLoopRun(run);
+      reconciled += 1;
+    }
+    if (reconciled > 0) {
+      this.logger.warn({ component: "loops", event: "stale_running_reconciled", count: reconciled }, "reconciled stale running loop runs on startup");
+    }
+    return reconciled;
+  }
+
+  private async executeRun(loopId: string, scheduledAt: string): Promise<void> {
     const loops = await loadLoopsConfig(this.config);
     const loop = loops.loops.find((item) => item.id === loopId && item.enabled);
     if (!loop) throw new Error(`Loop not found or disabled: ${loopId}`);
@@ -200,10 +255,16 @@ export class LoopManager {
       if (loop.type === "dispatch_subagent") await this.handleDispatch(loop, route, run);
       run.status = "completed";
     } catch (error) {
-      run.status = "failed";
       run.error = error instanceof Error ? error.message : String(error);
-      if (loop.notifyOnFailure) await this.callbacks.sendAdmins(`Loop ${loop.id} failed: ${run.error}`);
-      this.logger.error({ component: "loops", event: "run_failed", loopId, error }, "loop failed");
+      if (this.isShutdownInterruptedError(error)) {
+        run.status = "cancelled";
+        run.error = "Interrupted by service shutdown before completion.";
+        this.logger.info({ component: "loops", event: "run_interrupted", loopId, error }, "loop interrupted by service shutdown");
+      } else {
+        run.status = "failed";
+        if (loop.notifyOnFailure) await this.callbacks.sendAdmins(`Loop ${loop.id} failed: ${run.error}`);
+        this.logger.error({ component: "loops", event: "run_failed", loopId, error }, "loop failed");
+      }
     } finally {
       if (lock) this.activeLoopIds.delete(loop.id);
       run.completedAt = nowIso();
@@ -278,7 +339,12 @@ export class LoopManager {
 
   private async handleCommand(loop: LoopDefinition, route: Route, run: LoopRun): Promise<void> {
     if (!loop.command) throw new Error(`Loop ${loop.id} is missing command`);
-    const output = await runCommandCapture(this.config, loop.command, loop.args ?? [], loop.cwd ? resolveConfigPath(this.config, loop.cwd) : this.config.service.workspace, loop.env);
+    const output = await runCommandCapture(this.config, loop.command, loop.args ?? [], loop.cwd ? resolveConfigPath(this.config, loop.cwd) : this.config.service.workspace, loop.env, {
+      onChild: (child) => {
+        this.activeCommandChildren.add(child);
+        child.once("exit", () => this.activeCommandChildren.delete(child));
+      }
+    });
     run.outputPath = await this.writeRunOutput(run.id, output);
     const eventText = [`Loop command completed: ${loop.id}`, `Command: ${loop.command} ${(loop.args ?? []).join(" ")}`, "", output].join("\n");
     if (route === "return_to_main") await this.callbacks.enqueueMain(eventText, { source: "loop", loopId: loop.id, runId: run.id });
@@ -295,6 +361,10 @@ export class LoopManager {
     const path = resolveConfigPath(this.config, join("data/logs/loops", `${runId}.log`));
     await atomicWriteText(path, output);
     return path;
+  }
+
+  private isShutdownInterruptedError(error: unknown): boolean {
+    return this.shuttingDown && error instanceof LoopCommandError && error.code === null && error.signal === "SIGTERM";
   }
 }
 
@@ -336,9 +406,21 @@ export function generateCronLines(config: AppConfig, loops: LoopsConfig): string
     });
 }
 
-function runCommandCapture(config: AppConfig, command: string, args: string[] = [], cwd?: string, env?: Record<string, string>): Promise<string> {
+class LoopCommandError extends Error {
+  constructor(
+    message: string,
+    readonly code: number | null,
+    readonly signal: NodeJS.Signals | null
+  ) {
+    super(message);
+    this.name = "LoopCommandError";
+  }
+}
+
+function runCommandCapture(config: AppConfig, command: string, args: string[] = [], cwd?: string, env?: Record<string, string>, options: { onChild?: (child: ChildProcess) => void } = {}): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd, env: sanitizeChildProcessEnv(config, process.env, env), stdio: ["ignore", "pipe", "pipe"] });
+    options.onChild?.(child);
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => {
@@ -347,9 +429,9 @@ function runCommandCapture(config: AppConfig, command: string, args: string[] = 
     child.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
     });
-    child.on("exit", (code) => {
+    child.on("exit", (code, signal) => {
       if (code === 0) resolve(stdout);
-      else reject(new Error(stderr || stdout || `${command} exited with ${code}`));
+      else reject(new LoopCommandError(stderr || stdout || `${command} exited with ${code}${signal ? ` signal ${signal}` : ""}`, code, signal));
     });
   });
 }

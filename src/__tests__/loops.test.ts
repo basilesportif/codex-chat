@@ -148,7 +148,7 @@ const testLogger = {
   error: () => undefined
 } as never;
 
-async function processSpooled(config: AppConfig, callbacks: Partial<ConstructorParameters<typeof LoopManager>[3]> = {}) {
+async function createLoopManager(config: AppConfig, callbacks: Partial<ConstructorParameters<typeof LoopManager>[3]> = {}) {
   const state = new StateStore(config);
   await state.init();
   const manager = new LoopManager(config, state, testLogger, {
@@ -157,7 +157,21 @@ async function processSpooled(config: AppConfig, callbacks: Partial<ConstructorP
     dispatchSubagent: async () => undefined,
     ...callbacks
   });
+  return { manager, state };
+}
+
+async function processSpooled(config: AppConfig, callbacks: Partial<ConstructorParameters<typeof LoopManager>[3]> = {}) {
+  const { manager } = await createLoopManager(config, callbacks);
   await manager.processSpooled();
+}
+
+async function waitFor(predicate: () => Promise<boolean>, timeoutMs = 5_000): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (await predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error("timed out waiting for condition");
 }
 
 test("strips OpenAI and transcription env from loop command subprocesses", async () => {
@@ -195,6 +209,73 @@ test("strips OpenAI and transcription env from loop command subprocesses", async
   const match = delivered[0]?.match(/\{"openai"[^\n]+\}/);
   expect(match?.[0]).toBeTruthy();
   expect(JSON.parse(match?.[0] ?? "{}")).toEqual({ openai: false, transcription: false, other: "keep-me" });
+});
+
+test("marks SIGTERM-interrupted command loops as cancelled during service shutdown without admin notification", async () => {
+  let adminNotifications = 0;
+  const config = await writeLoops({
+    version: 1,
+    loops: [{
+      id: "restart-health",
+      enabled: true,
+      schedule: "*/5 * * * *",
+      type: "command",
+      command: process.execPath,
+      args: ["-e", "setInterval(() => undefined, 1000)"],
+      route: "store_only",
+      notifyOnFailure: true
+    }]
+  });
+  const { manager, state } = await createLoopManager(config, {
+    sendAdmins: async () => { adminNotifications += 1; }
+  });
+
+  const running = manager.handleRun("restart-health");
+  await waitFor(async () => (await state.listLoopRuns()).some((run) => run.loopId === "restart-health" && run.status === "running"));
+  manager.prepareForServiceShutdown("test");
+  await running;
+
+  const [run] = await state.listLoopRuns();
+  expect(run).toMatchObject({
+    loopId: "restart-health",
+    status: "cancelled",
+    error: "Interrupted by service shutdown before completion."
+  });
+  expect(run?.completedAt).toBeTruthy();
+  expect(adminNotifications).toBe(0);
+});
+
+test("reconciles stale running loop runs as cancelled on startup", async () => {
+  const config = await writeLoops({
+    version: 1,
+    loops: [{
+      id: "daily",
+      enabled: true,
+      schedule: "*/5 * * * *",
+      type: "prompt",
+      prompt: "ok",
+      route: "store_only"
+    }]
+  });
+  const { manager, state } = await createLoopManager(config);
+  await state.saveLoopRun({
+    id: "loop_stale",
+    loopId: "daily",
+    status: "running",
+    scheduledAt: "2026-07-06T00:00:00.000Z",
+    startedAt: "2026-07-06T00:00:01.000Z",
+    route: "store_only"
+  });
+
+  await expect(manager.reconcileStaleRunningRuns()).resolves.toBe(1);
+
+  const [run] = await state.listLoopRuns();
+  expect(run).toMatchObject({
+    id: "loop_stale",
+    status: "cancelled",
+    error: "Interrupted by service shutdown before completion."
+  });
+  expect(run?.completedAt).toBeTruthy();
 });
 
 test("spools a durable loop run when reading the IPC token fails", async () => {

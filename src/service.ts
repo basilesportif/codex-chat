@@ -516,6 +516,7 @@ export class ServiceSupervisor {
     await this.api.start();
     await this.recoverAbandonedWork();
     await this.ipc.start();
+    await this.loops.reconcileStaleRunningRuns().catch((error) => this.logger.warn({ component: "loops", event: "stale_running_reconcile_failed", error }));
     if (this.config.loops.enabled) await syncCron(this.config, this.logger).catch((error) => this.logger.warn({ component: "loops", event: "cron_sync_failed", error: error instanceof Error ? { message: error.message, stack: error.stack } : String(error) }, "cron sync failed; loops will not fire on schedule until this is resolved"));
     await this.loops.processSpooled().catch((error) => this.logger.warn({ component: "loops", event: "spool_process_failed", error }));
     await this.monitors.start();
@@ -537,12 +538,14 @@ export class ServiceSupervisor {
     if (this.stopping) return;
     this.stopping = true;
     this.subagents.prepareForServiceShutdown("shutdown");
+    this.loops.prepareForServiceShutdown("shutdown");
     await this.telegram.notifyOps("codex-chat shutting down").catch(() => undefined);
     await this.ipc.stop().catch(() => undefined);
     await this.api.stop().catch(() => undefined);
     await this.telegram.stop().catch(() => undefined);
     await this.monitors.stop().catch(() => undefined);
     this.heartbeat.stop();
+    await this.loops.shutdown().catch(() => undefined);
     await this.subagents.shutdown().catch(() => undefined);
     await this.codex.stop().catch(() => undefined);
   }

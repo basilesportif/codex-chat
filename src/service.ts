@@ -10,6 +10,7 @@ import { persistEnvEntries, resolveEnvStorePath, validateConfigEntries } from ".
 import { RuntimeEventLog } from "./runtime-events.js";
 import { BehaviorPack } from "./behavior.js";
 import { CAPABILITY_DENIED_MESSAGE, assertBrainCapabilitySourceAvailable, authorize, authorizeOutput, brainCapabilityStorePath, capabilityGrantFromDecision, outOfScopeAllowedDecision, requirementForInboundEvent } from "./capabilities.js";
+import { capabilityRegistry, registryVersion, type CapabilityId } from "./capability-registry.js";
 import { AppServerCodexClient, CodexCrashInfo } from "./codex.js";
 import {
   consumeDeployMarker,
@@ -26,7 +27,7 @@ import { claudeFastModeSupported } from "./subagent-backends.js";
 import { EmployeeManager, parseEmployeeCommand, type EmployeeCommand } from "./employees.js";
 import { FileStore } from "./file-store.js";
 import { CodexHeartbeat } from "./heartbeat.js";
-import { LocalIpcServer } from "./ipc.js";
+import { LocalIpcServer, type IpcMessage } from "./ipc.js";
 import { formatLoopsStatus, LoopManager, syncCron } from "./loops.js";
 import { MonitorManager } from "./monitors.js";
 import {
@@ -111,6 +112,30 @@ type QueuedEvent = {
 
 type DispatchSubagentAction = Extract<DirectiveAction, { type: "dispatch_subagent" }>;
 type SendTextAction = Extract<DirectiveAction, { type: "send_text" }>;
+type BrainAttributedIpcMessageType = Exclude<IpcMessage["type"], "ping">;
+
+export const IPC_OPERATION_BY_MESSAGE_TYPE = {
+  loop_run: "ipc.loop.run",
+  subagent_steer: "ipc.subagent.steer",
+  employee_start: "ipc.employee.manage",
+  employee_stop: "ipc.employee.manage",
+  employee_steer: "ipc.employee.manage",
+  employee_status: "ipc.employee.manage",
+  get_capability_registry: "system.registry.read",
+  set_config: "system.config.write",
+} as const satisfies Record<BrainAttributedIpcMessageType, CapabilityId>;
+
+export const UNDERLYING_DIRECTIVE_OPERATION_BY_ACTION = {
+  send_text: "output.text.send",
+  send_image: "output.image.send",
+  send_document: "output.document.send",
+  dispatch_subagent: "subagents.dispatch",
+  cancel_job: "subagents.control.cancel",
+  steer_subagent: "subagents.control.steer",
+  notify_owner: "runtime.admin",
+  react: "output.reaction.add",
+  enqueue_main: "system.callback.enqueue",
+} as const satisfies Record<DirectiveAction["type"], CapabilityId>;
 
 interface DiarizedAudioSubagentRequest {
   source: "telegram" | "audio_ingest";
@@ -123,6 +148,11 @@ interface DiarizedAudioSubagentRequest {
 
 export function injectFilePath(config: AppConfig): string {
   return join(config.service.workspace, "inject.json");
+}
+
+function operationForIpcMessageType(type: string | undefined): CapabilityId {
+  if (!type) return "ipc.unknown";
+  return IPC_OPERATION_BY_MESSAGE_TYPE[type as keyof typeof IPC_OPERATION_BY_MESSAGE_TYPE] ?? "ipc.unknown";
 }
 
 function formatDurationSeconds(seconds: number): string {
@@ -420,6 +450,7 @@ export class ServiceSupervisor {
         return result;
       }
       if (message.type === "employee_status") return this.employees.formatStatus(message.employeeId);
+      if (message.type === "get_capability_registry") return { registryVersion, capabilities: capabilityRegistry };
       if (message.type === "set_config") return this.handleSetConfig(message.entries);
       if (message.type === "ping") return { pong: true };
       throw new Error(`Unknown IPC message type: ${(message as { type?: string }).type ?? "unknown"}`);
@@ -437,20 +468,12 @@ export class ServiceSupervisor {
       correlationId: makeId("corr"),
       metadata: message.brainSubjectId ? { brainSubjectId: message.brainSubjectId } : {}
     };
-    const operation = message.type === "loop_run"
-      ? "ipc.loop.run"
-      : message.type === "subagent_steer"
-        ? "ipc.subagent.steer"
-        : message.type === "set_config"
-          ? "system.config.write"
-          : message.type?.startsWith("employee_")
-            ? "ipc.employee.manage"
-            : "ipc.unknown";
+    const operation = operationForIpcMessageType(message.type);
     const decision = await authorize(actor, {
       operation,
       action: operation.split(".").at(-1) ?? operation,
       resource: { command: message.type },
-      reason: "local IPC mutation",
+      reason: "local IPC request",
       caller: "service.ipc"
     }, { storePath: brainCapabilityStorePath(this.config), caller: "service.ipc" });
     await this.recordCapabilityDecision(decision);
@@ -2014,16 +2037,7 @@ export class ServiceSupervisor {
   }
 
   private underlyingDirectiveOperation(action: DirectiveAction): string | undefined {
-    if (action.type === "send_text") return "output.text.send";
-    if (action.type === "send_image") return "output.image.send";
-    if (action.type === "send_document") return "output.document.send";
-    if (action.type === "dispatch_subagent") return "subagents.dispatch";
-    if (action.type === "cancel_job") return "subagents.control.cancel";
-    if (action.type === "steer_subagent") return "subagents.control.steer";
-    if (action.type === "notify_owner") return "runtime.admin";
-    if (action.type === "react") return "output.reaction.add";
-    if (action.type === "enqueue_main") return "system.callback.enqueue";
-    return undefined;
+    return UNDERLYING_DIRECTIVE_OPERATION_BY_ACTION[action.type];
   }
 
   private directiveActionKey(action: DirectiveAction, blockIndex: number, actionIndex: number): string {

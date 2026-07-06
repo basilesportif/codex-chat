@@ -2,8 +2,10 @@ import { access, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { loadConfig } from "../config.js";
+import { loadConfig, resolveConfigPath } from "../config.js";
 import { createLogger } from "../logger.js";
+import { sendIpcMessage } from "../ipc.js";
+import { capabilityRegistry, registryVersion } from "../capability-registry.js";
 import { injectFilePath, INJECT_TELEGRAM_USER_ID, ServiceSupervisor } from "../service.js";
 import type { CodexEvent, SubagentJob, UserEvent } from "../types.js";
 
@@ -110,6 +112,18 @@ async function flush(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+async function readCapabilityDecisionRecords(dir: string): Promise<Array<Record<string, unknown>>> {
+  const files = await readdir(dir).catch(() => []);
+  const records: Array<Record<string, unknown>> = [];
+  for (const file of files.filter((item) => item.endsWith(".jsonl"))) {
+    const text = await readFile(join(dir, file), "utf8");
+    for (const line of text.trim().split("\n")) {
+      if (line) records.push(JSON.parse(line) as Record<string, unknown>);
+    }
+  }
+  return records;
+}
+
 async function waitForIdle(service: ServiceSupervisor): Promise<void> {
   for (let i = 0; i < 30; i++) {
     const running = (service as unknown as { turnRunning: boolean }).turnRunning;
@@ -195,6 +209,59 @@ describe("service supervisor", () => {
 
     await grantSystemConfigWrite(config.brain.storePath);
     await expect(authorizeIpcMessage({ type: "set_config", brainSubjectId: "person:person_tim" })).resolves.toBeUndefined();
+  });
+
+  test("serves capability registry over IPC without a token", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    const ipc = (service as unknown as { ipc: { start(): Promise<void>; stop(): Promise<void> } }).ipc;
+    const socketPath = resolveConfigPath(config, config.service.ipcSocket);
+
+    await ipc.start();
+    try {
+      const result = await sendIpcMessage(socketPath, { type: "get_capability_registry" }) as {
+        registryVersion?: unknown;
+        capabilities?: unknown;
+      };
+
+      expect(result.registryVersion).toBe(registryVersion);
+      expect(result.capabilities).toEqual(capabilityRegistry);
+      expect(result.capabilities).toContainEqual(expect.objectContaining({
+        id: "system.config.write",
+        family: "system",
+        selectorKeys: ["command"],
+        riskTier: "high",
+      }));
+    } finally {
+      await ipc.stop();
+    }
+  });
+
+  test("denies and audits Brain-attributed capability registry IPC reads without a grant", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    const ipc = (service as unknown as { ipc: { start(): Promise<void>; stop(): Promise<void> } }).ipc;
+    const socketPath = resolveConfigPath(config, config.service.ipcSocket);
+
+    await ipc.start();
+    try {
+      await expect(
+        sendIpcMessage(socketPath, { type: "get_capability_registry", brainSubjectId: "person:person_tim" }),
+      ).rejects.toThrow(/IPC capability denied for get_capability_registry/);
+    } finally {
+      await ipc.stop();
+    }
+
+    const auditRecords = await readCapabilityDecisionRecords(join(service.state.root, "capability_decisions"));
+    expect(auditRecords).toContainEqual(expect.objectContaining({
+      allowed: false,
+      actorId: "person:person_tim",
+      operation: "system.registry.read",
+      resourceSummary: { command: "get_capability_registry" },
+    }));
   });
 
   test("polls inject.json, queues a synthetic Telegram message, and deletes the file", async () => {

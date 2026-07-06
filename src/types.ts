@@ -273,6 +273,10 @@ export interface UserEvent {
   receivedAt: string;
 }
 
+export const USER_EVENT_SOURCES = ["telegram", "slack", "loop", "monitor", "subagent", "audio_ingest", "system"] as const satisfies readonly UserEvent["source"][];
+type MissingUserEventSource = Exclude<UserEvent["source"], (typeof USER_EVENT_SOURCES)[number]>;
+const _userEventSourcesAreExhaustive: Record<MissingUserEventSource, never> = {};
+
 export interface CodexTurnInput {
   text: string;
   attachments?: Attachment[];

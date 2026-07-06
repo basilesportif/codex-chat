@@ -12,6 +12,7 @@ export type IpcMessage =
   | ({ type: "employee_stop"; employeeId: string } & IpcAuthFields)
   | ({ type: "employee_steer"; employeeId: string; text: string } & IpcAuthFields)
   | ({ type: "employee_status"; employeeId: string } & IpcAuthFields)
+  | ({ type: "get_capability_registry" } & IpcAuthFields)
   | ({ type: "set_config"; entries: Record<string, string> } & IpcAuthFields)
   | ({ type: "ping" } & IpcAuthFields);
 
@@ -25,7 +26,9 @@ interface IpcAuthFields {
 /**
  * Mutating commands require a valid IPC token (plan §6.7 auth caveat +
  * enforcement plan Phase 6 item 6: the socket path alone is not authorization).
- * `ping` and read-only `employee_status` stay unauthenticated.
+ * `ping`, read-only `employee_status`, and registry metadata reads stay
+ * token-ungated. Brain-attributed messages are still capability-checked by the
+ * service handler.
  */
 const AUTHENTICATED_IPC_TYPES = new Set<IpcMessage["type"]>([
   "loop_run",

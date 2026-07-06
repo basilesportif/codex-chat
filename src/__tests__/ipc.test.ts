@@ -78,6 +78,9 @@ describe("LocalIpcServer token authentication", () => {
   test("mutating commands are rejected without or with a wrong token", async () => {
     const { socketPath } = await startServer(async () => ({ ok: true }));
     await expect(
+      sendRawIpcLine(socketPath, JSON.stringify({ type: "employee_start", employeeId: "x" })),
+    ).resolves.toEqual({ ok: false, error: "unauthorized: valid IPC token required", code: "unauthorized" });
+    await expect(
       sendIpcMessage(socketPath, { type: "employee_start", employeeId: "x" }),
     ).rejects.toThrow(/unauthorized/);
     await expect(

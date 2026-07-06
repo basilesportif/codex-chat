@@ -36,7 +36,7 @@ const AUTHENTICATED_IPC_TYPES = new Set<IpcMessage["type"]>([
   "set_config",
 ]);
 
-export type IpcResponse = { ok: true; result?: unknown } | { ok: false; error: string };
+export type IpcResponse = { ok: true; result?: unknown } | { ok: false; error: string; code?: string };
 
 /** Path to the IPC token file, kept next to the socket at mode 0600. */
 export function ipcTokenPath(socketPath: string): string {
@@ -131,7 +131,7 @@ export class LocalIpcServer {
       const messageType = typeof message.type === "string" ? message.type : "unknown";
       if (AUTHENTICATED_IPC_TYPES.has(message.type) && !this.tokenMatches(message.token)) {
         this.logger.warn({ component: "ipc", event: "unauthorized", type: messageType }, "rejected IPC mutation without a valid token");
-        return { ok: false, error: "unauthorized: valid IPC token required" };
+        return { ok: false, error: "unauthorized: valid IPC token required", code: "unauthorized" };
       }
       const result = await this.handler(message);
       return result === undefined ? { ok: true } : { ok: true, result };

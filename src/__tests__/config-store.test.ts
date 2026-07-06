@@ -28,6 +28,56 @@ logLevel = "silent"
   return loadConfig(join(configDir, "codex-chat.toml"));
 }
 
+const BRAIN_ADMIN_ENV_WRITE_KEYS = [
+  "CODEX_CHAT_API_ENABLED",
+  "CODEX_CHAT_SLACK_ENABLED",
+  "CODEX_CHAT_BASE_URL",
+  "CODEX_CHAT_SLACK_EVENTS_PATH",
+  "SLACK_SIGNING_SECRET",
+  "SLACK_BOT_TOKEN",
+  "SLACK_APP_TOKEN",
+  "CODEX_CHAT_CODEX_MODEL",
+  "CODEX_CHAT_CODEX_PROFILE",
+  "CODEX_CHAT_CODEX_MODEL_PROVIDER",
+  "CODEX_CHAT_CODEX_SERVICE_TIER",
+  "CODEX_CHAT_CODEX_SERVICE_TIER_MODE",
+  "OPENROUTER_API_KEY",
+  "CODEX_CHAT_SUBAGENTS_BACKEND",
+  "CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL",
+  "CODEX_CHAT_SUBAGENTS_DEFAULT_CODEX_PROFILE",
+  "CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL_PROVIDER",
+  "CODEX_CHAT_SUBAGENTS_SERVICE_TIER_MODE",
+  "CODEX_CHAT_SUBAGENTS_ALLOW_PROVIDER_OVERRIDE",
+  "CODEX_CHAT_SUBAGENTS_ALLOWED_CODEX_PROFILES",
+  "CODEX_CHAT_SUBAGENTS_ALLOWED_MODEL_PROVIDERS",
+  "TELEGRAM_BOT_TOKEN",
+  "OPENAI_API_KEY",
+] as const;
+
+const BRAIN_ADMIN_SECRET_KEYS = new Set([
+  "SLACK_SIGNING_SECRET",
+  "SLACK_BOT_TOKEN",
+  "SLACK_APP_TOKEN",
+  "OPENROUTER_API_KEY",
+  "TELEGRAM_BOT_TOKEN",
+  "OPENAI_API_KEY",
+]);
+
+function validBrainAdminValue(key: string): string {
+  if (key === "CODEX_CHAT_API_ENABLED" || key === "CODEX_CHAT_SLACK_ENABLED" || key === "CODEX_CHAT_SUBAGENTS_ALLOW_PROVIDER_OVERRIDE") return "true";
+  if (key === "CODEX_CHAT_SLACK_EVENTS_PATH") return "/api/slack/events";
+  if (key === "CODEX_CHAT_BASE_URL") return "https://brain.example.com";
+  if (key === "CODEX_CHAT_CODEX_SERVICE_TIER_MODE" || key === "CODEX_CHAT_SUBAGENTS_SERVICE_TIER_MODE") return "omit";
+  if (key === "CODEX_CHAT_SUBAGENTS_BACKEND") return "codex_app_server";
+  if (key === "CODEX_CHAT_SUBAGENTS_ALLOWED_CODEX_PROFILES") return "openrouter";
+  if (key === "CODEX_CHAT_SUBAGENTS_ALLOWED_MODEL_PROVIDERS") return "openrouter";
+  if (BRAIN_ADMIN_SECRET_KEYS.has(key)) return [key.toLowerCase().replaceAll("_", ""), "synthetic"].join("-");
+  if (key.includes("PROFILE") || key.includes("PROVIDER")) return "openrouter";
+  if (key.includes("MODEL")) return "gpt-5.5";
+  if (key === "CODEX_CHAT_CODEX_SERVICE_TIER") return "fast";
+  return "synthetic";
+}
+
 function parseSystemdEnvText(text: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const line of text.split(/\n/)) {
@@ -127,6 +177,21 @@ describe("validateConfigEntries", () => {
     expect(known.get("SLACK_SIGNING_SECRET")?.secret).toBe(true);
     expect(known.get("TELEGRAM_BOT_TOKEN")?.secret).toBe(true);
     expect(known.get("CODEX_CHAT_CODEX_MODEL")?.secret).toBe(false);
+  });
+
+  test("accepts the default Brain admin config-write key set", async () => {
+    const config = await loadTestConfig();
+    const known = knownConfigEnvKeys(config);
+    const missing = BRAIN_ADMIN_ENV_WRITE_KEYS.filter((key) => !known.has(key));
+    expect(missing).toEqual([]);
+    for (const key of BRAIN_ADMIN_ENV_WRITE_KEYS) {
+      expect(known.get(key)?.secret ?? false).toBe(BRAIN_ADMIN_SECRET_KEYS.has(key));
+    }
+
+    const entries = Object.fromEntries(BRAIN_ADMIN_ENV_WRITE_KEYS.map((key) => [key, validBrainAdminValue(key)]));
+    const result = validateConfigEntries(config, entries);
+    expect(result.fieldErrors).toBeUndefined();
+    expect(Object.keys(result.sanitized).sort()).toEqual([...BRAIN_ADMIN_ENV_WRITE_KEYS].sort());
   });
 });
 

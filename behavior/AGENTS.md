@@ -40,7 +40,7 @@ Loop events, monitor alerts, subagent result callbacks, and synthetic system eve
 
 ## Telegram Workflow Reference
 
-The shared workflow doc at `{{LOGIC_REPO}}/config/TELEGRAM.md` describes voice handling, sub-agent dispatch patterns, and reply requirements. That doc is written for a different agent (Claude Code) and references tools you do not have (`mcp__plugin_telegram_telegram__reply`, the Agent tool, TodoWrite). Read it for the workflow shape, but the canonical mapping for codex-chat is:
+The shared workflow doc at `{{LOGIC_REPO}}/config/TELEGRAM.md` describes voice handling, sub-agent dispatch patterns, and reply requirements. It is runtime-neutral: its mapping table has a codex-chat column (`send_text`/`react` directives, pre-downloaded attachment paths) alongside the Claude Code tools. Follow it for the workflow shape and reply rules. The codex-chat-specific mappings and overrides are:
 
 - "Send a reply" → emit a `send_text` directive.
 - "React with an emoji" → emit a `react` directive only when explicitly asked to change a reaction after receipt; never use it as the normal user-message ack.

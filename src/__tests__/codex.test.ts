@@ -86,6 +86,7 @@ async function listenOnLoopback(server: Server, port = 0): Promise<number> {
 }
 
 afterEach(() => {
+  delete process.env.BRAIN_SUBJECT_ID;
   vi.restoreAllMocks();
   vi.resetModules();
   vi.doUnmock("node:child_process");
@@ -102,7 +103,7 @@ describe("codex clients", () => {
     expect(codex).not.toHaveProperty("HybridCodexClient");
   });
 
-  test("OpenAI and transcription keys are stripped from app-server spawn env", async () => {
+  test("OpenAI and transcription keys are stripped from app-server spawn env and Brain IPC socket is exported", async () => {
     vi.resetModules();
     const spawn = vi.fn(() => fakeChild());
     vi.doMock("node:child_process", async () => {
@@ -133,6 +134,7 @@ describe("codex clients", () => {
     });
     process.env.OPENAI_API_KEY = "sk-test-should-never-reach-codex";
     process.env.CUSTOM_TRANSCRIPTION_API_KEY = "sk-test-transcription-should-never-reach-codex";
+    process.env.BRAIN_SUBJECT_ID = "person:stale";
     process.env.OTHER_VAR = "keep-me";
     const { AppServerCodexClient } = await import("../codex.js");
     const state = {
@@ -153,6 +155,8 @@ describe("codex clients", () => {
     const options = spawn.mock.calls[0]?.[2] as { env?: NodeJS.ProcessEnv; detached?: boolean };
     expect(options.env).not.toHaveProperty("OPENAI_API_KEY");
     expect(options.env).not.toHaveProperty("CUSTOM_TRANSCRIPTION_API_KEY");
+    expect(options.env).not.toHaveProperty("BRAIN_SUBJECT_ID");
+    expect(options.env?.BRAIN_IPC_SOCKET).toBe("/tmp/codex-chat-test/data/run/codex-chat.sock");
     expect(options.env?.OTHER_VAR).toBe("keep-me");
     expect(options.detached).toBe(true);
     await client.stop();

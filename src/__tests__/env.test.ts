@@ -99,6 +99,14 @@ describe("child process environment sanitizer", () => {
     expect(sanitizeCodexChildProcessEnv(config(), input).OPENROUTER_API_KEY).toBe("or-secret");
   });
 
+  test("does not inherit BRAIN_SUBJECT_ID unless explicitly overridden", () => {
+    const input = { BRAIN_SUBJECT_ID: "person:stale", OTHER_VAR: "keep" };
+
+    expect(sanitizeCodexChildProcessEnv(config(), input)).not.toHaveProperty("BRAIN_SUBJECT_ID");
+    expect(sanitizeClaudeAgentSdkChildProcessEnv(config(), input)).not.toHaveProperty("BRAIN_SUBJECT_ID");
+    expect(sanitizeCodexChildProcessEnv(config(), input, { BRAIN_SUBJECT_ID: "person:person_tim" }).BRAIN_SUBJECT_ID).toBe("person:person_tim");
+  });
+
   test("passes only Claude OAuth env to Claude Agent SDK child processes", () => {
     const input = {
       CLAUDE_CODE_OAUTH_TOKEN: "oauth-token",

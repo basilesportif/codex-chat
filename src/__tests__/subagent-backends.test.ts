@@ -108,6 +108,7 @@ afterEach(async () => {
   delete process.env.ANTHROPIC_API_KEY;
   delete process.env.ANTHROPIC_AUTH_TOKEN;
   delete process.env.OPENROUTER_API_KEY;
+  delete process.env.BRAIN_SUBJECT_ID;
   vi.restoreAllMocks();
   vi.resetModules();
   vi.doUnmock("node:child_process");
@@ -259,6 +260,7 @@ describe("app-server subagent backend", () => {
     const root = await mkdtemp(join(tmpdir(), "codex-chat-subagent-backend-"));
     tempDirs.push(root);
     process.env.CODEX_HOME = root;
+    process.env.BRAIN_SUBJECT_ID = "person:stale";
     await writeFile(join(root, "openrouter.config.toml"), `
 model = "z-ai/glm-5.2"
 model_provider = "openrouter"
@@ -326,10 +328,14 @@ env_key = "OPENROUTER_API_KEY"
       codexProfile: "openrouter",
       modelProvider: "openrouter",
       images: [],
+      brainSubjectId: "person:person_tim",
       onJobUpdated: vi.fn().mockResolvedValue(undefined)
     });
 
     const args = spawn.mock.calls[0]?.[1] as string[];
+    const env = spawn.mock.calls[0]?.[2]?.env as NodeJS.ProcessEnv;
+    expect(env.BRAIN_SUBJECT_ID).toBe("person:person_tim");
+    expect(env.BRAIN_IPC_SOCKET).toBe(join(root, "data/run/codex-chat.sock"));
     expect(args).not.toContain("--profile");
     expect(args).toContain("model_provider=\"openrouter\"");
     expect(args).toContain("model_providers.openrouter.base_url=\"https://openrouter.ai/api/v1\"");
@@ -352,6 +358,7 @@ env_key = "OPENROUTER_API_KEY"
     vi.resetModules();
     const root = await mkdtemp(join(tmpdir(), "codex-chat-subagent-backend-"));
     tempDirs.push(root);
+    process.env.BRAIN_SUBJECT_ID = "person:stale";
     const child = fakeChild();
     const spawn = vi.fn(() => {
       queueMicrotask(() => {
@@ -414,6 +421,9 @@ env_key = "OPENROUTER_API_KEY"
       onJobUpdated: vi.fn().mockResolvedValue(undefined)
     })).rejects.toThrow(/exited during startup/);
 
+    const env = spawn.mock.calls[0]?.[2]?.env as NodeJS.ProcessEnv;
+    expect(env).not.toHaveProperty("BRAIN_SUBJECT_ID");
+    expect(env.BRAIN_IPC_SOCKET).toBe(join(root, "data/run/codex-chat.sock"));
     expect(job.backendThreadId).toBeUndefined();
     await backend.shutdown();
   });
@@ -427,6 +437,7 @@ describe("Claude Agent SDK subagent backend", () => {
     process.env.CLAUDE_CODE_OAUTH_TOKEN = "oauth-secret-value";
     process.env.ANTHROPIC_API_KEY = "anthropic-api-secret";
     process.env.OPENROUTER_API_KEY = "openrouter-secret";
+    process.env.BRAIN_SUBJECT_ID = "person:stale";
     const prompts: unknown[] = [];
     const queryMock = vi.fn((params: { prompt: AsyncIterable<unknown>; options: Record<string, unknown> }) => {
       async function* messages() {
@@ -477,6 +488,7 @@ describe("Claude Agent SDK subagent backend", () => {
       serviceTier: "fast",
       serviceTierMode: "auto",
       images: [],
+      brainSubjectId: "person:person_tim",
       onJobUpdated: vi.fn().mockResolvedValue(undefined)
     });
 
@@ -489,6 +501,8 @@ describe("Claude Agent SDK subagent backend", () => {
     expect(options.settingSources).toEqual([]);
     expect(options.settings).toMatchObject({ fastMode: true, fastModePerSessionOptIn: true });
     expect(options.env.CLAUDE_CODE_OAUTH_TOKEN).toBe("oauth-secret-value");
+    expect(options.env.BRAIN_SUBJECT_ID).toBe("person:person_tim");
+    expect(options.env.BRAIN_IPC_SOCKET).toBe(join(root, "data/run/codex-chat.sock"));
     expect(options.env).not.toHaveProperty("ANTHROPIC_API_KEY");
     expect(options.env).not.toHaveProperty("OPENROUTER_API_KEY");
     expect(options.tools).toEqual(["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep", "Agent"]);
@@ -515,6 +529,61 @@ describe("Claude Agent SDK subagent backend", () => {
     expect(events).toContain("serviceTierIgnored");
     expect(events).not.toContain("oauth-secret-value");
     expect(events).not.toContain("anthropic-api-secret");
+    await backend.shutdown();
+  });
+
+  test("strips stale BRAIN_SUBJECT_ID from Claude Agent SDK env when no subject is set", async () => {
+    vi.resetModules();
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-subagent-claude-"));
+    tempDirs.push(root);
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "oauth-secret-value";
+    process.env.BRAIN_SUBJECT_ID = "person:stale";
+    const queryMock = vi.fn((params: { prompt: AsyncIterable<unknown>; options: Record<string, unknown> }) => {
+      async function* messages() {
+        const iterator = params.prompt[Symbol.asyncIterator]();
+        await iterator.next();
+        yield fakeClaudeInitMessage();
+        yield {
+          type: "result",
+          subtype: "success",
+          result: "final answer",
+          errors: [],
+          uuid: "00000000-0000-4000-8000-000000000004",
+          session_id: "claude-session"
+        };
+      }
+      return Object.assign(messages(), {
+        initializationResult: vi.fn().mockResolvedValue({
+          account: { apiKeySource: "oauth", apiProvider: "firstParty", tokenSource: "oauth", subscriptionType: "max" },
+          fast_mode_state: "on"
+        }),
+        interrupt: vi.fn().mockResolvedValue(undefined),
+        close: vi.fn()
+      });
+    });
+    vi.doMock("@anthropic-ai/claude-agent-sdk", () => ({ query: queryMock }));
+
+    const { ClaudeAgentSdkChildAgentBackend } = await import("../subagent-backends.js");
+    const backend = new ClaudeAgentSdkChildAgentBackend(enableClaude(testConfig(root)), fakeLogger() as never);
+    const started = await backend.start({
+      job: subagentJob(root, "job_claudenobrain000000000000000000"),
+      assembledPrompt: "do claude work",
+      lastMessagePath: join(root, "last-message.md"),
+      stdoutPath: join(root, "events.jsonl"),
+      stderrPath: join(root, "stderr.log"),
+      appServerLogPath: join(root, "app-server.log"),
+      model: "claude-opus-4-8",
+      effort: "xhigh",
+      serviceTier: "fast",
+      serviceTierMode: "auto",
+      images: [],
+      onJobUpdated: vi.fn().mockResolvedValue(undefined)
+    });
+
+    await expect(started.finished).resolves.toMatchObject({ code: 0, signal: null });
+    const options = queryMock.mock.calls[0]?.[0].options as Record<string, unknown> & { env: Record<string, string | undefined> };
+    expect(options.env).not.toHaveProperty("BRAIN_SUBJECT_ID");
+    expect(options.env.BRAIN_IPC_SOCKET).toBe(join(root, "data/run/codex-chat.sock"));
     await backend.shutdown();
   });
 
@@ -1104,6 +1173,56 @@ describe("codex exec subagent backend", () => {
     const args = spawn.mock.calls[0]?.[1] as string[];
     expect(args).toContain("--skip-git-repo-check");
     expect(args.indexOf("--skip-git-repo-check")).toBeLessThan(args.indexOf("--cd"));
+    await backend.shutdown();
+  });
+
+  test("passes BRAIN_SUBJECT_ID to codex_exec only when a subject is set", async () => {
+    vi.resetModules();
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-subagent-exec-"));
+    tempDirs.push(root);
+    process.env.BRAIN_SUBJECT_ID = "person:stale";
+    const children: Array<ReturnType<typeof fakeChild> & { stdin: { end: ReturnType<typeof vi.fn> } }> = [];
+    const spawn = vi.fn(() => {
+      const child = fakeChild() as ReturnType<typeof fakeChild> & { stdin: { end: ReturnType<typeof vi.fn> } };
+      child.stdin = { end: vi.fn() };
+      children.push(child);
+      return child;
+    });
+    vi.doMock("node:child_process", async () => {
+      const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+      return { ...actual, spawn };
+    });
+    const { CodexExecChildAgentBackend } = await import("../subagent-backends.js");
+    const backend = new CodexExecChildAgentBackend(testConfig(root), fakeLogger() as never);
+    const baseInput = {
+      assembledPrompt: "do work",
+      lastMessagePath: join(root, "last-message.md"),
+      stdoutPath: join(root, "events.jsonl"),
+      stderrPath: join(root, "stderr.log"),
+      appServerLogPath: join(root, "app-server.log"),
+      model: "gpt-test",
+      effort: "medium",
+      serviceTier: "standard" as const,
+      images: [],
+      onJobUpdated: vi.fn().mockResolvedValue(undefined)
+    };
+
+    await backend.start({
+      ...baseInput,
+      job: subagentJob(root, "job_execbrain000000000000000000000"),
+      brainSubjectId: "person:person_tim"
+    });
+    await backend.start({
+      ...baseInput,
+      job: subagentJob(root, "job_execnobrain0000000000000000000")
+    });
+
+    const firstEnv = spawn.mock.calls[0]?.[2]?.env as NodeJS.ProcessEnv;
+    const secondEnv = spawn.mock.calls[1]?.[2]?.env as NodeJS.ProcessEnv;
+    expect(firstEnv.BRAIN_SUBJECT_ID).toBe("person:person_tim");
+    expect(firstEnv.BRAIN_IPC_SOCKET).toBe(join(root, "data/run/codex-chat.sock"));
+    expect(secondEnv.BRAIN_IPC_SOCKET).toBe(join(root, "data/run/codex-chat.sock"));
+    expect(secondEnv).not.toHaveProperty("BRAIN_SUBJECT_ID");
     await backend.shutdown();
   });
 

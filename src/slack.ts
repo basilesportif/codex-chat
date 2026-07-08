@@ -8,6 +8,8 @@ import { nowIso } from "./util.js";
 const SLACK_SIGNATURE_VERSION = "v0";
 const SLACK_SIGNATURE_TOLERANCE_SEC = 5 * 60;
 const SLACK_TEXT_MAX_CHARS = 38_000;
+const SLACK_USER_INFO_CACHE_TTL_MS = 60 * 60_000;
+const SLACK_USER_INFO_NEGATIVE_CACHE_TTL_MS = 5 * 60_000;
 
 export interface SlackSignatureVerificationInput {
   signingSecret?: string;
@@ -84,6 +86,11 @@ export interface SlackHistoryMessage {
 export type SlackHistoryFetchResult =
   | { ok: true; messages: SlackHistoryMessage[]; responseMetadata?: Record<string, unknown> }
   | { ok: false; error: string; status?: number; retryAfterSec?: number };
+
+export interface SlackUserInfo {
+  displayName?: string;
+  realName?: string;
+}
 
 export function verifySlackRequestSignature(input: SlackSignatureVerificationInput): SlackSignatureVerificationResult {
   if (!input.signingSecret) return { ok: false, reason: "missing_secret" };
@@ -196,6 +203,8 @@ export function normalizeSlackText(text: string, botUserId?: string, stripBotMen
 }
 
 export class SlackGateway {
+  private readonly userInfoCache = new Map<string, { expiresAt: number; value?: SlackUserInfo }>();
+
   constructor(
     private readonly config: AppConfig,
     private readonly logger: Logger,
@@ -234,6 +243,64 @@ export class SlackGateway {
       results.push({ channel: payload.channel, ts: payload.ts });
     }
     return results;
+  }
+
+  async getUserInfo(userId: string, timeoutMs = 2_500): Promise<SlackUserInfo | undefined> {
+    const cached = this.userInfoCache.get(userId);
+    if (cached && cached.expiresAt > Date.now()) return cached.value;
+    if (!this.config.slackBotToken) {
+      this.cacheUserInfo(userId, undefined);
+      this.logger.warn({ component: "slack", event: "user_info_failed", userId, error: `${this.config.slack.botTokenEnv} is required for Slack users.info` }, "Slack users.info failed");
+      return undefined;
+    }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await this.fetchImpl(slackApiUrlWithQuery("users.info", { user: userId }), {
+        method: "GET",
+        headers: {
+          authorization: `Bearer ${this.config.slackBotToken}`
+        },
+        signal: controller.signal
+      });
+      const payload = await response.json().catch(() => undefined) as {
+        ok?: boolean;
+        error?: string;
+        user?: {
+          name?: string;
+          real_name?: string;
+          profile?: {
+            display_name?: string;
+            real_name?: string;
+          };
+        };
+      } | undefined;
+      if (!response.ok || payload?.ok !== true || !payload.user) {
+        const error = payload?.error ?? `http_${response.status}`;
+        this.logger.warn({ component: "slack", event: "user_info_failed", userId, status: response.status, error }, "Slack users.info failed");
+        this.cacheUserInfo(userId, undefined);
+        return undefined;
+      }
+      const realName = payload.user.profile?.real_name || payload.user.real_name || undefined;
+      const displayName = payload.user.profile?.display_name || payload.user.profile?.real_name || payload.user.real_name || payload.user.name || undefined;
+      const value = displayName || realName ? { displayName, realName } : undefined;
+      this.cacheUserInfo(userId, value);
+      return value;
+    } catch (error) {
+      const reason = error instanceof Error && error.name === "AbortError"
+        ? "timeout"
+        : error instanceof Error ? error.message : String(error);
+      this.logger.warn({ component: "slack", event: "user_info_failed", userId, error: reason }, "Slack users.info failed");
+      this.cacheUserInfo(userId, undefined);
+      return undefined;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  cachedUserInfo(userId: string): SlackUserInfo | undefined {
+    const cached = this.userInfoCache.get(userId);
+    return cached && cached.expiresAt > Date.now() ? cached.value : undefined;
   }
 
   async addReaction(input: {
@@ -398,6 +465,13 @@ export class SlackGateway {
     } finally {
       clearTimeout(timeout);
     }
+  }
+
+  private cacheUserInfo(userId: string, value: SlackUserInfo | undefined): void {
+    this.userInfoCache.set(userId, {
+      value,
+      expiresAt: Date.now() + (value ? SLACK_USER_INFO_CACHE_TTL_MS : SLACK_USER_INFO_NEGATIVE_CACHE_TTL_MS)
+    });
   }
 }
 

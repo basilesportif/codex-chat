@@ -73,6 +73,7 @@ export interface CapabilityDecision {
   id: string;
   allowed: boolean;
   actorId?: string;
+  actorDisplayName?: string;
   operation: string;
   action?: string;
   resourceSummary: JsonRecord;
@@ -94,6 +95,16 @@ export interface CapabilityCheckResult {
   grantIds: string[];
   reason?: string;
   checkedAt: string;
+}
+
+export interface BrainCapabilityManifestEntry {
+  capabilityId: string;
+  selectors?: JsonRecord;
+}
+
+export interface BrainSubjectManifest {
+  subjectId: string;
+  capabilities: BrainCapabilityManifestEntry[];
 }
 
 export interface ProgressEvent {
@@ -269,6 +280,7 @@ export interface UserEvent {
   conversationKey?: ConversationKey;
   conversationSessionId?: string;
   capabilityGrants?: CapabilityGrant[];
+  brainSubjectManifest?: BrainSubjectManifest;
   runContext?: RunContext;
   receivedAt: string;
 }
@@ -342,6 +354,8 @@ export interface SubagentJob {
   resultCapabilityDecisionId?: string;
   allowedControlActorIds?: string[];
   capabilitySummary?: JsonRecord;
+  brainSubjectId?: string;
+  brainCapabilityManifest?: BrainSubjectManifest;
   status: "queued" | "running" | "cancelling" | "completed" | "failed" | "cancelled" | "timed_out" | "abandoned";
   promptPath: string;
   artifactDir: string;

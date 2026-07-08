@@ -12,6 +12,7 @@ import { injectFilePath, INJECT_TELEGRAM_USER_ID, ServiceSupervisor } from "../s
 import type { CodexEvent, SubagentJob, UserEvent } from "../types.js";
 
 const tempDirs: string[] = [];
+const services: ServiceSupervisor[] = [];
 
 async function loadTestConfig(transport = "app-server") {
   delete process.env.CODEX_CHAT_SUBAGENTS_SERVICE_TIER_MODE;
@@ -153,11 +154,13 @@ async function sendRawIpcLine(socketPath: string, line: string): Promise<Record<
 }
 
 async function waitForIdle(service: ServiceSupervisor): Promise<void> {
-  for (let i = 0; i < 30; i++) {
-    const running = (service as unknown as { turnRunning: boolean }).turnRunning;
-    if (!running) return;
-    await flush();
-  }
+  await service.whenIdle();
+}
+
+function makeService(...args: ConstructorParameters<typeof ServiceSupervisor>): ServiceSupervisor {
+  const service = new ServiceSupervisor(...args);
+  services.push(service);
+  return service;
 }
 
 function userEvent(messageId: number, text = `message ${messageId}`): UserEvent {
@@ -242,6 +245,7 @@ async function grantCalendarWriteWithSelector(storePath: string): Promise<void> 
 }
 
 afterEach(async () => {
+  await Promise.all(services.splice(0).map((service) => service.stop().catch(() => undefined)));
   delete process.env.CODEX_HOME;
   vi.restoreAllMocks();
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
@@ -258,7 +262,7 @@ describe("service supervisor", () => {
   test("requires a Brain capability for set_config when a Brain subject is asserted", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     const authorizeIpcMessage = (service as unknown as {
       authorizeIpcMessage(message: { type?: string; brainSubjectId?: string }): Promise<void>;
@@ -274,7 +278,7 @@ describe("service supervisor", () => {
   test("serves capability registry over IPC without a token", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     const ipc = (service as unknown as { ipc: { start(): Promise<void>; stop(): Promise<void> } }).ipc;
     const socketPath = resolveConfigPath(config, config.service.ipcSocket);
 
@@ -301,7 +305,7 @@ describe("service supervisor", () => {
   test("denies and audits Brain-attributed capability registry IPC reads without a grant", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     const ipc = (service as unknown as { ipc: { start(): Promise<void>; stop(): Promise<void> } }).ipc;
     const socketPath = resolveConfigPath(config, config.service.ipcSocket);
@@ -327,7 +331,7 @@ describe("service supervisor", () => {
   test("checks capabilities over IPC as a read-only dry-run", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     const ipc = (service as unknown as { ipc: { start(): Promise<void>; stop(): Promise<void> } }).ipc;
     const socketPath = resolveConfigPath(config, config.service.ipcSocket);
@@ -378,7 +382,7 @@ describe("service supervisor", () => {
   test("authorizes Brain-attributed check_capability callers before dry-run evaluation", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     const ipc = (service as unknown as { ipc: { start(): Promise<void>; stop(): Promise<void> } }).ipc;
     const socketPath = resolveConfigPath(config, config.service.ipcSocket);
@@ -419,7 +423,7 @@ describe("service supervisor", () => {
     const config = await loadTestConfig();
     await grantCalendarWriteWithSelector(config.brain.storePath);
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     const ipc = (service as unknown as { ipc: { start(): Promise<void>; stop(): Promise<void> } }).ipc;
     const socketPath = resolveConfigPath(config, config.service.ipcSocket);
@@ -455,7 +459,7 @@ describe("service supervisor", () => {
   test("polls inject.json, queues a synthetic Telegram message, and deletes the file", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     const enqueue = vi.spyOn(service, "enqueueUserEvent").mockResolvedValue();
     const path = injectFilePath(config);
@@ -481,7 +485,7 @@ describe("service supervisor", () => {
   test("notifies Telegram users about abandoned running turns after restart", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
     await service.state.writeJson("turns/turn_old.json", {
@@ -509,7 +513,7 @@ describe("service supervisor", () => {
   test("handles Employee scaffold list command before Codex", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     const sendTurn = vi.spyOn(service.codex, "sendTurn");
     const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
@@ -534,7 +538,7 @@ describe("service supervisor", () => {
       }]
     }));
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     const sendTurn = vi.spyOn(service.codex, "sendTurn");
     const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
@@ -549,7 +553,7 @@ describe("service supervisor", () => {
   test("Employee child subagent requests dispatch through service-owned SubagentManager metadata", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     const dispatch = vi.spyOn((service as unknown as { subagents: { dispatch(input: unknown): Promise<string> } }).subagents, "dispatch")
       .mockResolvedValue("job_employee_child");
@@ -588,7 +592,7 @@ describe("service supervisor", () => {
   test("persists queued Telegram events and notifies on restart recovery", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
     await service.state.writeJson("queued_turns/queued_old.json", {
@@ -614,7 +618,7 @@ describe("service supervisor", () => {
   test("drops the oldest queued message on per-chat queue overflow and notifies the user", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     const firstTurn = deferred();
     vi.spyOn(service as unknown as { processEvent(event: UserEvent): Promise<void> }, "processEvent").mockReturnValue(firstTurn.promise);
@@ -647,7 +651,7 @@ describe("service supervisor", () => {
   test("force abort and original turn finalizer do not double-drain queued work", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     vi.spyOn(service.telegram, "sendText").mockResolvedValue();
     vi.spyOn(service.telegram, "notifyOps").mockResolvedValue();
@@ -689,7 +693,7 @@ describe("service supervisor", () => {
   test("a crash reported during an in-flight restart triggers a follow-up restart pass", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     vi.spyOn(service.telegram, "sendText").mockResolvedValue();
     vi.spyOn(service.telegram, "notifyOps").mockResolvedValue();
@@ -720,7 +724,7 @@ describe("service supervisor", () => {
   test("watchdog aborts main-loop turns after 80 seconds", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
     vi.spyOn(service.telegram, "notifyOps").mockResolvedValue();
@@ -744,7 +748,7 @@ describe("service supervisor", () => {
   test("watchdog abort ignores late directives from the stale Codex turn", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
     vi.spyOn(service.telegram, "notifyOps").mockResolvedValue();
@@ -790,7 +794,7 @@ describe("service supervisor", () => {
     (config.codex as unknown as { maxRestartAttempts: number; restartBackoffBaseMs: number; restartBackoffMaxMs: number }).restartBackoffBaseMs = 1;
     (config.codex as unknown as { maxRestartAttempts: number; restartBackoffBaseMs: number; restartBackoffMaxMs: number }).restartBackoffMaxMs = 5;
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
 
     vi.spyOn(service.codex, "stop").mockResolvedValue(undefined);
@@ -814,7 +818,7 @@ describe("service supervisor", () => {
     (config.codex as unknown as { maxRestartAttempts: number; restartBackoffBaseMs: number; restartBackoffMaxMs: number }).restartBackoffBaseMs = 1;
     (config.codex as unknown as { maxRestartAttempts: number; restartBackoffBaseMs: number; restartBackoffMaxMs: number }).restartBackoffMaxMs = 5;
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
 
     vi.spyOn(service.codex, "stop").mockResolvedValue(undefined);
@@ -838,7 +842,7 @@ describe("service supervisor", () => {
   test("marks turn files as error when processing fails after writing running state", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
       yield { type: "final", text: "hello" };
@@ -862,7 +866,7 @@ describe("service supervisor", () => {
   test("renders Telegram reply context before user content as inert reference metadata", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     const prompt = (service as unknown as { formatEventForCodex(event: UserEvent): string }).formatEventForCodex({
       ...userEvent(600, "what do you think?"),
       reply: {
@@ -890,7 +894,7 @@ describe("service supervisor", () => {
   test("injects Brain subject manifest headers before user content when resolved", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     const prompt = (service as unknown as { formatEventForCodex(event: UserEvent): string }).formatEventForCodex({
       ...userEvent(601, "update my calendar"),
       brainSubjectManifest: {
@@ -911,7 +915,7 @@ describe("service supervisor", () => {
   test("omits Brain subject manifest headers when the actor is unresolved", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     const prompt = (service as unknown as { formatEventForCodex(event: UserEvent): string }).formatEventForCodex(userEvent(602, "hello"));
 
     expect(prompt).not.toContain("brain_subject:");
@@ -922,7 +926,7 @@ describe("service supervisor", () => {
   test("injects compact active subagent steering context before user content", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     (service as unknown as {
       subagents: {
         activeJobSnapshots(limit?: number): unknown;
@@ -975,7 +979,7 @@ describe("service supervisor", () => {
   test("injects compact Employee routing context before user content", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     (service as unknown as {
       employees: {
         runtimeSnapshot(limit?: number): unknown;
@@ -1024,7 +1028,7 @@ describe("service supervisor", () => {
   ])("delivers main-loop clean text for %s prompts when Codex chose not to dispatch", async (_label, text) => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
       yield { type: "final", text: "Main-loop plain answer." };
@@ -1040,7 +1044,7 @@ describe("service supervisor", () => {
   test("executes send_text directives even when the prompt contains routing keywords", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
       yield {
@@ -1061,7 +1065,7 @@ describe("service supervisor", () => {
   test("defaults same-chat send_text directives to reply to the origin message", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
       yield {
@@ -1084,7 +1088,7 @@ describe("service supervisor", () => {
   test("defaults same-chat send_image and send_document directives to reply to the origin message", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
       yield {
@@ -1107,7 +1111,7 @@ describe("service supervisor", () => {
   test("subagent return_to_main final response replies to the original Telegram message", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
       yield { type: "final", text: "Subagent result summary." };
@@ -1129,7 +1133,7 @@ describe("service supervisor", () => {
   test("subagent return_to_main falls back to direct result when main output is blank", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
       yield { type: "final", text: "   " };
@@ -1154,7 +1158,7 @@ describe("service supervisor", () => {
   test("failed subagent return_to_main bypasses main synthesis and replies directly to origin chat", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     const sendTurn = vi.spyOn(service.codex, "sendTurn");
     const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
@@ -1194,7 +1198,7 @@ describe("service supervisor", () => {
   test("timed-out subagent return_to_main without origin chat notifies admins directly", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     const sendTurn = vi.spyOn(service.codex, "sendTurn");
     const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
@@ -1227,7 +1231,7 @@ describe("service supervisor", () => {
   test("completed audio ingestion events pass prompt metadata and transcript to Codex", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     await service.state.saveAudioIngestion({
       id: "ing_test",
@@ -1294,7 +1298,7 @@ describe("service supervisor", () => {
   test("diarized Telegram audio dispatches a subagent instead of running the main turn first", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     const sendTurn = vi.spyOn(service.codex, "sendTurn");
     const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
@@ -1353,7 +1357,7 @@ describe("service supervisor", () => {
   test("regular Telegram audio stays on the normal main-loop path without subagent dispatch", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     const dispatch = vi.spyOn((service as unknown as {
       subagents: { dispatch(input: Record<string, unknown>): Promise<string> };
@@ -1381,7 +1385,7 @@ describe("service supervisor", () => {
   test("diarized audio ingestion dispatches a subagent after trusted service-side diarization", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     await service.state.saveAudioIngestion({
       id: "ing_diarized",
@@ -1460,7 +1464,7 @@ describe("service supervisor", () => {
   ])("allows clean text for simple Telegram prompt %s", async (text) => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
       yield { type: "final", text: "Pong." };
@@ -1476,7 +1480,7 @@ describe("service supervisor", () => {
   test("resets the main Codex session after a terminal stream-disconnect error with no output", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     const resetSession = vi.fn().mockResolvedValue({ ok: true, transport: "app-server", sessionId: "fresh-thread" });
     service.codex.resetSession = resetSession;
@@ -1513,7 +1517,7 @@ describe("service supervisor", () => {
   test("does not reset the main Codex session for usage limit errors", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     const resetSession = vi.fn().mockResolvedValue({ ok: true, transport: "app-server", sessionId: "fresh-thread" });
     service.codex.resetSession = resetSession;
@@ -1549,7 +1553,7 @@ describe("service supervisor", () => {
   test("surfaces Codex rate limits when the turn stream throws", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
       throw new Error("rate_limit_exceeded: 429 Too Many Requests");
@@ -1565,7 +1569,7 @@ describe("service supervisor", () => {
   test("dispatches a subagent when Codex chooses subagent routing for a research prompt", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     const dispatchFromDirective = vi.fn().mockResolvedValue("job_123");
     (service as unknown as { subagents: { dispatchFromDirective: typeof dispatchFromDirective } }).subagents.dispatchFromDirective = dispatchFromDirective;
@@ -1591,7 +1595,7 @@ describe("service supervisor", () => {
     const config = await loadTestConfig();
     await configureOpenRouterSubagentOverrides(config);
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     const dispatchFromDirective = vi.fn().mockResolvedValue("job_123");
     (service as unknown as { subagents: { dispatchFromDirective: typeof dispatchFromDirective } }).subagents.dispatchFromDirective = dispatchFromDirective;
@@ -1620,7 +1624,7 @@ describe("service supervisor", () => {
     const config = await loadTestConfig();
     await configureOpenRouterSubagentOverrides(config);
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     const dispatchFromDirective = vi.fn().mockResolvedValue("job_123");
     (service as unknown as { subagents: { dispatchFromDirective: typeof dispatchFromDirective } }).subagents.dispatchFromDirective = dispatchFromDirective;
@@ -1655,7 +1659,7 @@ describe("service supervisor", () => {
     const config = await loadTestConfig();
     await configureOpenRouterSubagentOverrides(config);
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     const dispatchFromDirective = vi.fn().mockResolvedValue("job_123");
     (service as unknown as { subagents: { dispatchFromDirective: typeof dispatchFromDirective } }).subagents.dispatchFromDirective = dispatchFromDirective;
@@ -1685,7 +1689,7 @@ describe("service supervisor", () => {
     const config = await loadTestConfig();
     await configureOpenRouterSubagentOverrides(config);
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     const dispatchFromDirective = vi.fn().mockResolvedValue("job_123");
     (service as unknown as { subagents: { dispatchFromDirective: typeof dispatchFromDirective } }).subagents.dispatchFromDirective = dispatchFromDirective;
@@ -1714,7 +1718,7 @@ describe("service supervisor", () => {
   test("merges an immediate same-chat send_text acknowledgement into dispatch status", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
     const dispatchFromDirective = vi.fn().mockResolvedValue("job_123");
     (service as unknown as { subagents: { dispatchFromDirective: typeof dispatchFromDirective } }).subagents.dispatchFromDirective = dispatchFromDirective;
@@ -1751,7 +1755,7 @@ describe("incremental directive execution", () => {
   test("react directive fires during streaming (before turn/completed)", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
 
     const reactFenceChunk = `\`\`\`codex-chat\n{"version":1,"actions":[{"type":"react","idempotencyKey":"react-stream-1","messageId":42,"emoji":"👀"}]}\n\`\`\``;
@@ -1798,7 +1802,7 @@ describe("incremental directive execution", () => {
   test("react is not double-fired by idempotency key when pre-executed and final pass runs", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
 
     const reactFence = `\`\`\`codex-chat\n{"version":1,"actions":[{"type":"react","idempotencyKey":"react-idem-1","messageId":99,"emoji":"👀"}]}\n\`\`\``;
@@ -1831,7 +1835,7 @@ describe("incremental directive execution", () => {
   test("multiple fences in stream: each fires as soon as its fence closes", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
-    const service = new ServiceSupervisor(config, logger);
+    const service = makeService(config, logger);
     await service.state.init();
 
     const fence1 = `\`\`\`codex-chat\n{"version":1,"actions":[{"type":"react","idempotencyKey":"react-multi-1","messageId":10,"emoji":"👀"}]}\n\`\`\``;

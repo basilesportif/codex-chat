@@ -312,9 +312,11 @@ export class ServiceSupervisor {
   private sideEffectEvent?: UserEvent;
   private activeTurnToken = 0;
   private drainingQueue = false;
+  private readonly pendingDirectiveActions = new Set<Promise<unknown>>();
   private watchdogInterval?: ReturnType<typeof setInterval>;
   private injectInterval?: ReturnType<typeof setInterval>;
   private injectPolling = false;
+  private started = false;
   private stopping = false;
   private restartingCodex = false;
   /** Crash reason reported while restartCodex was already running; triggers one follow-up restart pass. */
@@ -583,6 +585,7 @@ export class ServiceSupervisor {
       `codex-chat started\ncommit: ${commit}\ntransport: ${health.transport}\nsandbox: ${this.config.codex.sandbox}\nsession: ${health.sessionId ?? "new"}`
     );
     await this.announceDeployResult(commit);
+    this.started = true;
   }
 
   async stop(): Promise<void> {
@@ -590,9 +593,12 @@ export class ServiceSupervisor {
     if (this.injectInterval) clearInterval(this.injectInterval);
     if (this.stopping) return;
     this.stopping = true;
+    const wasStarted = this.started;
+    this.started = false;
     this.subagents.prepareForServiceShutdown("shutdown");
     this.loops.prepareForServiceShutdown("shutdown");
-    await this.telegram.notifyOps("codex-chat shutting down").catch(() => undefined);
+    await this.drainPendingActions();
+    if (wasStarted) await this.telegram.notifyOps("codex-chat shutting down").catch(() => undefined);
     await this.ipc.stop().catch(() => undefined);
     await this.api.stop().catch(() => undefined);
     await this.telegram.stop().catch(() => undefined);
@@ -601,6 +607,20 @@ export class ServiceSupervisor {
     await this.loops.shutdown().catch(() => undefined);
     await this.subagents.shutdown().catch(() => undefined);
     await this.codex.stop().catch(() => undefined);
+  }
+
+  async whenIdle(timeoutMs = 5000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (true) {
+      if (!this.turnRunning && this.isMessageQueueEmpty()) {
+        const drained = await this.drainPendingActionsUntil(deadline);
+        if (drained && !this.turnRunning && this.isMessageQueueEmpty() && this.pendingDirectiveActions.size === 0) return;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`ServiceSupervisor did not become idle within ${timeoutMs}ms`);
+      }
+      await this.sleep(Math.min(10, Math.max(1, deadline - Date.now())));
+    }
   }
 
   private async addImmediateSlackReaction(event: UserEvent): Promise<void> {
@@ -1644,7 +1664,7 @@ export class ServiceSupervisor {
               const actionKey = this.directiveActionKey(action, blockIndex, actionIndex);
               if (!preExecutedActions.has(actionKey) && this.shouldPreExecuteDirective(action)) {
                 preExecutedActions.add(actionKey);
-                void this.executeDirective(action, event, { parentTurnId: turnId });
+                this.trackPendingDirectiveAction(action, event, { parentTurnId: turnId });
               }
             });
           });
@@ -2094,6 +2114,46 @@ export class ServiceSupervisor {
 
   private shouldPreExecuteDirective(action: DirectiveAction): boolean {
     return action.type === "react";
+  }
+
+  private trackPendingDirectiveAction(action: DirectiveAction, origin: UserEvent, options: { dispatchStatusText?: string; parentTurnId?: string } = {}): void {
+    const pending = this.executeDirective(action, origin, options).catch((error) => {
+      this.logger.error({ component: "directives", event: "pre_execute_failed", actionType: action.type, error }, "pre-executed directive action failed");
+    });
+    this.pendingDirectiveActions.add(pending);
+    void pending.finally(() => {
+      this.pendingDirectiveActions.delete(pending);
+    });
+  }
+
+  private async drainPendingActions(): Promise<void> {
+    while (this.pendingDirectiveActions.size > 0) {
+      await Promise.allSettled([...this.pendingDirectiveActions]);
+    }
+  }
+
+  private async drainPendingActionsUntil(deadline: number): Promise<boolean> {
+    while (this.pendingDirectiveActions.size > 0) {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) return false;
+      const result = await Promise.race([
+        Promise.allSettled([...this.pendingDirectiveActions]).then(() => "drained" as const),
+        this.sleep(remainingMs).then(() => "timeout" as const)
+      ]);
+      if (result === "timeout") return false;
+    }
+    return true;
+  }
+
+  private isMessageQueueEmpty(): boolean {
+    for (const queue of this.messageQueue.values()) {
+      if (queue.length > 0) return false;
+    }
+    return true;
+  }
+
+  private async sleep(ms: number): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   private underlyingDirectiveOperation(action: DirectiveAction): string | undefined {

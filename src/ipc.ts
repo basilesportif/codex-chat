@@ -131,7 +131,10 @@ export class LocalIpcServer {
   }
 
   async stop(): Promise<void> {
-    await new Promise<void>((resolve) => this.server?.close(() => resolve()));
+    if (!this.server) return;
+    const server = this.server;
+    this.server = undefined;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
     if (await pathExists(this.socketPath)) await unlink(this.socketPath);
   }
 

@@ -94,6 +94,7 @@ export function sanitizeChildProcessEnv(
   for (const [key, value] of Object.entries(baseEnv)) {
     if (value !== undefined) env[key] = value;
   }
+  delete env.BRAIN_SUBJECT_ID;
   for (const [key, value] of Object.entries(overrides ?? {})) {
     if (value === undefined) delete env[key];
     else env[key] = value;

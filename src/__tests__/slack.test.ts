@@ -264,6 +264,18 @@ async function waitForIdle(service: ServiceSupervisor): Promise<void> {
   }
 }
 
+async function readCapabilityDecisionRecords(dir: string): Promise<Array<Record<string, unknown>>> {
+  const files = await readdir(dir).catch(() => []);
+  const records: Array<Record<string, unknown>> = [];
+  for (const file of files.filter((item) => item.endsWith(".jsonl"))) {
+    const text = await readFile(join(dir, file), "utf8");
+    for (const line of text.trim().split("\n")) {
+      if (line) records.push(JSON.parse(line) as Record<string, unknown>);
+    }
+  }
+  return records;
+}
+
 describe("Slack runtime foundation", () => {
   test("renders the Brain-branded Slack manifest with the Brain Events URL", async () => {
     const result = await renderSlackManifest({
@@ -564,6 +576,114 @@ describe("Slack runtime foundation", () => {
     expect(history).not.toHaveBeenCalled();
     expect(replies).not.toHaveBeenCalled();
     expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  test("adds Slack display name to unknown-actor denial audit records from a cache hit", async () => {
+    const config = await slackConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    vi.spyOn(service.slack, "cachedUserInfo").mockReturnValue({ displayName: "Ada Example" });
+    const lookup = vi.spyOn(service.slack, "getUserInfo").mockResolvedValue({ displayName: "Ada Example" });
+    vi.spyOn(service.slack, "sendText").mockResolvedValue([{ channel: "C345", ts: "1782000002.000100" }]);
+    const normalized = normalizeSlackEventCallback(slackEnvelope({
+      event_id: "EvUnknownSlackDisplayNameDenied",
+      event: {
+        type: "app_mention",
+        user: "U999",
+        text: "<@UBOT> should be denied",
+        channel: "C345",
+        channel_type: "channel",
+        ts: "1782000000.000100",
+        event_ts: "1782000000.000100"
+      }
+    }), "2026-07-01T00:00:00.000Z");
+    if (normalized.status !== "event") throw new Error("expected event");
+
+    await service.enqueueUserEvent(normalized.event);
+
+    const auditRecords = await readCapabilityDecisionRecords(join(service.state.root, "capability_decisions"));
+    expect(auditRecords).toContainEqual(expect.objectContaining({
+      allowed: false,
+      actorId: "slack:team:T123:user:U999",
+      actorDisplayName: "Ada Example",
+      reason: "actor_not_linked_to_brain_subject"
+    }));
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
+  test("records unknown-actor denial before sending reply and refreshes users.info after cache miss", async () => {
+    const config = await slackConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    const order: string[] = [];
+    const originalRecord = service.state.recordCapabilityDecision.bind(service.state);
+    vi.spyOn(service.state, "recordCapabilityDecision").mockImplementation(async (decision) => {
+      order.push("record");
+      return originalRecord(decision);
+    });
+    vi.spyOn(service.slack, "cachedUserInfo").mockReturnValue(undefined);
+    vi.spyOn(service.slack, "getUserInfo").mockResolvedValue(undefined);
+    vi.spyOn(service.slack, "sendText").mockImplementation(async () => {
+      order.push("send");
+      return [{ channel: "C345", ts: "1782000002.000100" }];
+    });
+    const normalized = normalizeSlackEventCallback(slackEnvelope({
+      event_id: "EvUnknownSlackNoDisplayNameDenied",
+      event: {
+        type: "app_mention",
+        user: "U998",
+        text: "<@UBOT> should be denied",
+        channel: "C345",
+        channel_type: "channel",
+        ts: "1782000000.000100",
+        event_ts: "1782000000.000100"
+      }
+    }), "2026-07-01T00:00:00.000Z");
+    if (normalized.status !== "event") throw new Error("expected event");
+
+    await service.enqueueUserEvent(normalized.event);
+
+    expect(order).toEqual(["record", "send"]);
+    const auditRecords = await readCapabilityDecisionRecords(join(service.state.root, "capability_decisions"));
+    const record = auditRecords.find((item) => item.actorId === "slack:team:T123:user:U998" && item.reason === "actor_not_linked_to_brain_subject");
+    expect(record).toBeDefined();
+    expect(record).not.toHaveProperty("actorDisplayName");
+    expect(service.slack.getUserInfo).toHaveBeenCalledWith("U998");
+  });
+
+  test("enriches subsequent unknown-actor denials after a miss-triggered lookup populates cache", async () => {
+    const config = await slackConfig();
+    const logger = createLogger("silent");
+    const service = new ServiceSupervisor(config, logger);
+    await service.state.init();
+    const cached = vi.spyOn(service.slack, "cachedUserInfo")
+      .mockReturnValueOnce(undefined)
+      .mockReturnValueOnce({ displayName: "Ada Later" });
+    vi.spyOn(service.slack, "getUserInfo").mockResolvedValue({ displayName: "Ada Later" });
+    vi.spyOn(service.slack, "sendText").mockResolvedValue([{ channel: "C345", ts: "1782000002.000100" }]);
+    const event = {
+      type: "app_mention",
+      user: "U997",
+      text: "<@UBOT> should be denied",
+      channel: "C345",
+      channel_type: "channel",
+      ts: "1782000000.000100",
+      event_ts: "1782000000.000100"
+    };
+    const first = normalizeSlackEventCallback(slackEnvelope({ event_id: "EvUnknownSlackFirstDenied", event }), "2026-07-01T00:00:00.000Z");
+    const second = normalizeSlackEventCallback(slackEnvelope({ event_id: "EvUnknownSlackSecondDenied", event: { ...event, ts: "1782000001.000100", event_ts: "1782000001.000100" } }), "2026-07-01T00:00:01.000Z");
+    if (first.status !== "event" || second.status !== "event") throw new Error("expected events");
+
+    await service.enqueueUserEvent(first.event);
+    await service.enqueueUserEvent(second.event);
+
+    const auditRecords = await readCapabilityDecisionRecords(join(service.state.root, "capability_decisions"));
+    const records = auditRecords.filter((item) => item.actorId === "slack:team:T123:user:U997" && item.reason === "actor_not_linked_to_brain_subject");
+    expect(records[0]).not.toHaveProperty("actorDisplayName");
+    expect(records[1]).toMatchObject({ actorDisplayName: "Ada Later" });
+    expect(cached).toHaveBeenCalledTimes(2);
   });
 
   test.each([
@@ -1135,5 +1255,36 @@ describe("Slack runtime foundation", () => {
       timestamp: "1782000000.000100",
       name: "eyes"
     })).resolves.toEqual({ ok: false, error: "already_reacted", status: 200, retryAfterSec: undefined });
+  });
+
+  test("SlackGateway fetches users.info display names and caches successes", async () => {
+    const config = await slackConfig();
+    config.slackBotToken = ["xoxb", "test", "token"].join("-");
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({
+      ok: true,
+      user: {
+        name: "ada",
+        real_name: "Ada Real",
+        profile: { display_name: "Ada Display", real_name: "Ada Profile" }
+      }
+    }), { status: 200 }));
+    const gateway = new SlackGateway(config, createLogger("silent"), fetchImpl as unknown as typeof fetch);
+
+    await expect(gateway.getUserInfo("U00SYNTH01")).resolves.toEqual({ displayName: "Ada Display", realName: "Ada Profile" });
+    await expect(gateway.getUserInfo("U00SYNTH01")).resolves.toEqual({ displayName: "Ada Display", realName: "Ada Profile" });
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(String(fetchImpl.mock.calls[0]?.[0])).toContain("users.info");
+    expect(String(fetchImpl.mock.calls[0]?.[0])).toContain("user=U00SYNTH01");
+  });
+
+  test("SlackGateway users.info failures are negative-cached and return undefined", async () => {
+    const config = await slackConfig();
+    config.slackBotToken = ["xoxb", "test", "token"].join("-");
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ ok: false, error: "user_not_found" }), { status: 200 }));
+    const gateway = new SlackGateway(config, createLogger("silent"), fetchImpl as unknown as typeof fetch);
+
+    await expect(gateway.getUserInfo("U00SYNTH02")).resolves.toBeUndefined();
+    await expect(gateway.getUserInfo("U00SYNTH02")).resolves.toBeUndefined();
+    expect(fetchImpl).toHaveBeenCalledOnce();
   });
 });

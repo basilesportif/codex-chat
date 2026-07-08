@@ -25,7 +25,7 @@ export interface CapabilityRegistryEntry {
   deprecated?: boolean;
 }
 
-export const registryVersion = 1;
+export const registryVersion = 2;
 
 const EVENT_SELECTOR_KEYS = [
   "source",
@@ -312,6 +312,13 @@ export const capabilityRegistry = [
     id: "system.registry.read",
     family: "system",
     description: "Read the declarative capability registry metadata.",
+    selectorKeys: IPC_SELECTOR_KEYS,
+    riskTier: "low",
+  },
+  {
+    id: "system.capability.check",
+    family: "system",
+    description: "Dry-run a Brain capability check through local IPC.",
     selectorKeys: IPC_SELECTOR_KEYS,
     riskTier: "low",
   },

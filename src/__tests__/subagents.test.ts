@@ -211,6 +211,37 @@ describe("subagents", () => {
     expect(manager.listJobs()[0]).toMatchObject({ model: "gpt-5.5", effort: "xhigh", serviceTier: "fast", summary: "test task" });
   });
 
+  test("includes Brain subject manifest block in spawned subagent prompts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-sub-"));
+    tempDirs.push(root);
+    const { SubagentManager } = await import("../subagents.js");
+    const backend = fakeBackend("codex_exec");
+    const manager = new SubagentManager(
+      makeConfig(root, 1),
+      { readSubagentProfile: vi.fn().mockResolvedValue("profile contents") } as never,
+      { saveJob: vi.fn().mockResolvedValue(undefined) } as never,
+      fakeLogger() as never,
+      { onReturnToMain: vi.fn(), onSendToUser: vi.fn() },
+      { codex_exec: backend }
+    );
+
+    await manager.dispatch({
+      profile: "x",
+      prompt: "do calendar work",
+      route: "return_to_main",
+      brainSubjectId: "person:person_tim",
+      brainCapabilityManifest: {
+        subjectId: "person:person_tim",
+        capabilities: [{ capabilityId: "calendar.event.write", selectors: { calendarId: "abc" } }]
+      }
+    });
+
+    expect(backend.starts[0]?.assembledPrompt).toContain("brain_subject: person:person_tim");
+    expect(backend.starts[0]?.assembledPrompt).toContain("brain_capabilities: calendar.event.write{calendarId=abc}");
+    expect(backend.starts[0]?.assembledPrompt).toContain("When running calendar/CRM/project scripts on behalf of this user, pass --on-behalf-of person:person_tim; actions outside brain_capabilities must be refused.");
+    expect(backend.starts[0]?.brainSubjectId).toBe("person:person_tim");
+  });
+
 
 
   test("records allowed per-dispatch Codex profile and model provider overrides", async () => {

@@ -9,7 +9,7 @@ import { AppConfig, ensureConfiguredDirectories, resolveConfigPath } from "./con
 import { persistEnvEntries, resolveEnvStorePath, validateConfigEntries } from "./config-store.js";
 import { RuntimeEventLog } from "./runtime-events.js";
 import { BehaviorPack } from "./behavior.js";
-import { CAPABILITY_DENIED_MESSAGE, assertBrainCapabilitySourceAvailable, authorize, authorizeOutput, brainCapabilityStorePath, capabilityGrantFromDecision, outOfScopeAllowedDecision, requirementForInboundEvent } from "./capabilities.js";
+import { CAPABILITY_DENIED_MESSAGE, OUTSIDE_BRAIN_SCOPE_REASON, assertBrainCapabilitySourceAvailable, authorize, authorizeOutput, brainCapabilityStorePath, capabilityGrantFromDecision, formatBrainSubjectManifestBlock, loadBrainCapabilityStore, outOfScopeAllowedDecision, requirementForInboundEvent, resolveSubjectManifest, type BrainCapabilityStore } from "./capabilities.js";
 import { capabilityRegistry, registryVersion, type CapabilityId } from "./capability-registry.js";
 import { AppServerCodexClient, CodexCrashInfo } from "./codex.js";
 import {
@@ -27,7 +27,7 @@ import { claudeFastModeSupported } from "./subagent-backends.js";
 import { EmployeeManager, parseEmployeeCommand, type EmployeeCommand } from "./employees.js";
 import { FileStore } from "./file-store.js";
 import { CodexHeartbeat } from "./heartbeat.js";
-import { LocalIpcServer, type IpcMessage } from "./ipc.js";
+import { IpcRequestError, LocalIpcServer, type IpcMessage } from "./ipc.js";
 import { formatLoopsStatus, LoopManager, syncCron } from "./loops.js";
 import { MonitorManager } from "./monitors.js";
 import {
@@ -63,7 +63,7 @@ import {
   type SlackTelemetryObservation
 } from "./slack-telemetry.js";
 import { TelegramGateway } from "./telegram.js";
-import { ActorContext, CapabilityDecision, CodexClient, StoredAction, SubagentBackendKind, SubagentJob, SubagentOwnerType, SubagentResultTarget, UserEvent } from "./types.js";
+import { ActorContext, CapabilityDecision, CodexClient, JsonRecord, StoredAction, SubagentBackendKind, SubagentJob, SubagentOwnerType, SubagentResultTarget, UserEvent } from "./types.js";
 import { compactText, inlineCode, makeId, nowIso } from "./util.js";
 
 export const INJECT_TELEGRAM_USER_ID = 253768951;
@@ -122,6 +122,7 @@ export const IPC_OPERATION_BY_MESSAGE_TYPE = {
   employee_steer: "ipc.employee.manage",
   employee_status: "ipc.employee.manage",
   get_capability_registry: "system.registry.read",
+  check_capability: "system.capability.check",
   set_config: "system.config.write",
 } as const satisfies Record<BrainAttributedIpcMessageType, CapabilityId>;
 
@@ -451,33 +452,85 @@ export class ServiceSupervisor {
       }
       if (message.type === "employee_status") return this.employees.formatStatus(message.employeeId);
       if (message.type === "get_capability_registry") return { registryVersion, capabilities: capabilityRegistry };
+      if (message.type === "check_capability") return this.handleCheckCapabilityIpc(message);
       if (message.type === "set_config") return this.handleSetConfig(message.entries);
       if (message.type === "ping") return { pong: true };
       throw new Error(`Unknown IPC message type: ${(message as { type?: string }).type ?? "unknown"}`);
     });
   }
 
-  private async authorizeIpcMessage(message: { type?: string; brainSubjectId?: string }): Promise<void> {
+  private async authorizeIpcMessage(message: { type?: string; brainSubjectId?: string; callerSubjectId?: string }): Promise<void> {
     if (message.type === "ping") return;
+    if (message.type === "check_capability") {
+      if (!this.config.brain.enforcementEnabled || !message.callerSubjectId) return;
+      const operation = operationForIpcMessageType(message.type);
+      const decision = await this.authorizeIpcBrainSubject({
+        subjectId: message.callerSubjectId,
+        operation,
+        resource: { command: message.type },
+        reason: "local IPC request",
+        caller: "service.ipc"
+      });
+      if (!decision.allowed) throw new IpcRequestError("unauthorized", `IPC capability denied for ${message.type}: ${decision.reason ?? "denied"}`);
+      return;
+    }
     // Local-socket callers (cron loop runner, CLI) stay trusted as before;
     // only messages asserting a Brain subject are checked against the store.
     if (!this.config.brain.enforcementEnabled || !message.brainSubjectId) return;
-    const actor = {
-      id: message.brainSubjectId ?? "ipc:unauthenticated",
-      surfaceKind: "system" as const,
-      correlationId: makeId("corr"),
-      metadata: message.brainSubjectId ? { brainSubjectId: message.brainSubjectId } : {}
-    };
     const operation = operationForIpcMessageType(message.type);
-    const decision = await authorize(actor, {
+    const decision = await this.authorizeIpcBrainSubject({
+      subjectId: message.brainSubjectId,
       operation,
-      action: operation.split(".").at(-1) ?? operation,
       resource: { command: message.type },
       reason: "local IPC request",
       caller: "service.ipc"
-    }, { storePath: brainCapabilityStorePath(this.config), caller: "service.ipc" });
-    await this.recordCapabilityDecision(decision);
+    });
     if (!decision.allowed) throw new Error(`IPC capability denied for ${message.type}: ${decision.reason ?? "denied"}`);
+  }
+
+  private async handleCheckCapabilityIpc(message: Extract<IpcMessage, { type: "check_capability" }>): Promise<{ allowed: boolean; reason: string }> {
+    const brainSubjectId = typeof message.brainSubjectId === "string" ? message.brainSubjectId.trim() : "";
+    const operation = typeof message.operation === "string" ? message.operation.trim() : "";
+    if (!brainSubjectId) throw new IpcRequestError("bad_request", "check_capability requires non-empty brainSubjectId");
+    if (!operation) throw new IpcRequestError("bad_request", "check_capability requires non-empty operation");
+    if (message.action !== undefined && typeof message.action !== "string") throw new IpcRequestError("bad_request", "check_capability action must be a string");
+    if (!message.resource || typeof message.resource !== "object" || Array.isArray(message.resource)) {
+      throw new IpcRequestError("bad_request", "check_capability resource must be an object");
+    }
+    const decision = await this.authorizeIpcBrainSubject({
+      subjectId: brainSubjectId,
+      operation,
+      action: message.action?.trim(),
+      resource: message.resource,
+      reason: "local IPC capability dry-run",
+      caller: "ipc_check"
+    });
+    return { allowed: decision.allowed, reason: decision.reason ?? (decision.allowed ? "allowed" : "denied") };
+  }
+
+  private async authorizeIpcBrainSubject(input: {
+    subjectId: string;
+    operation: string;
+    action?: string;
+    resource: JsonRecord;
+    reason: string;
+    caller: string;
+  }): Promise<CapabilityDecision> {
+    const actor = {
+      id: input.subjectId,
+      surfaceKind: "system" as const,
+      correlationId: makeId("corr"),
+      metadata: { brainSubjectId: input.subjectId }
+    };
+    const decision = await authorize(actor, {
+      operation: input.operation,
+      action: input.action || input.operation.split(".").at(-1) || input.operation,
+      resource: input.resource,
+      reason: input.reason,
+      caller: input.caller
+    }, { storePath: brainCapabilityStorePath(this.config), caller: input.caller });
+    await this.recordCapabilityDecision(decision);
+    return decision;
   }
 
   /**
@@ -858,7 +911,9 @@ export class ServiceSupervisor {
         conversationSessionId: input.event.conversationSessionId,
         correlationId: input.event.correlationId,
         originTarget: input.event.outputTarget,
-        defaultOutputTarget: input.event.outputTarget
+        defaultOutputTarget: input.event.outputTarget,
+        brainSubjectId: input.event.brainSubjectManifest?.subjectId,
+        brainCapabilityManifest: input.event.brainSubjectManifest
       });
       this.logger.info({
         component: "service",
@@ -2001,7 +2056,9 @@ export class ServiceSupervisor {
           conversationSessionId: origin.conversationSessionId,
           correlationId: origin.correlationId,
           originTarget: origin.outputTarget,
-          defaultOutputTarget: origin.outputTarget
+          defaultOutputTarget: origin.outputTarget,
+          brainSubjectId: origin.brainSubjectManifest?.subjectId,
+          brainCapabilityManifest: origin.brainSubjectManifest
         });
         await this.state.recordProgressEvent(createProgressEvent({
           type: "subagent_dispatched",
@@ -2209,19 +2266,27 @@ export class ServiceSupervisor {
   }
 
   private async authorizeInboundEvent(event: UserEvent, stage: "enqueue" | "run"): Promise<boolean> {
+    const context = await this.inboundAuthorizationContext(event);
     const receiveOperation = `${event.source}.event.receive`;
-    const receiveDecision = await this.authorizeAndRecord(event, receiveOperation, `${stage} receive`, `service.${stage}`);
+    const receiveDecision = await this.authorizeDecision(event, receiveOperation, `${stage} receive`, `service.${stage}`, context);
     if (!receiveDecision.allowed) {
-      await this.sendCapabilityDenialReply(event, receiveDecision);
+      const recorded = await this.recordInboundDenialDecision(event, receiveDecision);
+      await this.sendCapabilityDenialReply(event, recorded);
+      this.refreshSlackUnknownActorDenialCache(event, recorded);
       return false;
     }
-    const runDecision = await this.authorizeAndRecord(event, "assistant.run", `${stage} model run`, `service.${stage}`);
+    await this.recordAndLogCapabilityDecision(receiveDecision, `service.${stage}`);
+    const runDecision = await this.authorizeDecision(event, "assistant.run", `${stage} model run`, `service.${stage}`, context);
     const grant = capabilityGrantFromDecision(runDecision, event.actor?.id, event.conversationSessionId);
     if (grant) event.capabilityGrants = [...(event.capabilityGrants ?? []), grant];
     if (!runDecision.allowed) {
-      await this.sendCapabilityDenialReply(event, runDecision);
+      const recorded = await this.recordInboundDenialDecision(event, runDecision);
+      await this.sendCapabilityDenialReply(event, recorded);
+      this.refreshSlackUnknownActorDenialCache(event, recorded);
       return false;
     }
+    await this.recordAndLogCapabilityDecision(runDecision, `service.${stage}`);
+    event.brainSubjectManifest = await this.resolveEventSubjectManifest(event, context);
     return true;
   }
 
@@ -2289,14 +2354,44 @@ export class ServiceSupervisor {
   }
 
   private async authorizeAndRecord(event: UserEvent, operation: string, reason: string, caller: string): Promise<CapabilityDecision> {
+    const decision = await this.authorizeDecision(event, operation, reason, caller);
+    await this.recordAndLogCapabilityDecision(decision, caller);
+    // Capability decisions are log-only (pino + capability_decisions/ audit
+    // files); they are intentionally NOT surfaced in the visible Slack
+    // telemetry summary.
+    return decision;
+  }
+
+  private async authorizeDecision(
+    event: UserEvent,
+    operation: string,
+    reason: string,
+    caller: string,
+    context: { store?: BrainCapabilityStore; storeLoadError?: unknown } = {},
+  ): Promise<CapabilityDecision> {
     ensureEventRuntimeContext(event);
     if (!this.brainEnforcementApplies(event)) {
       return outOfScopeAllowedDecision({ actorId: event.actor?.id, operation, caller });
     }
-    const decision = await authorize(event.actor, requirementForInboundEvent(event, operation, reason, caller), {
+    return authorize(event.actor, requirementForInboundEvent(event, operation, reason, caller), {
       storePath: brainCapabilityStorePath(this.config),
+      store: context.store,
+      storeLoadError: context.storeLoadError,
       caller,
     });
+  }
+
+  private async inboundAuthorizationContext(event: UserEvent): Promise<{ store?: BrainCapabilityStore; storeLoadError?: unknown }> {
+    if (!this.brainEnforcementApplies(event)) return {};
+    try {
+      return { store: await loadBrainCapabilityStore(brainCapabilityStorePath(this.config)) };
+    } catch (error) {
+      return { storeLoadError: error };
+    }
+  }
+
+  private async recordAndLogCapabilityDecision(decision: CapabilityDecision, caller: string | undefined): Promise<void> {
+    if (decision.reason === OUTSIDE_BRAIN_SCOPE_REASON) return;
     await this.recordCapabilityDecision(decision);
     this.logger[decision.allowed ? "info" : "warn"]({
       component: "capabilities",
@@ -2310,10 +2405,42 @@ export class ServiceSupervisor {
       decisionId: decision.id,
       caller,
     }, decision.allowed ? "Brain capability check allowed" : "Brain capability check denied");
-    // Capability decisions are log-only (pino + capability_decisions/ audit
-    // files); they are intentionally NOT surfaced in the visible Slack
-    // telemetry summary.
-    return decision;
+  }
+
+  private async recordInboundDenialDecision(event: UserEvent, decision: CapabilityDecision): Promise<CapabilityDecision> {
+    const enriched = this.enrichSlackUnknownActorDenialFromCache(event, decision);
+    await this.recordAndLogCapabilityDecision(enriched, decision.caller);
+    return enriched;
+  }
+
+  private enrichSlackUnknownActorDenialFromCache(event: UserEvent, decision: CapabilityDecision): CapabilityDecision {
+    if (event.source !== "slack" || decision.allowed || decision.reason !== "actor_not_linked_to_brain_subject") return decision;
+    const userId = typeof event.metadata?.slackUserId === "string" ? event.metadata.slackUserId : event.actor?.surfaceUserId;
+    if (!userId) return decision;
+    const info = this.slack.cachedUserInfo(userId);
+    const actorDisplayName = info?.displayName ?? info?.realName;
+    return actorDisplayName ? { ...decision, actorDisplayName } : decision;
+  }
+
+  private refreshSlackUnknownActorDenialCache(event: UserEvent, decision: CapabilityDecision): void {
+    if (event.source !== "slack" || decision.allowed || decision.reason !== "actor_not_linked_to_brain_subject") return;
+    const userId = typeof event.metadata?.slackUserId === "string" ? event.metadata.slackUserId : event.actor?.surfaceUserId;
+    if (!userId || decision.actorDisplayName) return;
+    void this.slack.getUserInfo(userId).catch((error) => {
+      this.logger.warn({ component: "slack", event: "unknown_actor_user_info_refresh_failed", userId, error }, "Slack unknown-actor user info refresh failed");
+    });
+  }
+
+  private async resolveEventSubjectManifest(event: UserEvent, context: { store?: BrainCapabilityStore; storeLoadError?: unknown } = {}): Promise<UserEvent["brainSubjectManifest"]> {
+    if (!this.brainEnforcementApplies(event)) return undefined;
+    if (event.source !== "slack" && event.source !== "telegram") return undefined;
+    if (context.storeLoadError) {
+      this.logger.warn({ component: "capabilities", event: "subject_manifest_store_unavailable", error: context.storeLoadError }, "Brain subject manifest unavailable after allowed event");
+      return undefined;
+    }
+    const manifest = await resolveSubjectManifest(event.actor, { storePath: brainCapabilityStorePath(this.config), store: context.store });
+    if (!manifest) this.logger.warn({ component: "capabilities", event: "subject_manifest_unresolved", actorId: event.actor?.id }, "Brain subject manifest unresolved after allowed event");
+    return manifest;
   }
 
   private async recordCapabilityDecision(decision: CapabilityDecision): Promise<void> {
@@ -2723,6 +2850,7 @@ export class ServiceSupervisor {
       event.runContext?.runId ? `run_id: ${event.runContext.runId}` : "",
       event.correlationId ? `correlation_id: ${event.correlationId}` : "",
       event.actor ? `actor: ${event.actor.id}${event.actor.handle ? ` (@${event.actor.handle})` : ""}` : "",
+      event.brainSubjectManifest ? formatBrainSubjectManifestBlock(event.brainSubjectManifest) : "",
       event.outputTarget ? `output_target: ${event.outputTarget.id}` : "",
       event.chatId ? `telegram chat_id: ${event.chatId}` : "",
       event.userId ? `telegram user_id: ${event.userId}` : "",

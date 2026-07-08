@@ -50,6 +50,7 @@ export interface StartChildAgentInput {
   codexProfile?: string;
   modelProvider?: string;
   images: string[];
+  brainSubjectId?: string;
   onJobUpdated(job: SubagentJob): Promise<void>;
 }
 
@@ -122,6 +123,13 @@ export function claudeFastModeSupported(model: string): boolean {
 
 function claudeSubagentConfig(config: AppConfig): ClaudeSubagentConfig {
   return { ...DEFAULT_CLAUDE_SUBAGENT_CONFIG, ...(config.subagents.claude ?? {}) };
+}
+
+function childBrainEnv(config: AppConfig, brainSubjectId?: string): ChildEnvSource {
+  return {
+    BRAIN_SUBJECT_ID: brainSubjectId,
+    BRAIN_IPC_SOCKET: resolveConfigPath(config, config.service.ipcSocket ?? "data/run/codex-chat.sock")
+  };
 }
 
 class AsyncUserMessageQueue implements AsyncIterable<ClaudeSdkUserMessage> {
@@ -200,7 +208,7 @@ export class CodexExecChildAgentBackend implements ChildAgentBackend {
       { component: "subagents", event: "start", backend: this.kind, jobId: input.job.id, profile: input.job.profile, args },
       "starting subagent"
     );
-    const safeEnv = sanitizeCodexChildProcessEnv(this.config);
+    const safeEnv = sanitizeCodexChildProcessEnv(this.config, process.env, childBrainEnv(this.config, input.brainSubjectId));
     const child = spawn(this.config.codex.binary, args, {
       cwd: this.config.service.workspace,
       env: safeEnv,
@@ -536,7 +544,7 @@ class ClaudeAgentSdkSession {
     strippedNonOAuthEnv: string[];
   }> {
     const cfg = claudeSubagentConfig(this.config);
-    const safeEnv = sanitizeClaudeAgentSdkChildProcessEnv(this.config);
+    const safeEnv = sanitizeClaudeAgentSdkChildProcessEnv(this.config, process.env, childBrainEnv(this.config, this.input.brainSubjectId));
     const credentialFiles = await this.credentialFiles(safeEnv);
     const oauthEnvPresent = Boolean(safeEnv.CLAUDE_CODE_OAUTH_TOKEN);
     const strippedNonOAuthEnv = this.strippedNonOAuthEnvNames(safeEnv);
@@ -981,7 +989,7 @@ class ChildAppServerSession {
       "starting app-server subagent"
     );
 
-    const safeEnv = sanitizeCodexChildProcessEnv(this.config);
+    const safeEnv = sanitizeCodexChildProcessEnv(this.config, process.env, childBrainEnv(this.config, this.input.brainSubjectId));
     const child = spawn(this.config.codex.binary, args, {
       cwd: this.config.service.workspace,
       env: safeEnv,

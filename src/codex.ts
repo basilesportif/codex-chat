@@ -3,7 +3,7 @@ import { once } from "node:events";
 import { createServer } from "node:net";
 import WebSocket from "ws";
 import type { Logger } from "pino";
-import { AppConfig } from "./config.js";
+import { AppConfig, resolveConfigPath } from "./config.js";
 import { BehaviorPack } from "./behavior.js";
 import type { EmployeeRuntimeClient, EmployeeThreadResumeInput, EmployeeThreadSpec, EmployeeThreadStartResult, EmployeeTurnInput } from "./employee-runtime.js";
 import { sanitizeCodexChildProcessEnv } from "./env.js";
@@ -197,7 +197,9 @@ export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient 
     if (this.config.codex.profile) args.push("--profile", this.config.codex.profile);
     if (this.shouldSendServiceTier() && this.config.codex.serviceTier === "fast") args.push("-c", "features.fast_mode=true");
     this.logger.info({ component: "codex", event: "spawn_app_server", args }, "starting codex app-server");
-    const safeEnv = sanitizeCodexChildProcessEnv(this.config);
+    const safeEnv = sanitizeCodexChildProcessEnv(this.config, process.env, {
+      BRAIN_IPC_SOCKET: resolveConfigPath(this.config, this.config.service.ipcSocket)
+    });
     const child = spawn(this.config.codex.binary, args, {
       cwd: this.config.service.workspace,
       env: safeEnv,

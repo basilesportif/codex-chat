@@ -135,8 +135,18 @@ function collectCallExpression(sourceFile: ts.SourceFile, node: ts.CallExpressio
   const name = callName(node.expression);
   if (!name) return;
 
-  if (name === "authorizeAndRecord" || name === "authorizeServiceCommand") {
+  if (name === "authorizeAndRecord" || name === "authorizeDecision" || name === "authorizeServiceCommand") {
     collectOperationExpression(sourceFile, node.arguments[1], operations, unsupported, enclosingFunction);
+    return;
+  }
+
+  if (name === "authorizeIpcBrainSubject") {
+    const input = node.arguments[0];
+    if (input && ts.isObjectLiteralExpression(input)) {
+      collectOperationExpression(sourceFile, objectProperty(input, "operation"), operations, unsupported, enclosingFunction);
+      return;
+    }
+    unsupported.push(`${location(sourceFile, node)} authorizeIpcBrainSubject call without an object literal`);
     return;
   }
 
@@ -211,7 +221,10 @@ function collectOperationExpression(sourceFile: ts.SourceFile, expression: ts.Ex
   }
 
   const text = expression.getText(sourceFile).replace(/\s+/g, " ");
-  if (text === "operation" && (enclosingFunction === "authorizeAndRecord" || enclosingFunction === "authorizeServiceCommand")) {
+  if (text === "operation" && (enclosingFunction === "authorizeAndRecord" || enclosingFunction === "authorizeDecision" || enclosingFunction === "authorizeServiceCommand")) {
+    return;
+  }
+  if (text === "input.operation" && relative(sourceRoot, sourceFile.fileName) === "service.ts" && enclosingFunction === "authorizeIpcBrainSubject") {
     return;
   }
   if (text === "receiveOperation" || text === "`${event.source}.event.receive`") {
@@ -232,6 +245,9 @@ function collectOperationExpression(sourceFile: ts.SourceFile, expression: ts.Ex
   }
   if (text === "operation" && relative(sourceRoot, sourceFile.fileName) === "service.ts" && enclosingFunction === "authorizeIpcMessage") {
     addExpansion("Local IPC authorizeIpcMessage operation matrix", operations);
+    return;
+  }
+  if (text === "operation" && relative(sourceRoot, sourceFile.fileName) === "service.ts" && enclosingFunction === "handleCheckCapabilityIpc") {
     return;
   }
 

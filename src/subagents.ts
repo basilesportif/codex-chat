@@ -5,8 +5,9 @@ import { classifyBackendLimitError, type BackendLimitErrorKind } from "./backend
 import { AppConfig, resolveConfigPath } from "./config.js";
 import { BehaviorPack } from "./behavior.js";
 import { DirectiveAction } from "./directives.js";
+import { formatBrainSubjectManifestBlock } from "./capabilities.js";
 import { StateStore } from "./state.js";
-import { OutputTarget, Route, ServiceTier, ServiceTierMode, SubagentBackendKind, SubagentJob, SubagentOwnerType, SubagentResultTarget } from "./types.js";
+import { BrainSubjectManifest, OutputTarget, Route, ServiceTier, ServiceTierMode, SubagentBackendKind, SubagentJob, SubagentOwnerType, SubagentResultTarget } from "./types.js";
 import {
   ChildAgentBackend,
   ChildAgentFinish,
@@ -48,6 +49,8 @@ interface DispatchInput {
   originTarget?: OutputTarget;
   defaultOutputTarget?: OutputTarget;
   resultTarget?: SubagentResultTarget;
+  brainSubjectId?: string;
+  brainCapabilityManifest?: BrainSubjectManifest;
   timeoutSec?: number;
   backend?: SubagentBackendKind;
   model?: string;
@@ -263,6 +266,8 @@ export class SubagentManager {
       correlationId?: string;
       originTarget?: OutputTarget;
       defaultOutputTarget?: OutputTarget;
+      brainSubjectId?: string;
+      brainCapabilityManifest?: BrainSubjectManifest;
     }
   ): Promise<string> {
     return this.dispatch({
@@ -277,6 +282,8 @@ export class SubagentManager {
       correlationId: origin?.correlationId,
       originTarget: origin?.originTarget,
       defaultOutputTarget: origin?.defaultOutputTarget,
+      brainSubjectId: origin?.brainSubjectId,
+      brainCapabilityManifest: origin?.brainCapabilityManifest,
       resultTarget: resultTargetForRoute(action.route),
       timeoutSec: action.timeoutSec,
       backend: action.backend,
@@ -328,6 +335,8 @@ export class SubagentManager {
       originTarget: input.originTarget,
       defaultOutputTarget: input.defaultOutputTarget,
       resultTarget,
+      brainSubjectId: input.brainSubjectId,
+      brainCapabilityManifest: input.brainCapabilityManifest,
       status: "queued",
       promptPath: join(artifactDir, "prompt.md"),
       artifactDir,
@@ -709,6 +718,7 @@ export class SubagentManager {
       remoteRepoAuthorityRules(this.config.paths.assistantWorkspace),
       "",
       SELF_RESTART_SAFETY_RULES,
+      job.brainCapabilityManifest ? `\n${formatBrainSubjectManifestBlock(job.brainCapabilityManifest)}\n` : "",
       "",
       "Task:",
       input.prompt,
@@ -793,6 +803,7 @@ export class SubagentManager {
       codexProfile,
       modelProvider,
       images: input.images ?? [],
+      brainSubjectId: job.brainSubjectId,
       onJobUpdated: (updatedJob) => this.state.saveJob(updatedJob)
     });
     const timeout = setTimeout(() => {

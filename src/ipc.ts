@@ -4,6 +4,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { dirname, join } from "node:path";
 import type { Logger } from "pino";
 import { pathExists } from "./util.js";
+import type { JsonRecord } from "./types.js";
 
 export type IpcMessage =
   | ({ type: "loop_run"; loopId: string; scheduledAt?: string } & IpcAuthFields)
@@ -13,6 +14,7 @@ export type IpcMessage =
   | ({ type: "employee_steer"; employeeId: string; text: string } & IpcAuthFields)
   | ({ type: "employee_status"; employeeId: string } & IpcAuthFields)
   | ({ type: "get_capability_registry" } & IpcAuthFields)
+  | ({ type: "check_capability"; operation: string; action?: string; resource: JsonRecord; brainSubjectId: string; callerSubjectId?: string } & IpcAuthFields)
   | ({ type: "set_config"; entries: Record<string, string> } & IpcAuthFields)
   | ({ type: "ping" } & IpcAuthFields);
 
@@ -40,6 +42,15 @@ const AUTHENTICATED_IPC_TYPES = new Set<IpcMessage["type"]>([
 ]);
 
 export type IpcResponse = { ok: true; result?: unknown } | { ok: false; error: string; code?: string };
+
+export class IpcRequestError extends Error {
+  constructor(
+    public readonly code: string,
+    message: string
+  ) {
+    super(message);
+  }
+}
 
 /** Path to the IPC token file, kept next to the socket at mode 0600. */
 export function ipcTokenPath(socketPath: string): string {
@@ -150,7 +161,11 @@ export class LocalIpcServer {
         return { ok: false, error: "invalid IPC message" };
       }
       this.logger.error({ component: "ipc", event: "message_failed", error, type: messageType }, "IPC message failed");
-      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+        code: error instanceof IpcRequestError ? error.code : undefined,
+      };
     }
   }
 }

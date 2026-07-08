@@ -1,7 +1,8 @@
 import { access, readFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import type { AppConfig } from "./config.js";
-import type { ActorContext, CapabilityDecision, CapabilityGrant, CapabilityRequirement, CapabilityResource, JsonRecord, OutputTarget, UserEvent } from "./types.js";
+import { capabilityRegistry } from "./capability-registry.js";
+import type { ActorContext, BrainSubjectManifest, CapabilityDecision, CapabilityGrant, CapabilityRequirement, CapabilityResource, JsonRecord, OutputTarget, UserEvent } from "./types.js";
 import { nowIso } from "./util.js";
 
 export const DEFAULT_BRAIN_CAPABILITY_STORE_PATH = "/home/tim/.brain/control-plane/capabilities.json";
@@ -32,7 +33,7 @@ export function outOfScopeAllowedDecision(input: { actorId?: string; operation: 
   };
 }
 
-interface BrainCapabilityStore {
+export interface BrainCapabilityStore {
   schemaVersion?: number;
   people?: BrainPerson[];
   externalIdentities?: BrainExternalIdentity[];
@@ -92,6 +93,8 @@ interface BrainGrant {
 
 export interface AuthorizeOptions {
   storePath?: string;
+  store?: BrainCapabilityStore;
+  storeLoadError?: unknown;
   now?: Date;
   caller?: string;
 }
@@ -137,11 +140,17 @@ export async function authorize(
     return { ...base, allowed: false, reason: "missing_actor" };
   }
 
-  let store: BrainCapabilityStore;
-  try {
-    store = await loadBrainCapabilityStore(storePath);
-  } catch (error) {
+  let store: BrainCapabilityStore | undefined = options.store;
+  if (!store && options.storeLoadError) {
+    const error = options.storeLoadError;
     return { ...base, allowed: false, reason: error instanceof Error ? error.message : String(error) };
+  }
+  if (!store) {
+    try {
+      store = await loadBrainCapabilityStore(storePath);
+    } catch (error) {
+      return { ...base, allowed: false, reason: error instanceof Error ? error.message : String(error) };
+    }
   }
 
   const actorResolution = resolveActorSubjects(store, actor);
@@ -168,6 +177,41 @@ export async function authorize(
     reason: "active_brain_grant",
     brainSubjectIds: actorResolution.subjectIds,
   };
+}
+
+export async function resolveSubjectManifest(
+  actor: ActorContext | undefined,
+  options: { storePath?: string; store?: BrainCapabilityStore; now?: Date } = {},
+): Promise<BrainSubjectManifest | undefined> {
+  if (!actor) return undefined;
+  let store: BrainCapabilityStore | undefined = options.store;
+  try {
+    store ??= await loadBrainCapabilityStore(options.storePath ?? brainCapabilityStorePath());
+  } catch {
+    return undefined;
+  }
+  const resolution = resolveActorSubjects(store, actor);
+  if (!resolution.allowed) return undefined;
+  const subjectId = resolution.subjectIds[0];
+  if (!subjectId) return undefined;
+  const subjectResolution = resolveActorSubjects(store, brainSubjectActor(subjectId));
+  if (!subjectResolution.allowed) return undefined;
+  const capabilities = manifestCapabilitiesForSubjects(store, subjectResolution.subjectIds, options.now);
+  return { subjectId, capabilities };
+}
+
+export function formatBrainSubjectManifestBlock(manifest: BrainSubjectManifest, maxCapabilitiesLineChars = 1_000): string {
+  const capabilitySummaries = manifest.capabilities.map(formatManifestCapability);
+  let capabilityLine = capabilitySummaries.join(", ");
+  if (!capabilityLine) capabilityLine = "none";
+  if (capabilityLine.length > maxCapabilitiesLineChars) {
+    capabilityLine = `${capabilityLine.slice(0, Math.max(0, maxCapabilitiesLineChars - 16)).trimEnd()} ... (truncated)`;
+  }
+  return [
+    `brain_subject: ${manifest.subjectId}`,
+    `brain_capabilities: ${capabilityLine}`,
+    `When running calendar/CRM/project scripts on behalf of this user, pass --on-behalf-of ${manifest.subjectId}; actions outside brain_capabilities must be refused.`,
+  ].join("\n");
 }
 
 export async function authorizeOrThrow(actor: ActorContext | undefined, requirement: CapabilityRequirement, options: AuthorizeOptions = {}): Promise<CapabilityDecision> {
@@ -283,7 +327,70 @@ function actionFromOperation(operation: string): string {
   return tail || operation;
 }
 
-async function loadBrainCapabilityStore(storePath: string): Promise<BrainCapabilityStore> {
+function formatManifestCapability(entry: { capabilityId: string; selectors?: JsonRecord }): string {
+  const selectors = entry.selectors ? Object.entries(entry.selectors).filter(([, value]) => value !== undefined) : [];
+  if (selectors.length === 0) return entry.capabilityId;
+  const parts = selectors.slice(0, 4).map(([key, value]) => `${key}=${manifestSelectorValue(value)}`);
+  if (selectors.length > parts.length) parts.push("...");
+  return `${entry.capabilityId}{${parts.join(",")}}`;
+}
+
+function manifestSelectorValue(value: unknown): string {
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return String(value).replace(/[{}\s,]/g, "_").slice(0, 80);
+  }
+  return JSON.stringify(value)?.replace(/[{}\s,]/g, "_").slice(0, 80) ?? "unknown";
+}
+
+function brainSubjectActor(subjectId: string): ActorContext {
+  return {
+    id: subjectId,
+    surfaceKind: "system",
+    correlationId: "manifest",
+    metadata: { brainSubjectId: subjectId }
+  };
+}
+
+function manifestCapabilitiesForSubjects(store: BrainCapabilityStore, subjectIds: string[], now: Date | undefined): BrainSubjectManifest["capabilities"] {
+  const seen = new Set<string>();
+  const capabilities: BrainSubjectManifest["capabilities"] = [];
+  for (const grant of store.grants ?? []) {
+    if (!subjectIds.includes(grant.subjectId)) continue;
+    if (!grantIsActiveEnforcing(grant, now)) continue;
+    for (const capabilityId of concreteCapabilityIdsForGrant(store, grant)) {
+      const selectors = grant.resource?.selectors && Object.keys(grant.resource.selectors).length > 0 ? grant.resource.selectors : undefined;
+      const key = `${capabilityId}\0${JSON.stringify(selectors ?? {})}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      capabilities.push({ capabilityId, selectors });
+    }
+  }
+  return capabilities;
+}
+
+function concreteCapabilityIdsForGrant(store: BrainCapabilityStore, grant: BrainGrant): string[] {
+  const ids = new Set<string>();
+  const registryIds = capabilityRegistry.map((entry) => entry.id);
+  if (grant.grantKind === "group") {
+    addGroupCapabilityIds(ids, registryIds, grant.capabilityId);
+  } else if (grant.grantKind === "bundle") {
+    const bundleId = grant.bundleId ?? grant.capabilityId;
+    const bundle = (store.grantBundles ?? []).find((candidate) => candidate.id === bundleId && candidate.status === "active");
+    for (const capabilityId of bundle?.includes?.capabilityIds ?? []) ids.add(capabilityId);
+    for (const groupId of bundle?.includes?.groupIds ?? []) addGroupCapabilityIds(ids, registryIds, groupId);
+  } else {
+    ids.add(grant.capabilityId);
+  }
+  return [...ids].sort();
+}
+
+function addGroupCapabilityIds(target: Set<string>, registryIds: string[], groupId: string): void {
+  for (const capabilityId of registryIds) {
+    if (capabilityId === groupId || capabilityId.startsWith(`${groupId}.`)) target.add(capabilityId);
+  }
+}
+
+export async function loadBrainCapabilityStore(storePath: string): Promise<BrainCapabilityStore> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(await readFile(storePath, "utf8"));
@@ -314,6 +421,7 @@ function resolveActorSubjects(store: BrainCapabilityStore, actor: ActorContext):
     if (person?.primarySubjectId) candidateSubjectIds.add(person.primarySubjectId);
     for (const subjectId of person?.subjectIds ?? []) candidateSubjectIds.add(subjectId);
   }
+  expandPersonSubjectsForCandidateSubjects(store, candidateSubjectIds);
 
   const activeSubjectIds = [...candidateSubjectIds].filter((id) => {
     const subject = (store.subjects ?? []).find((candidate) => candidate.id === id);
@@ -321,6 +429,17 @@ function resolveActorSubjects(store: BrainCapabilityStore, actor: ActorContext):
   });
   if (activeSubjectIds.length === 0) return { allowed: false, reason: "actor_not_linked_to_brain_subject" };
   return { allowed: true, subjectIds: activeSubjectIds };
+}
+
+function expandPersonSubjectsForCandidateSubjects(store: BrainCapabilityStore, candidateSubjectIds: Set<string>): void {
+  for (const subjectId of [...candidateSubjectIds]) {
+    const subject = (store.subjects ?? []).find((candidate) => candidate.id === subjectId);
+    if (!subject?.personId) continue;
+    for (const sibling of store.subjects ?? []) if (sibling.personId === subject.personId) candidateSubjectIds.add(sibling.id);
+    const person = (store.people ?? []).find((candidate) => candidate.id === subject.personId);
+    if (person?.primarySubjectId) candidateSubjectIds.add(person.primarySubjectId);
+    for (const siblingId of person?.subjectIds ?? []) candidateSubjectIds.add(siblingId);
+  }
 }
 
 function findExternalIdentity(store: BrainCapabilityStore, actor: ActorContext): BrainExternalIdentity | undefined {
@@ -353,14 +472,24 @@ function grantMatches(
   now: Date | undefined,
 ): { allowed: boolean; reason?: string } {
   if (!subjectIds.includes(grant.subjectId)) return { allowed: false };
-  if (grant.status !== "active") return { allowed: false, reason: "inactive" };
-  if (grant.revokedAt) return { allowed: false, reason: "revoked" };
-  if (grant.enforcement && grant.enforcement !== "enforcing") return { allowed: false, reason: `non_enforcing:${grant.enforcement}` };
-  if (grant.expiresAt && Date.parse(grant.expiresAt) <= (now?.getTime() ?? Date.now())) return { allowed: false, reason: "expired" };
+  const activeReason = grantInactiveReason(grant, now);
+  if (activeReason) return { allowed: false, reason: activeReason };
   if (!grantAllowsCapability(store, grant, operation)) return { allowed: false, reason: "operation" };
   if (!grantAllowsAction(grant, action)) return { allowed: false, reason: "action" };
   if (!selectorsMatch(grant.resource?.selectors ?? {}, resource)) return { allowed: false, reason: "resource" };
   return { allowed: true };
+}
+
+function grantIsActiveEnforcing(grant: BrainGrant, now: Date | undefined): boolean {
+  return grantInactiveReason(grant, now) === undefined;
+}
+
+function grantInactiveReason(grant: BrainGrant, now: Date | undefined): string | undefined {
+  if (grant.status !== "active") return "inactive";
+  if (grant.revokedAt) return "revoked";
+  if (grant.enforcement && grant.enforcement !== "enforcing") return `non_enforcing:${grant.enforcement}`;
+  if (grant.expiresAt && Date.parse(grant.expiresAt) <= (now?.getTime() ?? Date.now())) return "expired";
+  return undefined;
 }
 
 function grantAllowsCapability(store: BrainCapabilityStore, grant: BrainGrant, operation: string): boolean {

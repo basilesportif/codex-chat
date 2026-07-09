@@ -52,10 +52,10 @@ A Claude SDK option that lets Fable ask GPT-5.5 for coding help was evaluated bu
 Concrete follow-up plan:
 
 1. Add a service-owned Claude SDK MCP tool such as `codex_gpt55_coding_help` with a schema limited to `{question, files?, diff?, maxPromptBytes?}` and no arbitrary command field.
-2. Execute through an internal wrapper that reuses `sanitizeCodexChildProcessEnv`, fixed `codex exec --json --output-last-message ... --model gpt-5.5 -c model_reasoning_effort=high -c features.fast_mode=true -c service_tier=fast --sandbox <configured> -c ask_for_approval=<configured>`, with workspace pinned to `config.service.workspace` and artifacts written under the parent Claude job directory.
+2. Execute through an internal wrapper that reuses `sanitizeCodexChildProcessEnv`, fixed `codex exec --json --output-last-message ... --model gpt-5.6-sol -c model_reasoning_effort=high -c features.fast_mode=true -c service_tier=fast --sandbox <configured> -c ask_for_approval=<configured>`, with workspace pinned to `config.service.workspace` and artifacts written under the parent Claude job directory.
 3. Capture stdout/stderr/last-message and a JSONL tool event so the parent Claude job and codex-chat job status expose what ran; redact provider credentials exactly like the existing Codex child path.
 4. Wire cancellation to the parent Claude SDK job so an interrupted/killed Claude child also kills any nested Codex helper process tree; enforce one helper call at a time per Claude job plus timeout/max bytes limits.
-5. Add cost/rate-limit controls before enabling by default: explicit config flag, model allowlist, concurrency limit, timeout, and a clear error surface when the Codex provider rejects `gpt-5.5` or Fast tier.
+5. Add cost/rate-limit controls before enabling by default: explicit config flag, model allowlist, concurrency limit, timeout, and a clear error surface when the Codex provider rejects `gpt-5.6-sol` or Fast tier.
 
 Tradeoffs:
 

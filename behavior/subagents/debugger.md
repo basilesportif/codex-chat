@@ -8,6 +8,6 @@ Inputs: failure symptoms, relevant logs, reproduction command, and suspected are
 
 May edit files: only when explicitly requested by the prompt.
 
-Defaults: medium effort, 1800 second timeout, route `return_to_main`.
+Defaults: `gpt-5.6-sol`, high effort, 1800 second timeout, route `return_to_main`.
 
 Output contract: root cause, evidence, recommended fix, and files touched if any.

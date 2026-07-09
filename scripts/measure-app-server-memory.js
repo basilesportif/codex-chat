@@ -29,7 +29,7 @@ Options:
   --turn-type <type>         Workload: idle, simple, or sleep (default: idle)
   --sleep-sec <n>            Requested shell sleep length for --turn-type sleep (default: duration)
   --binary <path>            Codex binary to execute (default: codex)
-  --model <name>             Model for simple/sleep turns (default: gpt-5.5)
+  --model <name>             Model for simple/sleep turns (default: gpt-5.6-terra)
   --effort <level>           Reasoning effort for simple/sleep turns (default: medium)
   --cwd <path>               Thread cwd and child cwd (default: repository root)
   --startup-timeout-sec <n>  App-server WebSocket startup timeout (default: 30)
@@ -150,7 +150,7 @@ function parseArgs(argv) {
     turnType: "idle",
     sleepSec: undefined,
     binary: "codex",
-    model: "gpt-5.5",
+    model: "gpt-5.6-terra",
     effort: "medium",
     cwd: REPO_ROOT,
     startupTimeoutMs: 30_000,

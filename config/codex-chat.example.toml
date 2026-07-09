@@ -16,7 +16,7 @@ binary = "codex"
 transport = "app-server"
 appServerHost = "127.0.0.1"
 appServerPort = 49345
-model = "gpt-5.5"
+model = "gpt-5.6-terra"
 effort = "medium"
 # Main-loop Codex service tier. Current default is Fast; set "standard" here or via CODEX_CHAT_CODEX_SERVICE_TIER to opt back to standard/slow mode.
 serviceTier = "fast"
@@ -104,7 +104,7 @@ enabled = true
 # "codex_app_server" only after testing; recover with `agent backend exec`.
 backend = "codex_exec"
 maxConcurrent = 5
-defaultModel = ""
+defaultModel = "gpt-5.6-terra"
 defaultEffort = "medium"
 # Subagents default to Fast mode; set "standard" only for an explicit standard/slow-mode override. Behavior prompts should still include serviceTier per dispatch.
 defaultServiceTier = "fast"
@@ -169,7 +169,7 @@ fastMode = true
 enabled = false
 rootDir = "data/employees"
 socketDir = "data/run/employees"
-defaultModel = "gpt-5.5"
+defaultModel = "gpt-5.6-terra"
 defaultEffort = "medium"
 maxActive = 2
 
@@ -184,8 +184,8 @@ codexProfile = ""
 modelProvider = ""
 # Leave serviceTierMode unset for defaults; set "omit" for non-OpenAI provider profiles.
 # serviceTierMode = "omit"
-model = "gpt-5.5"
-effort = "high"
+model = "gpt-5.6-terra"
+effort = "medium"
 startup = "on_demand"
 warmupPrompt = ""
 warmupFile = ""

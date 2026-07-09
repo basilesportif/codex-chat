@@ -58,6 +58,8 @@ describe("loops config", () => {
     expect(loops.loops[0]?.model).toBe("gpt-5.4");
     expect(loops.loops[0]?.effort).toBe("high");
     expect(loops.defaults.route).toBe("return_to_main");
+    expect(loops.defaults.model).toBe("gpt-5.6-terra");
+    expect(loops.defaults.effort).toBe("medium");
   });
 
   test("catches missing required loop fields", async () => {
@@ -83,7 +85,7 @@ describe("loops config", () => {
     const loops: LoopsConfig = {
       version: 1,
       namespace: "testbot",
-      defaults: { timezone: "Etc/UTC", timeoutSec: 1800, route: "return_to_main", lock: false },
+      defaults: { timezone: "Etc/UTC", timeoutSec: 1800, route: "return_to_main", model: "gpt-5.6-terra", effort: "medium", lock: false },
       loops: [{
         id: "health",
         enabled: true,
@@ -128,6 +130,35 @@ describe("loops config", () => {
     ].join("\n"), "testbot", []);
 
     expect(next).toBe("MAILTO=tim@example.com\n");
+  });
+});
+
+test("uses loop model and effort defaults for subagent dispatches", async () => {
+  const config = await writeLoops({
+    version: 1,
+    defaults: {
+      model: "gpt-5.6-terra",
+      effort: "medium",
+    },
+    loops: [{
+      id: "daily-research",
+      enabled: true,
+      schedule: "0 9 * * *",
+      type: "dispatch_subagent",
+      prompt: "Summarize updates",
+    }],
+  });
+  const dispatched: Array<{ model?: string; effort?: string }> = [];
+  const { manager } = await createLoopManager(config, {
+    dispatchSubagent: async (input) => { dispatched.push(input); },
+  });
+
+  await manager.handleRun("daily-research");
+
+  expect(dispatched).toHaveLength(1);
+  expect(dispatched[0]).toMatchObject({
+    model: "gpt-5.6-terra",
+    effort: "medium",
   });
 });
 

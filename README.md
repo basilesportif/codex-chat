@@ -383,6 +383,13 @@ email lookup, research, debugging, architecture, multi-step work, ambiguous
 work, and external-data lookup must dispatch a subagent with explicit
 `summary`, `model`, `effort`, and `serviceTier`. Fast is the default tier unless Tim explicitly asks for standard/slow/deep mode or config overrides it.
 
+The default main loop and routine non-coding dispatch model is
+`gpt-5.6-terra` at medium effort. Coding, implementation, debugging, review,
+and architecture dispatches use `gpt-5.6-sol` at high effort by default. Loop
+subagent dispatches that omit a per-loop override inherit
+`gpt-5.6-terra`/`medium` from `config/loops.json` defaults. Explicit Claude
+routing remains per-dispatch and is unchanged.
+
 The service does not enforce this policy by keyword-blocking final main-loop
 replies. The main Codex loop must choose the route up front, then either reply
 directly or emit a `dispatch_subagent` directive. Service-level guardrails are

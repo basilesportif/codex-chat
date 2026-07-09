@@ -135,6 +135,8 @@ Top-level shape (the file always exists; just append to the `loops` array):
     "timezone": "Etc/UTC",
     "timeoutSec": 1800,
     "route": "return_to_main",
+    "model": "gpt-5.6-terra",
+    "effort": "medium",
     "lock": true
   },
   "loops": [ /* loop entries */ ]
@@ -158,8 +160,8 @@ Optional fields:
 - `route`: `return_to_main` | `send_to_admins` | `store_only` | `dispatch_subagent`. Defaults to `defaults.route`.
 - `profile` (string): subagent profile (`researcher`, `debugger`, `implementer`, `reviewer`) when route or type involves dispatch.
 - `timeoutSec` (number): per-run timeout. Defaults to `defaults.timeoutSec` (1800).
-- `model` (string): optional Codex model override for subagents spawned by this loop.
-- `effort` (`none` | `minimal` | `low` | `medium` | `high` | `xhigh`): optional Codex reasoning effort override for subagents spawned by this loop.
+- `model` (string): optional Codex model override for subagents spawned by this loop. Defaults to `defaults.model` (`gpt-5.6-terra`).
+- `effort` (`none` | `minimal` | `low` | `medium` | `high` | `xhigh`): optional Codex reasoning effort override for subagents spawned by this loop. Defaults to `defaults.effort` (`medium`).
 - `serviceTier` (`standard` | `fast`): optional Codex service-tier override for subagents spawned by this loop.
 - `lock` (bool): if true, wrap the cron command with `flock -n` so a slow run never overlaps the next tick. Defaults to `defaults.lock` (true). Keep this true unless you have a reason.
 - `notifyOnFailure` (bool): if true, notify ops via Telegram when a run errors.
@@ -281,13 +283,13 @@ Do not use the main loop for README changes, documentation edits, code edits, re
 
 For main-loop work, the user-facing reply must include a short line identifying it as main-loop work and stating the model/effort/tier actually being used, for example:
 
-`main_loop: model=gpt-5.5 effort=medium tier=fast`
+`main_loop: model=gpt-5.6-terra effort=medium tier=fast`
 
 The main-loop service tier is config-driven. The current deployment default is Codex Fast mode. Disclose `tier=fast` unless the active config/workspace settings such as `[codex].serviceTier` or `CODEX_CHAT_CODEX_SERVICE_TIER` explicitly override it.
 
 For any reasoning, investigation, repo inspection, code or docs editing, code review, debugging, architecture, calendar/email lookup, external-data lookup, ambiguous, multi-step, or potentially slow task, dispatch a subagent. The top-level Codex loop must choose `model`, `effort`, and `serviceTier` explicitly for the task from the rubric below; do not rely on subagent defaults as the routing decision. Before or with every `dispatch_subagent`, provide a concise task summary via `summary`, and set explicit `model`, `effort`, and `serviceTier` fields. Default subagent dispatches to `serviceTier: "fast"`; use `serviceTier: "standard"` only when Tim explicitly requests standard/slow/deep mode or when an explicit config/workspace override requires it. The service will send a visible dispatch status containing the task, profile, model, effort, and tier, and the job will be visible in `agents` / `subagents`.
 
-Provider overrides are opt-in only. For normal subagents, do not include `codexProfile`, `modelProvider`, or `serviceTierMode`, and use the OpenAI/Codex model rubric below. If Tim explicitly asks for an OpenRouter/non-OpenAI/provider-specific subagent, include `codexProfile: "openrouter"`, `modelProvider: "openrouter"`, and `serviceTierMode: "omit"`. If Tim gives an exact model slug, put that slug in `model`; otherwise set `model: "gpt-5.5"` and the service will replace it with the configured OpenRouter model from `$CODEX_HOME/openrouter.config.toml`.
+Provider overrides are opt-in only. For normal subagents, do not include `codexProfile`, `modelProvider`, or `serviceTierMode`, and use the OpenAI/Codex model rubric below. If Tim explicitly asks for an OpenRouter/non-OpenAI/provider-specific subagent, include `codexProfile: "openrouter"`, `modelProvider: "openrouter"`, and `serviceTierMode: "omit"`. If Tim gives an exact model slug, put that slug in `model`; otherwise set `model: "gpt-5.6-terra"` so the service recognizes the normal default and replaces it with the configured OpenRouter model from `$CODEX_HOME/openrouter.config.toml`.
 
 Claude Agent SDK backend is opt-in, OAuth-only, and selected **per dispatch**. When Tim says "use Claude", "Claude SDK", "Claude Code", "Opus", "Fable", "Sonnet", "Haiku", or names a Claude model, include `backend: "claude_agent_sdk"` in that `dispatch_subagent` directive. As a safety net the service auto-routes any dispatch whose `model` is a Claude slug (`claude-*`, `opus`, `fable`, `sonnet`, `haiku`) to `claude_agent_sdk` when `backend` is omitted, and rejects a Claude model combined with an explicit Codex backend — but do not rely on the safety net; emit the `backend` field. That routes only that job to Claude; do not change the runtime backend with `agent backend claude` for a single job (the runtime override remains an admin canary/recovery tool). Jobs without a `backend` field keep using the configured default backend. For Claude-backed dispatches, do not include Codex provider fields (`codexProfile`, `modelProvider`, `serviceTierMode`); the service rejects them. Set `model` to a full Claude model ID for reproducibility: `claude-opus-4-8` for Opus 4.8, `claude-fable-5` for Fable 5, `claude-sonnet-5` for Sonnet 5, or `claude-haiku-4-5-20251001` (alias `claude-haiku-4-5`) for Haiku 4.5. Claude Code aliases include `opus`, `fable`, `sonnet`, `haiku`, and `best`, but aliases can change over time; prefer full IDs in directives. Effort `low|medium|high|xhigh` maps to Claude SDK effort; avoid `none`/`minimal` with `claude-fable-5` because Fable 5 has always-on adaptive thinking. `serviceTier` maps to Claude fast mode (a premium speed tier available on Opus 4.8/4.7 only); still include it, defaulting to `"fast"` for Opus dispatches unless Tim asks otherwise. `claude-fable-5` dispatches always default to `serviceTier: "standard"`; if Tim explicitly asks for fast on a Fable job, set `"fast"` — the service applies fast mode only when the model actually supports it, and the dispatch status will show `standard (fast unavailable for this model)` when it doesn't.
 
@@ -299,9 +301,9 @@ Keep the safety gates: stop and report the concrete blocker for untrusted or thi
 
 Default routing rubric:
 
-- Most bounded research, repo-file inspection, log inspection, docs lookup/editing, calendar/email lookup, external-data lookup, and routine non-trivial analysis: `model: "gpt-5.5"`, `effort: "medium"`.
-- Coding, implementation, debugging, code review, architecture, cross-module work, deploy-sensitive work, or tasks with meaningful correctness risk: `model: "gpt-5.5"`, `effort: "high"`.
-- Very intensive research or especially risky, ambiguous, high-stakes, large-scope, multi-step, or production-sensitive tasks: `model: "gpt-5.5"`, `effort: "xhigh"`.
+- Most bounded research, repo-file inspection, log inspection, docs lookup/editing, calendar/email lookup, external-data lookup, and routine non-trivial analysis: `model: "gpt-5.6-terra"`, `effort: "medium"`.
+- Coding, implementation, debugging, code review, architecture, cross-module work, deploy-sensitive work, or tasks with meaningful correctness risk: `model: "gpt-5.6-sol"`, `effort: "high"`.
+- Very intensive non-coding research or especially risky, ambiguous, high-stakes, large-scope, multi-step analysis: `model: "gpt-5.6-terra"`, `effort: "xhigh"`. For equivalently intensive coding work, keep `model: "gpt-5.6-sol"` and raise effort to `xhigh`.
 - Simple deterministic main-loop work: use the current top-level model/effort and disclose it as `main_loop`.
 
 Service-tier rubric for subagents:
@@ -320,7 +322,7 @@ Subagent directive shape:
   "route": "return_to_main",
   "summary": "Short user-visible task summary",
   "prompt": "Detailed subagent task",
-  "model": "gpt-5.5",
+  "model": "gpt-5.6-terra",
   "effort": "medium",
   "serviceTier": "fast"
 }
@@ -475,7 +477,7 @@ When the user sends a message like "stress test 5 subagents", "run stress test",
    - `route`: `"return_to_main"`
    - `summary`: a short user-visible task summary.
    - `prompt`: `"Read and summarize the file /home/tim/pkg/tim/codex-chat/src/<filename>.ts in 2-3 sentences."`
-   - `model`: `"gpt-5.5"`
+   - `model`: `"gpt-5.6-terra"`
    - `effort`: `"medium"`
    - `serviceTier`: `"fast"`
 4. After the dispatch directives, emit a `send_text` directive telling the user: `"Dispatched N subagents. Use 'agents' to monitor progress."`
@@ -489,11 +491,11 @@ The fan-out goes through Codex — you decide how many and which files. Do NOT u
 {
   "version": 1,
   "actions": [
-    { "type": "dispatch_subagent", "idempotencyKey": "stress-1-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize service.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/service.ts in 2-3 sentences.", "model": "gpt-5.5", "effort": "medium", "serviceTier": "fast" },
-    { "type": "dispatch_subagent", "idempotencyKey": "stress-2-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize codex.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/codex.ts in 2-3 sentences.", "model": "gpt-5.5", "effort": "medium", "serviceTier": "fast" },
-    { "type": "dispatch_subagent", "idempotencyKey": "stress-3-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize directives.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/directives.ts in 2-3 sentences.", "model": "gpt-5.5", "effort": "medium", "serviceTier": "fast" },
-    { "type": "dispatch_subagent", "idempotencyKey": "stress-4-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize telegram.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/telegram.ts in 2-3 sentences.", "model": "gpt-5.5", "effort": "medium", "serviceTier": "fast" },
-    { "type": "dispatch_subagent", "idempotencyKey": "stress-5-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize subagents.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/subagents.ts in 2-3 sentences.", "model": "gpt-5.5", "effort": "medium", "serviceTier": "fast" },
+    { "type": "dispatch_subagent", "idempotencyKey": "stress-1-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize service.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/service.ts in 2-3 sentences.", "model": "gpt-5.6-terra", "effort": "medium", "serviceTier": "fast" },
+    { "type": "dispatch_subagent", "idempotencyKey": "stress-2-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize codex.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/codex.ts in 2-3 sentences.", "model": "gpt-5.6-terra", "effort": "medium", "serviceTier": "fast" },
+    { "type": "dispatch_subagent", "idempotencyKey": "stress-3-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize directives.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/directives.ts in 2-3 sentences.", "model": "gpt-5.6-terra", "effort": "medium", "serviceTier": "fast" },
+    { "type": "dispatch_subagent", "idempotencyKey": "stress-4-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize telegram.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/telegram.ts in 2-3 sentences.", "model": "gpt-5.6-terra", "effort": "medium", "serviceTier": "fast" },
+    { "type": "dispatch_subagent", "idempotencyKey": "stress-5-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize subagents.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/subagents.ts in 2-3 sentences.", "model": "gpt-5.6-terra", "effort": "medium", "serviceTier": "fast" },
     { "type": "send_text", "idempotencyKey": "stress-ack-<msgId>", "chatId": 253768951, "text": "Dispatched 5 subagents. Use 'agents' to monitor progress." }
   ]
 }

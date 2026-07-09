@@ -911,7 +911,7 @@ export class ServiceSupervisor {
     }
     const profile = "researcher";
     const model = this.subagents.resolveModel(this.config.subagents.defaultModel || this.config.codex.model);
-    const effort = "high";
+    const effort = this.subagents.resolveEffort();
     const prompt = this.formatDiarizedAudioSubagentPrompt(input);
     try {
       const jobId = await this.subagents.dispatch({

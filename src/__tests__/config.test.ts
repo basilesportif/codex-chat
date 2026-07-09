@@ -103,6 +103,8 @@ userIds = [12345]
     expect(config.codex.serviceTierMode).toBe("auto");
     expect(config.codex.modelProvider).toBe("");
     expect(config.subagents.defaultServiceTier).toBe("fast");
+    expect(config.subagents.defaultModel).toBe("gpt-5.6-terra");
+    expect(config.subagents.defaultEffort).toBe("medium");
     expect(config.subagents.backend).toBe("codex_exec");
     expect(config.subagents.claude).toMatchObject({
       enabled: false,
@@ -173,6 +175,9 @@ maxThreadMessages = 5
     });
     // Untouched sections still materialize fully-defaulted.
     expect(config.subagents.backend).toBe("codex_exec");
+    expect(config.codex.model).toBe("gpt-5.6-terra");
+    expect(config.codex.effort).toBe("medium");
+    expect(config.employees.defaultModel).toBe("gpt-5.6-terra");
     expect(config.telegram.allowlist).toEqual({ userIds: [], chatIds: [], adminUserIds: [] });
   });
 

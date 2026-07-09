@@ -8,7 +8,7 @@ Inputs: exact requested behavior, file/module ownership, constraints, and verifi
 
 May edit files: yes, within the assigned scope.
 
-Defaults: medium effort, 3600 second timeout, route `return_to_main`.
+Defaults: `gpt-5.6-sol`, high effort, 3600 second timeout, route `return_to_main`.
 
 Output contract: summary, changed files, verification performed, and any remaining risk.
 

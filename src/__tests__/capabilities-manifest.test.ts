@@ -109,3 +109,67 @@ describe("Brain subject manifest resolution", () => {
     expect(manifest?.capabilities.map((item) => item.capabilityId)).toEqual(["runtime.admin", "runtime.status.read"]);
   });
 });
+
+describe("grant action matching", () => {
+  // Well-formed selectors (wildcards over real resource keys) so these tests
+  // isolate ACTION matching. A grant that lists concrete actions ["read",
+  // "search"] must still be satisfied by an unspecified ("*") requested action.
+  const seedReadGrant = {
+    id: "grant_seed_crm_read",
+    subjectId: "person:person_tim",
+    capabilityId: "crm.contact.read",
+    grantKind: "capability",
+    resource: { kind: "crm", id: "*", selectors: { contactId: "*", businessId: "*" } },
+    actions: ["read", "search"],
+    status: "active",
+    enforcement: "enforcing"
+  };
+
+  test("a wildcard requested action authorizes against a concrete-action grant (operation-level)", async () => {
+    const storePath = await writeStore(baseStore([seedReadGrant]));
+    await expect(authorize(subjectActor("person:person_tim"), {
+      operation: "crm.contact.read",
+      action: "*",
+      resource: {},
+      reason: "owner CRM read"
+    }, { storePath })).resolves.toMatchObject({ allowed: true });
+  });
+
+  test("an omitted/empty requested action is also operation-level", async () => {
+    const storePath = await writeStore(baseStore([seedReadGrant]));
+    await expect(authorize(subjectActor("person:person_tim"), {
+      operation: "crm.contact.read",
+      action: "",
+      resource: {},
+      reason: "owner CRM read no action"
+    }, { storePath })).resolves.toMatchObject({ allowed: true });
+  });
+
+  test("a concrete requested action is still gated against the grant's action list", async () => {
+    const storePath = await writeStore(baseStore([seedReadGrant]));
+    // "delete" is not in ["read","search"] and the grant has no "*" — must deny.
+    await expect(authorize(subjectActor("person:person_tim"), {
+      operation: "crm.contact.read",
+      action: "delete",
+      resource: {},
+      reason: "concrete action still gated"
+    }, { storePath })).resolves.toMatchObject({ allowed: false });
+  });
+
+  test("wildcard action does NOT bypass selector explicit-coverage", async () => {
+    const scopedGrant = {
+      ...seedReadGrant,
+      id: "grant_scoped_crm_read",
+      resource: { kind: "crm", id: "*", selectors: { contactId: "ct_allowed" } }
+    };
+    const storePath = await writeStore(baseStore([scopedGrant]));
+    // Resource names a contactId the grant does not cover -> selector gate denies
+    // even though the requested action is "*".
+    await expect(authorize(subjectActor("person:person_tim"), {
+      operation: "crm.contact.read",
+      action: "*",
+      resource: { contactId: "ct_other" },
+      reason: "selector scoping preserved"
+    }, { storePath })).resolves.toMatchObject({ allowed: false });
+  });
+});

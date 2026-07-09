@@ -509,6 +509,14 @@ function grantAllowsCapability(store: BrainCapabilityStore, grant: BrainGrant, o
 }
 
 function grantAllowsAction(grant: BrainGrant, action: string): boolean {
+  // A request that does not name a concrete action (action "*" or empty) is an
+  // operation-level check: the capabilityId/operation match has already gated
+  // it and resource selectors still apply, so any grant for that operation
+  // satisfies the action requirement. Requests that DO name a concrete action
+  // (e.g. codex-chat's internal "send"/"deliver") remain gated against the
+  // grant's action list. NOTE: this only relaxes the requested-action side; the
+  // deliberate selectorsMatch explicit-coverage rule is untouched.
+  if (!action || action === "*") return true;
   const actions = (grant.actions ?? []).map((item) => String(item));
   return actions.includes(action) || actions.includes("*");
 }

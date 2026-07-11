@@ -1340,8 +1340,8 @@ describe("service supervisor", () => {
       resultTarget: "main",
       originChatId: 253768951,
       originMessageId: 800,
-      model: "gpt-5.6-terra",
-      effort: "medium",
+      model: "gpt-5.6-luna",
+      effort: "xhigh",
       summary: expect.stringContaining("Process diarized Telegram audio")
     }));
     const prompt = dispatch.mock.calls[0]?.[0]?.prompt as string;
@@ -1579,7 +1579,7 @@ describe("service supervisor", () => {
       yield {
         type: "final",
         text: `\`\`\`codex-chat
-{"version":1,"actions":[{"type":"dispatch_subagent","idempotencyKey":"research-route-1","profile":"researcher","route":"return_to_main","summary":"Research routing","prompt":"Research routing behavior","model":"gpt-5.6-terra","effort":"high","serviceTier":"fast"}]}
+{"version":1,"actions":[{"type":"dispatch_subagent","idempotencyKey":"research-route-1","profile":"researcher","route":"return_to_main","summary":"Research routing","prompt":"Research routing behavior","model":"gpt-5.6-luna","effort":"high","serviceTier":"fast"}]}
 \`\`\``
       };
     });
@@ -1589,7 +1589,7 @@ describe("service supervisor", () => {
     await waitForIdle(service);
 
     expect(dispatchFromDirective).toHaveBeenCalled();
-    expect(sendText).toHaveBeenCalledWith(253768951, "Sub: Research routing\nresearcher · gpt-5.6-terra · high · fast", 502);
+    expect(sendText).toHaveBeenCalledWith(253768951, "Sub: Research routing\nresearcher · gpt-5.6-luna · high · fast", 502);
     expect(sendText.mock.calls[0]?.[1]).not.toContain("tierMode");
   });
 
@@ -1615,11 +1615,11 @@ describe("service supervisor", () => {
     await waitForIdle(service);
 
     const dispatched = dispatchFromDirective.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(dispatched).toMatchObject({ model: "gpt-5.6-terra", effort: "high", serviceTier: "fast" });
+    expect(dispatched).toMatchObject({ model: "gpt-5.6-luna", effort: "high", serviceTier: "fast" });
     expect(dispatched.codexProfile).toBeUndefined();
     expect(dispatched.modelProvider).toBeUndefined();
     expect(dispatched.serviceTierMode).toBeUndefined();
-    expect(sendText).toHaveBeenCalledWith(253768951, "Sub: Research routing\nresearcher · gpt-5.6-terra · high · fast", 507);
+    expect(sendText).toHaveBeenCalledWith(253768951, "Sub: Research routing\nresearcher · gpt-5.6-luna · high · fast", 507);
   });
 
   test("OpenRouter dispatch summary includes provider, profile, and tierMode", async () => {
@@ -1634,7 +1634,7 @@ describe("service supervisor", () => {
       yield {
         type: "final",
         text: `\`\`\`codex-chat
-{"version":1,"actions":[{"type":"dispatch_subagent","idempotencyKey":"research-openrouter-explicit","profile":"researcher","route":"return_to_main","summary":"OpenRouter smoke test","prompt":"OpenRouter smoke test","model":"gpt-5.6-terra","effort":"medium","serviceTier":"fast","codexProfile":"openrouter","modelProvider":"openrouter","serviceTierMode":"omit"}]}
+{"version":1,"actions":[{"type":"dispatch_subagent","idempotencyKey":"research-openrouter-explicit","profile":"researcher","route":"return_to_main","summary":"OpenRouter smoke test","prompt":"OpenRouter smoke test","model":"gpt-5.6-luna","effort":"xhigh","serviceTier":"fast","codexProfile":"openrouter","modelProvider":"openrouter","serviceTierMode":"omit"}]}
 \`\`\``
       };
     });
@@ -1652,7 +1652,7 @@ describe("service supervisor", () => {
     });
     expect(sendText).toHaveBeenCalledWith(
       253768951,
-      expect.stringContaining("researcher · z-ai/glm-5.2 · medium · fast · profile openrouter · provider openrouter · tierMode omit"),
+      expect.stringContaining("researcher · z-ai/glm-5.2 · xhigh · fast · profile openrouter · provider openrouter · tierMode omit"),
       508
     );
   });
@@ -1669,7 +1669,7 @@ describe("service supervisor", () => {
       yield {
         type: "final",
         text: `\`\`\`codex-chat
-{"version":1,"actions":[{"type":"dispatch_subagent","idempotencyKey":"research-glm-compact","profile":"researcher","route":"return_to_main","summary":"GLM compact model","prompt":"GLM compact model","model":"gpt-5.6-terra","effort":"medium","serviceTier":"fast","codexProfile":"openrouter","modelProvider":"openrouter","serviceTierMode":"omit"}]}
+{"version":1,"actions":[{"type":"dispatch_subagent","idempotencyKey":"research-glm-compact","profile":"researcher","route":"return_to_main","summary":"GLM compact model","prompt":"GLM compact model","model":"gpt-5.6-luna","effort":"xhigh","serviceTier":"fast","codexProfile":"openrouter","modelProvider":"openrouter","serviceTierMode":"omit"}]}
 \`\`\``
       };
     });
@@ -1728,7 +1728,7 @@ describe("service supervisor", () => {
       yield {
         type: "final",
         text: `\`\`\`codex-chat
-{"version":1,"actions":[{"type":"dispatch_subagent","idempotencyKey":"research-route-merge-1","profile":"researcher","route":"return_to_main","summary":"Research routing","prompt":"Research routing behavior","model":"gpt-5.6-terra","effort":"high","serviceTier":"fast"},{"type":"send_text","idempotencyKey":"research-route-merge-ack-1","text":"I'm dispatching a researcher to inspect the directive flow."}]}
+{"version":1,"actions":[{"type":"dispatch_subagent","idempotencyKey":"research-route-merge-1","profile":"researcher","route":"return_to_main","summary":"Research routing","prompt":"Research routing behavior","model":"gpt-5.6-luna","effort":"xhigh","serviceTier":"fast"},{"type":"send_text","idempotencyKey":"research-route-merge-ack-1","text":"I'm dispatching a researcher to inspect the directive flow."}]}
 \`\`\``
       };
     });
@@ -1741,7 +1741,7 @@ describe("service supervisor", () => {
     expect(sendText).toHaveBeenCalledTimes(1);
     expect(sendText).toHaveBeenCalledWith(
       253768951,
-      "Sub: Research routing\nresearcher · gpt-5.6-terra · high · fast\n\nI'm dispatching a researcher to inspect the directive flow.",
+      "Sub: Research routing\nresearcher · gpt-5.6-luna · xhigh · fast\n\nI'm dispatching a researcher to inspect the directive flow.",
       506
     );
 

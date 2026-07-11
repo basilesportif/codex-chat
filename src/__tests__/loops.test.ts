@@ -58,8 +58,9 @@ describe("loops config", () => {
     expect(loops.loops[0]?.model).toBe("gpt-5.4");
     expect(loops.loops[0]?.effort).toBe("high");
     expect(loops.defaults.route).toBe("return_to_main");
-    expect(loops.defaults.model).toBe("gpt-5.6-terra");
-    expect(loops.defaults.effort).toBe("medium");
+    expect(loops.defaults.model).toBe("gpt-5.6-luna");
+    expect(loops.defaults.effort).toBe("xhigh");
+    expect(loops.defaults.serviceTier).toBe("fast");
   });
 
   test("catches missing required loop fields", async () => {
@@ -85,7 +86,7 @@ describe("loops config", () => {
     const loops: LoopsConfig = {
       version: 1,
       namespace: "testbot",
-      defaults: { timezone: "Etc/UTC", timeoutSec: 1800, route: "return_to_main", model: "gpt-5.6-terra", effort: "medium", lock: false },
+      defaults: { timezone: "Etc/UTC", timeoutSec: 1800, route: "return_to_main", model: "gpt-5.6-terra", effort: "medium", serviceTier: "fast", lock: false },
       loops: [{
         id: "health",
         enabled: true,
@@ -133,12 +134,12 @@ describe("loops config", () => {
   });
 });
 
-test("uses loop model and effort defaults for subagent dispatches", async () => {
+test("uses loop model, effort, and service tier defaults for subagent dispatches", async () => {
   const config = await writeLoops({
     version: 1,
     defaults: {
-      model: "gpt-5.6-terra",
-      effort: "medium",
+      model: "gpt-5.6-luna",
+      effort: "xhigh",
     },
     loops: [{
       id: "daily-research",
@@ -148,7 +149,7 @@ test("uses loop model and effort defaults for subagent dispatches", async () => 
       prompt: "Summarize updates",
     }],
   });
-  const dispatched: Array<{ model?: string; effort?: string }> = [];
+  const dispatched: Array<{ model?: string; effort?: string; serviceTier?: string }> = [];
   const { manager } = await createLoopManager(config, {
     dispatchSubagent: async (input) => { dispatched.push(input); },
   });
@@ -157,8 +158,9 @@ test("uses loop model and effort defaults for subagent dispatches", async () => 
 
   expect(dispatched).toHaveLength(1);
   expect(dispatched[0]).toMatchObject({
-    model: "gpt-5.6-terra",
-    effort: "medium",
+    model: "gpt-5.6-luna",
+    effort: "xhigh",
+    serviceTier: "fast",
   });
 });
 

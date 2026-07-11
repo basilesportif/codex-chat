@@ -384,10 +384,10 @@ work, and external-data lookup must dispatch a subagent with explicit
 `summary`, `model`, `effort`, and `serviceTier`. Fast is the default tier unless Tim explicitly asks for standard/slow/deep mode or config overrides it.
 
 The default main loop and routine non-coding dispatch model is
-`gpt-5.6-terra` at medium effort. Coding, implementation, debugging, review,
+`gpt-5.6-luna` at xhigh effort. Coding, implementation, debugging, review,
 and architecture dispatches use `gpt-5.6-sol` at high effort by default. Loop
 subagent dispatches that omit a per-loop override inherit
-`gpt-5.6-terra`/`medium` from `config/loops.json` defaults. Explicit Claude
+`gpt-5.6-luna`/`xhigh` from `config/loops.json` defaults. Explicit Claude
 routing remains per-dispatch and is unchanged.
 
 The service does not enforce this policy by keyword-blocking final main-loop

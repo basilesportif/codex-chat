@@ -5,8 +5,9 @@
     "timezone": "Etc/UTC",
     "timeoutSec": 1800,
     "route": "return_to_main",
-    "model": "gpt-5.6-terra",
-    "effort": "medium",
+    "model": "gpt-5.6-luna",
+    "effort": "xhigh",
+    "serviceTier": "fast",
     "lock": true
   },
   "loops": []

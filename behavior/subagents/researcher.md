@@ -8,6 +8,6 @@ Inputs: clear question, relevant paths, constraints, and expected output.
 
 May edit files: no, unless the prompt explicitly says so.
 
-Defaults: `gpt-5.6-terra`, medium effort, 1800 second timeout, route `return_to_main`.
+Defaults: `gpt-5.6-luna`, xhigh effort, fast service tier, 1800 second timeout, route `return_to_main`.
 
 Output contract: concise findings with citations to files or commands inspected. Include uncertainty and gaps.

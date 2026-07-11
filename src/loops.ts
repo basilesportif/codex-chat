@@ -54,10 +54,11 @@ const loopsConfigSchema = z.object({
     timezone: z.string().default("Etc/UTC"),
     timeoutSec: z.number().int().positive().default(1800),
     route: routeSchema.default("return_to_main"),
-    model: z.string().default("gpt-5.6-terra"),
-    effort: effortSchema.default("medium"),
+    model: z.string().default("gpt-5.6-luna"),
+    effort: effortSchema.default("xhigh"),
+    serviceTier: serviceTierSchema.default("fast"),
     lock: z.boolean().default(true)
-  }).default({ timezone: "Etc/UTC", timeoutSec: 1800, route: "return_to_main", model: "gpt-5.6-terra", effort: "medium", lock: true }),
+  }).default({ timezone: "Etc/UTC", timeoutSec: 1800, route: "return_to_main", model: "gpt-5.6-luna", effort: "xhigh", serviceTier: "fast", lock: true }),
   loops: z.array(loopSchema).default([])
 });
 
@@ -336,7 +337,7 @@ export class LoopManager {
     run.outputPath = await this.writeRunOutput(run.id, eventText);
     if (route === "return_to_main") await this.callbacks.enqueueMain(eventText, { source: "loop", loopId: loop.id, runId: run.id });
     if (route === "send_to_admins" && !(loop.suppressEmptyOutput && prompt.trim() === "")) await this.callbacks.sendAdmins(eventText);
-    if (route === "dispatch_subagent") await this.callbacks.dispatchSubagent({ profile: loop.profile ?? "researcher", prompt: eventText, route: "return_to_main", timeoutSec: loop.timeoutSec, model: loop.model ?? defaults.model, effort: loop.effort ?? defaults.effort, serviceTier: loop.serviceTier, ownerId: loop.id, ownerRequestId: run.id });
+    if (route === "dispatch_subagent") await this.callbacks.dispatchSubagent({ profile: loop.profile ?? "researcher", prompt: eventText, route: "return_to_main", timeoutSec: loop.timeoutSec, model: loop.model ?? defaults.model, effort: loop.effort ?? defaults.effort, serviceTier: loop.serviceTier ?? defaults.serviceTier, ownerId: loop.id, ownerRequestId: run.id });
   }
 
   private async handleCommand(loop: LoopDefinition, route: Route, run: LoopRun, defaults: LoopsConfig["defaults"]): Promise<void> {
@@ -351,12 +352,12 @@ export class LoopManager {
     const eventText = [`Loop command completed: ${loop.id}`, `Command: ${loop.command} ${(loop.args ?? []).join(" ")}`, "", output].join("\n");
     if (route === "return_to_main") await this.callbacks.enqueueMain(eventText, { source: "loop", loopId: loop.id, runId: run.id });
     if (route === "send_to_admins" && !(loop.suppressEmptyOutput && output.trim() === "")) await this.callbacks.sendAdmins(eventText);
-    if (route === "dispatch_subagent") await this.callbacks.dispatchSubagent({ profile: loop.profile ?? "debugger", prompt: eventText, route: "return_to_main", timeoutSec: loop.timeoutSec, model: loop.model ?? defaults.model, effort: loop.effort ?? defaults.effort, serviceTier: loop.serviceTier, ownerId: loop.id, ownerRequestId: run.id });
+    if (route === "dispatch_subagent") await this.callbacks.dispatchSubagent({ profile: loop.profile ?? "debugger", prompt: eventText, route: "return_to_main", timeoutSec: loop.timeoutSec, model: loop.model ?? defaults.model, effort: loop.effort ?? defaults.effort, serviceTier: loop.serviceTier ?? defaults.serviceTier, ownerId: loop.id, ownerRequestId: run.id });
   }
 
   private async handleDispatch(loop: LoopDefinition, route: Route, run: LoopRun, defaults: LoopsConfig["defaults"]): Promise<void> {
     const prompt = loop.promptFile ? await readFile(resolveConfigPath(this.config, loop.promptFile), "utf8") : loop.prompt ?? "";
-    await this.callbacks.dispatchSubagent({ profile: loop.profile ?? "researcher", prompt, route, timeoutSec: loop.timeoutSec, model: loop.model ?? defaults.model, effort: loop.effort ?? defaults.effort, serviceTier: loop.serviceTier, ownerId: loop.id, ownerRequestId: run.id });
+    await this.callbacks.dispatchSubagent({ profile: loop.profile ?? "researcher", prompt, route, timeoutSec: loop.timeoutSec, model: loop.model ?? defaults.model, effort: loop.effort ?? defaults.effort, serviceTier: loop.serviceTier ?? defaults.serviceTier, ownerId: loop.id, ownerRequestId: run.id });
   }
 
   private async writeRunOutput(runId: string, output: string): Promise<string> {

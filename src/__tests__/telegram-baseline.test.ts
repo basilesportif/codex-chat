@@ -125,10 +125,10 @@ describe("Phase 0 Telegram baseline", () => {
     expect(behavior).toContain("Default subagent dispatches to `serviceTier: \"fast\"`");
   });
 
-  test("documents Terra for routine work and Sol for coding while preserving Claude routing", async () => {
+  test("documents Luna for routine work and Sol for coding while preserving Claude routing", async () => {
     const behavior = await readFile(join(process.cwd(), "behavior", "AGENTS.md"), "utf8");
 
-    expect(behavior).toContain('`model: "gpt-5.6-terra"`, `effort: "medium"`');
+    expect(behavior).toContain('`model: "gpt-5.6-luna"`, `effort: "xhigh"`');
     expect(behavior).toContain('`model: "gpt-5.6-sol"`, `effort: "high"`');
     expect(behavior).toContain('backend: "claude_agent_sdk"');
     expect(behavior).toContain('`claude-opus-4-8`');

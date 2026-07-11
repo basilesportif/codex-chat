@@ -27,6 +27,15 @@ async function markdownFiles(dir: string): Promise<string[]> {
 }
 
 describe("behavior pack cross-repo references", () => {
+  test("calendar creation guidance requires explicit non-self invitation intent", async () => {
+    const text = await readFile(join(BEHAVIOR_DIR, "AGENTS.md"), "utf8");
+    expect(text).toContain("only when Tim explicitly asks to invite/add that person as a guest");
+    expect(text).toContain("Never infer an attendee or invitation intent from CRM contacts");
+    expect(text).toContain("inviteNonSelfAttendees: true");
+    expect(text).toContain("sole attendee only when he explicitly requests that");
+    expect(text).toContain("No Google Meet link unless Tim explicitly requested an invite");
+  });
+
   test("every referenced assistant-agent-logic script and skill doc exists", async (context) => {
     if (!(await exists(LOGIC_REPO))) {
       context.skip(); // sibling checkout absent (e.g. bare CI); nothing to validate

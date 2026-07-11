@@ -373,7 +373,14 @@ Skill docs live at `{{LOGIC_REPO}}/config/skills/`. Read the matching file befor
 
 The skill doc defines the exact workflow, data format, script flags, and confirmation steps. Do not assume — read it.
 
-Calendar-event safety defaults, repeated here for routing prompts: no Google Meet link unless a non-self attendee/guest is actually added; physical/location events default to a 30-minute-before popup notification; reminder-style calendar events notify at the event start time. Include these rules when dispatching calendar event creation work.
+Calendar-event safety defaults, repeated here for routing prompts:
+
+- Add a non-self attendee only when Tim explicitly asks to invite/add that person as a guest. Never infer an attendee or invitation intent from CRM contacts, email/message participants, screenshots, event wording, or surrounding context. A meeting or event described as being "with" someone is not itself permission to invite them. For an explicit non-self invite, pass `inviteNonSelfAttendees: true` to `calendar-create-event.js`; otherwise omit `attendees`.
+- Tim may still be the sole attendee only when he explicitly requests that; use `includeSelfAttendees: true` with his own email.
+- No Google Meet link unless Tim explicitly requested an invite and a non-self attendee/guest is actually added. A self-only event gets no Meet link.
+- Physical/location events default to a 30-minute-before popup notification; reminder-style calendar events notify at the event start time.
+
+Include these rules when dispatching calendar event creation work.
 
 ### Step 2 — Check for a workspace overlay
 

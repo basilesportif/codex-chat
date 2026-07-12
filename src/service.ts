@@ -625,6 +625,9 @@ export class ServiceSupervisor {
 
   private async addImmediateSlackReaction(event: UserEvent): Promise<void> {
     if (event.source !== "slack") return;
+    // A reaction event already is the receipt signal. Reacting to the referenced
+    // bot message here would create noise and can feed reaction toggle loops.
+    if (event.metadata?.emojiFollowup === true) return;
     const channel = typeof event.metadata?.slackChannelId === "string"
       ? event.metadata.slackChannelId
       : event.outputTarget?.surfaceKind === "slack" ? event.outputTarget.channelId : undefined;
@@ -3056,6 +3059,18 @@ export class ServiceSupervisor {
       this.recordSlackTelemetry(slackOutboundTelemetryObservation({ target, outcome: "attempt" }));
       try {
         const results = await this.slack.sendText(target, text);
+        for (const result of results) {
+          if (!result.channel || !result.ts) continue;
+          await this.state.saveOutboundMessage({
+            platform: "slack",
+            messageId: result.ts,
+            content: result.text ?? text,
+            sentAt: nowIso(),
+            teamId: target.teamId ?? target.workspaceId,
+            channelId: result.channel,
+            threadId: target.threadId
+          });
+        }
         this.recordSlackTelemetry(slackOutboundTelemetryObservation({ target, outcome: "success", results }));
       } catch (error) {
         this.recordSlackTelemetry(slackOutboundTelemetryObservation({

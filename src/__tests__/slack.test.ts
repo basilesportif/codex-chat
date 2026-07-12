@@ -9,7 +9,7 @@ import { FileStore } from "../file-store.js";
 import { createLogger } from "../logger.js";
 import { ensureEventRuntimeContext } from "../runtime.js";
 import { renderSlackManifest } from "../slack-manifest.js";
-import { SlackGateway, normalizeSlackEventCallback, slackSignatureForTest, verifySlackRequestSignature } from "../slack.js";
+import { SlackGateway, normalizeSlackEventCallback, normalizeSlackReactionAdded, slackSignatureForTest, verifySlackRequestSignature } from "../slack.js";
 import { ServiceSupervisor } from "../service.js";
 import { StateStore } from "../state.js";
 import type { SlackTelemetrySummary } from "../slack-telemetry.js";
@@ -298,6 +298,8 @@ describe("Slack runtime foundation", () => {
         }
       }
     });
+    expect((result.manifest as { oauth_config: { scopes: { bot: string[] } } }).oauth_config.scopes.bot).toContain("reactions:read");
+    expect((result.manifest as { settings: { event_subscriptions: { bot_events: string[] } } }).settings.event_subscriptions.bot_events).toContain("reaction_added");
   });
 
   test("verifies Slack request signatures and rejects tampering", () => {
@@ -319,6 +321,39 @@ describe("Slack runtime foundation", () => {
       signatureHeader: signature,
       nowMs: timestamp * 1000
     })).toEqual({ ok: false, reason: "invalid_signature" });
+  });
+
+  test("normalizes a reaction only when bound to the exact persisted bot outbound message", () => {
+    const envelope = slackEnvelope({
+      event_id: "EvReaction1",
+      event: {
+        type: "reaction_added",
+        user: "U234",
+        reaction: "white_check_mark",
+        item_user: "UBOT",
+        item: { type: "message", channel: "C345", ts: "1782000001.000200" },
+        event_ts: "1782000002.000300"
+      }
+    });
+    const normalized = normalizeSlackReactionAdded(envelope, {
+      platform: "slack",
+      teamId: "T123",
+      channelId: "C345",
+      threadId: "1782000000.000100",
+      messageId: "1782000001.000200",
+      content: "Should I publish the report?",
+      sentAt: "2026-07-12T00:00:00.000Z"
+    });
+    expect(normalized.status).toBe("event");
+    if (normalized.status !== "event") throw new Error("expected event");
+    expect(normalized.event.text).toContain("Emoji: :white_check_mark:");
+    expect(normalized.event.text).toContain("Confirmed actor: slack:team:T123:user:U234");
+    expect(normalized.event.text).toContain('"Should I publish the report?"');
+    expect(normalized.event.outputTarget).toMatchObject({ channelId: "C345", threadId: "1782000000.000100" });
+
+    expect(normalizeSlackReactionAdded(envelope, {
+      platform: "slack", channelId: "C999", messageId: "1782000001.000200", content: "other", sentAt: "now"
+    })).toMatchObject({ status: "ignored", reason: "outbound_message_mismatch" });
   });
 
   test("normalizes app mentions into actor, output target, thread session, and narrow Slack grants", () => {
@@ -476,6 +511,40 @@ describe("Slack runtime foundation", () => {
     const rawTelemetry = await readFile(state.path("slack_telemetry/summary.json"), "utf8");
     expect(rawTelemetry).not.toContain("please summarize this thread");
     expect(rawTelemetry).not.toContain("xoxb-test-token");
+  });
+
+  test("Slack Events API ignores arbitrary reactions and durably suppresses reaction toggles", async () => {
+    const events: UserEvent[] = [];
+    const { baseUrl, state } = await apiHarness({ onSlackUserEvent: async (event) => { events.push(event); } });
+    const reaction = (eventId: string) => slackEnvelope({
+      event_id: eventId,
+      event: {
+        type: "reaction_added",
+        user: "U234",
+        reaction: "thumbsup",
+        item_user: "UBOT",
+        item: { type: "message", channel: "C345", ts: "1782000001.000200" },
+        event_ts: "1782000002.000300"
+      }
+    });
+
+    const arbitrary = await postSlack(baseUrl, reaction("EvReactionArbitrary"));
+    await expect(arbitrary.json()).resolves.toMatchObject({ ok: true, ignored: true, reason: "reaction_not_on_persisted_bot_message" });
+    expect(events).toHaveLength(0);
+
+    await state.saveOutboundMessage({
+      platform: "slack", teamId: "T123", channelId: "C345", threadId: "1782000000.000100",
+      messageId: "1782000001.000200", content: "Exact saved bot response", sentAt: "2026-07-12T00:00:00.000Z"
+    });
+    await expect((await postSlack(baseUrl, reaction("EvReactionFirst"))).json()).resolves.toEqual({ ok: true });
+    await flush();
+    expect(events).toHaveLength(1);
+    expect(events[0]?.text).toContain("Exact saved bot response");
+
+    // Slack emits a fresh event_id when a user removes and re-adds the same reaction.
+    await expect((await postSlack(baseUrl, reaction("EvReactionReadded"))).json()).resolves.toMatchObject({ ok: true, ignored: true, reason: "duplicate_reaction_toggle" });
+    await flush();
+    expect(events).toHaveLength(1);
   });
 
   test("Slack Events API service hook adds an immediate eyes reaction without delaying ack", async () => {
@@ -1216,7 +1285,7 @@ describe("Slack runtime foundation", () => {
     const normalized = normalizeSlackEventCallback(slackEnvelope(), "2026-06-26T00:00:00.000Z");
     if (normalized.status !== "event") throw new Error("expected event");
 
-    await expect(gateway.sendText(normalized.event.outputTarget, "hello")).resolves.toEqual([{ channel: "C345", ts: "1782000002.000100" }]);
+    await expect(gateway.sendText(normalized.event.outputTarget, "hello")).resolves.toEqual([{ channel: "C345", ts: "1782000002.000100", text: "hello" }]);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 

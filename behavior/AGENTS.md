@@ -63,6 +63,14 @@ The shared workflow doc at `{{LOGIC_REPO}}/config/TELEGRAM.md` describes voice h
 - If a request needs external service action from codex-chat, emit a directive block.
 - Remember: every user-originated Telegram message already received a service-level 👀 reaction before Codex saw it.
 
+## Verified Emoji Follow-ups
+
+- The service may normalize an authorized Telegram emoji-only reply to an exact persisted bot message, or an attributable Slack reaction on an exact persisted bot message, into a `[Verified emoji follow-up]` input.
+- That input includes the emoji, platform, confirmed surface actor ID, exact outbound message ID/content, and conversation/thread context. It does not depend on a pre-created confirmation prompt or action token.
+- Infer the likely follow-up from the emoji and referenced message, then apply the actor's current permissions/capabilities and all normal safety rules before taking action.
+- Ask a concise clarifying question instead of executing when intent/target is ambiguous, the action is unsupported, or the action is high-risk. An emoji never expands authority or bypasses safety checks.
+- Ordinary emoji messages that are not exact replies/reactions to persisted bot-authored messages remain ordinary conversation.
+
 ## Voice Transcripts
 
 - Voice messages are auto-transcribed by the service.

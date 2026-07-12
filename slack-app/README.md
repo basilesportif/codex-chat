@@ -39,6 +39,7 @@ The adapter currently supports:
 | `message.im` | Starts/resumes a DM conversation. |
 | `message.mpim` | Starts/resumes a MPIM conversation. |
 | `message.groups` | Starts/resumes a private-channel conversation/thread when the bot is a member. |
+| `reaction_added` on an exact persisted bot message | Converts an authorized, attributable reaction into a verified emoji follow-up for the main agent. Reactions on arbitrary messages and duplicate remove/re-add toggles are ignored. |
 | `chat:write` | Sends final text back through `SlackGateway.sendText` using the runtime `OutputTarget`. |
 
 The normalized runtime event carries Slack IDs and timestamps in shared runtime
@@ -114,6 +115,7 @@ Required bot scopes for the current adapter:
 - `im:history`, `mpim:history`, `groups:history`
 - `im:read`, `mpim:read`, `groups:read`
 - `reactions:write` (best-effort immediate 👀 receipt reaction)
+- `reactions:read` (ingest attributable reactions on persisted bot-authored messages)
 
 Subscribed bot events:
 
@@ -121,6 +123,9 @@ Subscribed bot events:
 - `message.im`
 - `message.mpim`
 - `message.groups`
+- `reaction_added`
+
+Adding `reactions:read` or `reaction_added` requires updating the Slack app from the rendered manifest and reinstalling it to the workspace.
 
 The committed manifest keeps a placeholder Events API URL. Brain renders the
 manifest with the deployment's public Events URL before a human installs or

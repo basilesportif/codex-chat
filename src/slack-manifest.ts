@@ -12,9 +12,10 @@ const REQUIRED_BOT_SCOPES = [
   "im:read",
   "mpim:history",
   "mpim:read",
+  "reactions:read",
   "reactions:write"
 ];
-const REQUIRED_BOT_EVENTS = ["app_mention", "message.groups", "message.im", "message.mpim"];
+const REQUIRED_BOT_EVENTS = ["app_mention", "message.groups", "message.im", "message.mpim", "reaction_added"];
 const SECRET_PATTERNS = [/xox[abprs]-[A-Za-z0-9-]{12,}/, /xapp-[A-Za-z0-9-]{12,}/];
 
 export interface RenderSlackManifestOptions {

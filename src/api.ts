@@ -19,6 +19,7 @@ import {
 import { authenticateIngestRequest, type IngestApiKey } from "./ingest-auth.js";
 import {
   normalizeSlackEventCallback,
+  normalizeSlackReactionAdded,
   verifySlackRequestSignature,
   type SlackEventEnvelope,
 } from "./slack.js";
@@ -330,7 +331,29 @@ export class ApiGateway {
       return;
     }
 
-    const normalized = normalizeSlackEventCallback(envelope);
+    let normalized;
+    if (envelope.event?.type === "reaction_added") {
+      const item = envelope.event.item;
+      const teamId = envelope.team_id ?? envelope.authorizations?.find((authorization) => authorization.team_id)?.team_id;
+      const outbound = item?.type === "message" && item.channel && item.ts
+        ? await this.state.findOutboundMessage("slack", `${teamId ?? ""}:${item.channel}`, item.ts)
+        : undefined;
+      if (!outbound) {
+        normalized = { status: "ignored" as const, eventId: envelope.event_id, reason: "reaction_not_on_persisted_bot_message" };
+      } else {
+        normalized = normalizeSlackReactionAdded(envelope, outbound);
+        if (normalized.status === "event") {
+          const reaction = envelope.event.reaction!;
+          const user = envelope.event.user!;
+          const semanticKey = `slack:reaction:${item!.channel}:${item!.ts}:${user}:${reaction}`;
+          if (!await this.state.claimEmojiFollowup(semanticKey)) {
+            normalized = { status: "ignored" as const, eventId: normalized.eventId, reason: "duplicate_reaction_toggle" };
+          }
+        }
+      }
+    } else {
+      normalized = normalizeSlackEventCallback(envelope);
+    }
     if (normalized.eventId && this.hasSeenSlackEvent(normalized.eventId)) {
       this.recordSlackTelemetry(slackInboundTelemetryObservation({
         envelope,

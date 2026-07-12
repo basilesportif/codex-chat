@@ -23,6 +23,9 @@ function testGateway(overrides: { state?: Partial<StateStore>; files?: Partial<F
       listTelegramUsers: vi.fn().mockResolvedValue([]),
       listTelegramChats: vi.fn().mockResolvedValue([]),
       recordMessage: vi.fn().mockResolvedValue(undefined),
+      saveOutboundMessage: vi.fn().mockResolvedValue(undefined),
+      findOutboundMessage: vi.fn().mockResolvedValue(undefined),
+      claimEmojiFollowup: vi.fn().mockResolvedValue(true),
       ...overrides.state
     } as unknown as StateStore,
     {
@@ -50,6 +53,68 @@ async function flush(): Promise<void> {
 }
 
 describe("Telegram reply context extraction", () => {
+  test("normalizes an emoji-only exact bot reply but preserves unrelated emoji conversation", async () => {
+    const onUserEvent = vi.fn().mockResolvedValue(undefined);
+    const findOutboundMessage = vi.fn().mockImplementation(async (_platform, _chat, messageId) => messageId === "20" ? {
+      platform: "telegram", chatId: "100", messageId: "20", content: "Should I archive this file?", sentAt: "now"
+    } : undefined);
+    const gateway = new TelegramGateway(
+      { telegram: { allowlist: { userIds: [9], chatIds: [100], adminUserIds: [] } } } as AppConfig,
+      {
+        listTelegramUsers: vi.fn().mockResolvedValue([]), listTelegramChats: vi.fn().mockResolvedValue([]),
+        recordMessage: vi.fn().mockResolvedValue(undefined), findOutboundMessage,
+        claimEmojiFollowup: vi.fn().mockResolvedValue(true)
+      } as unknown as StateStore,
+      {} as FileStore, {} as Transcriber, createLogger("silent"), { onUserEvent }
+    );
+    vi.spyOn(gateway, "sendReaction").mockResolvedValue(undefined);
+
+    const messageContext = (messageId: number, replyId?: number) => ({
+      chat: { id: 100, type: "private", first_name: "Tim" },
+      from: { id: 9, is_bot: false, first_name: "Tim", username: "tim" },
+      message: {
+        message_id: messageId, date: 1, chat: { id: 100, type: "private", first_name: "Tim" },
+        from: { id: 9, is_bot: false, first_name: "Tim", username: "tim" }, text: "✅",
+        ...(replyId ? { reply_to_message: { message_id: replyId, date: 1, chat: { id: 100, type: "private", first_name: "Tim" }, from: { id: 7, is_bot: true, first_name: "Bot" }, text: "snippet" } } : {})
+      }
+    } as Context);
+
+    await (gateway as unknown as { handleMessage(ctx: Context): Promise<void> }).handleMessage(messageContext(21, 20));
+    expect(onUserEvent.mock.calls[0]?.[0].text).toContain("[Verified emoji follow-up]");
+    expect(onUserEvent.mock.calls[0]?.[0].text).toContain('"Should I archive this file?"');
+
+    await (gateway as unknown as { handleMessage(ctx: Context): Promise<void> }).handleMessage(messageContext(22));
+    expect(onUserEvent.mock.calls[1]?.[0].text).toBe("✅");
+  });
+
+  test("accepts one attributable Telegram reaction addition on a persisted bot message", async () => {
+    const onUserEvent = vi.fn().mockResolvedValue(undefined);
+    const claimEmojiFollowup = vi.fn().mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    const gateway = new TelegramGateway(
+      { telegram: { allowlist: { userIds: [9], chatIds: [100], adminUserIds: [] } } } as AppConfig,
+      {
+        listTelegramUsers: vi.fn().mockResolvedValue([]), listTelegramChats: vi.fn().mockResolvedValue([]),
+        findOutboundMessage: vi.fn().mockResolvedValue({ platform: "telegram", chatId: "100", messageId: "20", content: "Run it?", sentAt: "now" }),
+        claimEmojiFollowup
+      } as unknown as StateStore,
+      {} as FileStore, {} as Transcriber, createLogger("silent"), { onUserEvent }
+    );
+    const ctx = {
+      chat: { id: 100, type: "private", first_name: "Tim" },
+      from: { id: 9, is_bot: false, first_name: "Tim", username: "tim" },
+      messageReaction: {
+        chat: { id: 100, type: "private", first_name: "Tim" }, message_id: 20,
+        user: { id: 9, is_bot: false, first_name: "Tim", username: "tim" }, date: 1,
+        old_reaction: [], new_reaction: [{ type: "emoji", emoji: "👍" }]
+      }
+    } as unknown as Context;
+    const handler = gateway as unknown as { handleMessageReaction(ctx: Context): Promise<void> };
+    await handler.handleMessageReaction(ctx);
+    await handler.handleMessageReaction(ctx);
+    expect(onUserEvent).toHaveBeenCalledTimes(1);
+    expect(onUserEvent.mock.calls[0]?.[0].text).toContain("Emoji: 👍");
+  });
+
   test("extracts same-chat reply, quote, and targeted reply identifiers", () => {
     const context = extractTelegramReplyContext({
       message_id: 20,

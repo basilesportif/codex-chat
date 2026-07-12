@@ -39,3 +39,16 @@ Current and added tests protecting this baseline include:
 - `src/__tests__/introspect.test.ts`: service-level command parsing and Telegram command interception for help, agents/subagents, kill, steer, status, and backend rollback.
 - `src/__tests__/directives.test.ts`: directive schemas including Telegram-oriented send/react fields and `serviceTier` preservation.
 - `src/__tests__/telegram-baseline.test.ts`: Phase 0 smoke assertions tying the documented baseline to current prompt formatting, command bypass, Fast main-loop and subagent defaults, including the narrow standard-mode exception.
+# Emoji replies and reactions
+
+An authorized user's message containing exactly one emoji is promoted to a
+verified follow-up only when it is a Telegram reply to an exact outbound
+message ID persisted by this bot. Telegram `message_reaction` additions use the
+same persisted-message requirement and reject anonymous actors. The normalized
+main-agent input carries the actor, emoji, exact outbound content/ID, and chat
+or topic context. Unmatched emoji messages remain ordinary conversation;
+reaction removals, duplicates, and remove/re-add toggles do not enqueue turns.
+
+The emoji expresses follow-up intent, not extra authority. Current capability
+and safety checks still apply, and ambiguous, unsupported, or high-risk inferred
+actions require clarification.

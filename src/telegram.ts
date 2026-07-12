@@ -1,6 +1,6 @@
 import { unlink } from "node:fs/promises";
 import { Bot, InputFile, type Context } from "grammy";
-import type { Chat, Message, MessageOrigin, User } from "grammy/types";
+import type { Chat, Message, MessageOrigin, ReactionType, User } from "grammy/types";
 import type { Logger } from "pino";
 import { AppConfig } from "./config.js";
 import { FileStore } from "./file-store.js";
@@ -10,6 +10,7 @@ import { Attachment, TelegramReplyChatSummary, TelegramReplyContext, TelegramRep
 import { withTelegramRuntimeContext } from "./runtime.js";
 import { chunkText, makePairingCode, nowIso } from "./util.js";
 import { renderTelegramMarkdown } from "./telegram-format.js";
+import { formatEmojiFollowupInput, singleEmoji } from "./emoji-followup.js";
 
 const REPLY_SNIPPET_MAX_CHARS = 280;
 const REPLY_LABEL_MAX_CHARS = 120;
@@ -38,6 +39,16 @@ const TELEGRAM_CONTENT_FIELDS = [
 ] as const;
 
 type TelegramAudioRequestKind = "diarize" | "transcribe";
+
+function telegramReactionKey(reaction: ReactionType): string {
+  return reaction.type === "emoji" ? `emoji:${reaction.emoji}` : reaction.type === "custom_emoji" ? `custom:${reaction.custom_emoji_id}` : "paid";
+}
+
+function telegramReactionLabel(reaction: ReactionType): string | undefined {
+  if (reaction.type === "emoji") return reaction.emoji;
+  if (reaction.type === "custom_emoji") return `:custom_emoji:${reaction.custom_emoji_id}:`;
+  return undefined;
+}
 
 interface TelegramAudioDecision {
   mode: TranscriptionMode;
@@ -368,10 +379,18 @@ export class TelegramGateway {
     for (const rawChunk of chunkText(text || "(empty response)", 3200)) {
       const rendered = this.renderOutgoingText(rawChunk, format);
       const fellBack = await this.sendWithReplyFallback(chatId, currentReplyToMessageId, async (resolvedReplyToMessageId) => {
-        await this.bot!.api.sendMessage(chatId, rendered.text, {
+        const sent = await this.bot!.api.sendMessage(chatId, rendered.text, {
           parse_mode: rendered.parseMode,
           reply_parameters: replyParameters(resolvedReplyToMessageId)
         } as never);
+        await this.state.saveOutboundMessage({
+          platform: "telegram",
+          chatId: String(chatId),
+          messageId: String(sent.message_id),
+          content: rawChunk,
+          sentAt: nowIso(),
+          threadId: typeof sent.message_thread_id === "number" ? String(sent.message_thread_id) : undefined
+        });
       });
       if (fellBack) currentReplyToMessageId = undefined;
       await this.state.recordMessage({ direction: "outbound", chatId, text: rawChunk, sentAt: nowIso() });
@@ -471,6 +490,7 @@ export class TelegramGateway {
       await this.replyToContext(ctx, jobId && this.callbacks.onCancelCommand ? await this.callbacks.onCancelCommand(ctx.chat.id, jobId) : "Usage: /cancel <jobId>");
     });
     bot.on("message", async (ctx) => this.handleMessage(ctx));
+    bot.on("message_reaction", async (ctx) => this.handleMessageReaction(ctx));
     bot.catch((error) => this.logger.error({ component: "telegram", event: "handler_error", error }, "Telegram handler failed"));
   }
 
@@ -531,6 +551,28 @@ export class TelegramGateway {
     const eventMetadata: Record<string, unknown> = { telegramMessageId: message.message_id };
     if (typeof message.message_thread_id === "number") eventMetadata.telegramMessageThreadId = message.message_thread_id;
     let eventTranscript: string | undefined;
+
+    const replyEmoji = singleEmoji(text);
+    const repliedMessageId = reply?.replyToMessage?.messageId;
+    if (replyEmoji && repliedMessageId !== undefined) {
+      const outbound = await this.state.findOutboundMessage("telegram", String(ctx.chat.id), String(repliedMessageId));
+      if (outbound) {
+        const claimKey = `telegram:reply:${ctx.chat.id}:${message.message_id}`;
+        if (!await this.state.claimEmojiFollowup(claimKey)) return;
+        text = formatEmojiFollowupInput({
+          emoji: replyEmoji,
+          platform: "Telegram",
+          actorId: `telegram:user:${ctx.from.id}`,
+          actorDisplay: [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(" ") || ctx.from.username,
+          reference: outbound,
+          interaction: "reply"
+        });
+        eventMetadata.emojiFollowup = true;
+        eventMetadata.emojiFollowupKind = "reply";
+        eventMetadata.emojiFollowupEmoji = replyEmoji;
+        eventMetadata.emojiFollowupReferencedMessageId = repliedMessageId;
+      }
+    }
 
     if ("photo" in message && Array.isArray(message.photo) && message.photo.length > 0) {
       attachments.push(await this.downloadTelegramFile("image", message.photo.at(-1)));
@@ -641,6 +683,64 @@ export class TelegramGateway {
     });
 
     await this.callbacks.onUserEvent(runtimeEvent);
+  }
+
+  private async handleMessageReaction(ctx: Context): Promise<void> {
+    const update = ctx.messageReaction;
+    if (!update || !update.user || update.actor_chat) return;
+    if (!(await this.isAuthorized(ctx))) {
+      await this.logDenied(ctx);
+      return;
+    }
+    const oldKeys = new Set(update.old_reaction.map(telegramReactionKey));
+    const added = update.new_reaction.filter((reaction) => !oldKeys.has(telegramReactionKey(reaction)));
+    if (added.length !== 1) return;
+    const emoji = telegramReactionLabel(added[0]);
+    if (!emoji) return;
+    const outbound = await this.state.findOutboundMessage("telegram", String(update.chat.id), String(update.message_id));
+    if (!outbound) return;
+    const claimKey = `telegram:reaction:${update.chat.id}:${update.message_id}:${update.user.id}:${telegramReactionKey(added[0])}`;
+    if (!await this.state.claimEmojiFollowup(claimKey)) return;
+    const receivedAt = nowIso();
+    const metadata: Record<string, unknown> = {
+      telegramMessageId: update.message_id,
+      emojiFollowup: true,
+      emojiFollowupKind: "reaction",
+      emojiFollowupEmoji: emoji,
+      emojiFollowupReferencedMessageId: update.message_id
+    };
+    const stateUsers = await this.state.listTelegramUsers();
+    const event = withTelegramRuntimeContext({
+      source: "telegram",
+      chatId: update.chat.id,
+      userId: update.user.id,
+      username: update.user.username,
+      messageId: update.message_id,
+      text: formatEmojiFollowupInput({
+        emoji,
+        platform: "Telegram",
+        actorId: `telegram:user:${update.user.id}`,
+        actorDisplay: [update.user.first_name, update.user.last_name].filter(Boolean).join(" ") || update.user.username,
+        reference: outbound,
+        interaction: "reaction"
+      }),
+      attachments: [],
+      receivedAt,
+      metadata
+    }, {
+      chatId: update.chat.id,
+      userId: update.user.id,
+      username: update.user.username,
+      firstName: update.user.first_name,
+      lastName: update.user.last_name,
+      messageId: update.message_id,
+      chatType: update.chat.type,
+      chatTitle: "title" in update.chat ? update.chat.title : undefined,
+      isAdmin: isTelegramAdmin({ userId: update.user.id, configAdminUserIds: this.config.telegram.allowlist.adminUserIds, stateUsers }),
+      receivedAt,
+      metadata
+    });
+    await this.callbacks.onUserEvent(event);
   }
 
   private formatAudioTranscriptForEvent(input: {

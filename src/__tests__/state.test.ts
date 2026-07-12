@@ -27,6 +27,26 @@ afterEach(async () => {
 });
 
 describe("state store", () => {
+  test("persists exact outbound messages and atomically deduplicates emoji follow-ups", async () => {
+    const { StateStore } = await import("../state.js");
+    const root = await tempRoot();
+    const store = new StateStore(testConfig(root));
+    await store.init();
+    const outbound = {
+      platform: "telegram" as const,
+      chatId: "100",
+      messageId: "77",
+      content: "Exact bot answer",
+      sentAt: "2026-07-12T00:00:00.000Z"
+    };
+    await store.saveOutboundMessage(outbound);
+    expect(await store.findOutboundMessage("telegram", "100", "77")).toEqual(outbound);
+    expect(await Promise.all([store.claimEmojiFollowup("same"), store.claimEmojiFollowup("same")])).toEqual([true, false]);
+
+    const reopened = new StateStore(testConfig(root));
+    expect(await reopened.claimEmojiFollowup("same")).toBe(false);
+  });
+
   test("creates the state directory layout", async () => {
     const { StateStore } = await import("../state.js");
     const root = await tempRoot();

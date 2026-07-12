@@ -23,6 +23,7 @@
         "im:read",
         "mpim:history",
         "mpim:read",
+        "reactions:read",
         "reactions:write"
       ]
     }
@@ -34,7 +35,8 @@
         "app_mention",
         "message.groups",
         "message.im",
-        "message.mpim"
+        "message.mpim",
+        "reaction_added"
       ]
     },
     "interactivity": {

@@ -4,6 +4,8 @@ import type { AppConfig } from "./config.js";
 import { slackTargetChannelId, slackTargetThreadTs, withSlackRuntimeContext } from "./runtime.js";
 import type { OutputTarget, UserEvent } from "./types.js";
 import { nowIso } from "./util.js";
+import type { OutboundMessageRecord } from "./state.js";
+import { formatEmojiFollowupInput } from "./emoji-followup.js";
 
 const SLACK_SIGNATURE_VERSION = "v0";
 const SLACK_SIGNATURE_TOLERANCE_SEC = 5 * 60;
@@ -56,6 +58,9 @@ export interface SlackMessageLikeEvent {
   ts?: string;
   thread_ts?: string;
   event_ts?: string;
+  reaction?: string;
+  item_user?: string;
+  item?: { type?: string; channel?: string; ts?: string };
 }
 
 export type SlackEventNormalizationResult =
@@ -65,6 +70,7 @@ export type SlackEventNormalizationResult =
 export interface SlackSendTextResult {
   channel?: string;
   ts?: string;
+  text?: string;
 }
 
 export type SlackReactionResult =
@@ -191,6 +197,77 @@ export function normalizeSlackEventCallback(envelope: SlackEventEnvelope, receiv
   return { status: "event", event, eventId: resolvedEventId };
 }
 
+export function normalizeSlackReactionAdded(
+  envelope: SlackEventEnvelope,
+  outbound: OutboundMessageRecord,
+  receivedAt = nowIso()
+): SlackEventNormalizationResult {
+  const slackEvent = envelope.event;
+  const eventId = envelope.event_id ?? derivedSlackEventId(envelope);
+  if (!slackEvent || slackEvent.type !== "reaction_added") return { status: "ignored", eventId, reason: "not_reaction_added" };
+  if (!slackEvent.user) return { status: "ignored", eventId, reason: "anonymous_reaction" };
+  if (!slackEvent.reaction || slackEvent.item?.type !== "message" || !slackEvent.item.channel || !slackEvent.item.ts) {
+    return { status: "ignored", eventId, reason: "missing_reaction_metadata" };
+  }
+  if (outbound.platform !== "slack" || outbound.channelId !== slackEvent.item.channel || outbound.messageId !== slackEvent.item.ts) {
+    return { status: "ignored", eventId, reason: "outbound_message_mismatch" };
+  }
+  const teamId = envelope.team_id ?? outbound.teamId ?? envelope.authorizations?.find((item) => item.team_id)?.team_id;
+  if (!teamId) return { status: "ignored", eventId, reason: "missing_required_metadata" };
+  if (outbound.teamId && outbound.teamId !== teamId) return { status: "ignored", eventId, reason: "outbound_team_mismatch" };
+  const resolvedEventId = eventId ?? `${teamId}:${outbound.channelId}:${outbound.messageId}:${slackEvent.user}:${slackEvent.reaction}`;
+  const channelType = slackChannelTypeFromId(outbound.channelId ?? "");
+  const enterpriseId = envelope.enterprise_id ?? envelope.authorizations?.find((item) => item.enterprise_id)?.enterprise_id ?? undefined;
+  const botUserId = envelope.authorizations?.find((item) => item.is_bot)?.user_id ?? undefined;
+  const emoji = `:${slackEvent.reaction}:`;
+  const metadata = {
+    slackEventId: resolvedEventId,
+    slackEventTime: envelope.event_time,
+    slackEventType: slackEvent.type,
+    slackTeamId: teamId,
+    slackEnterpriseId: enterpriseId,
+    slackApiAppId: envelope.api_app_id,
+    slackChannelId: outbound.channelId,
+    slackChannelType: channelType,
+    slackUserId: slackEvent.user,
+    slackBotUserId: botUserId,
+    slackMessageTs: outbound.messageId,
+    slackThreadTs: outbound.threadId,
+    slackReplyThreadTs: outbound.threadId,
+    slackSourceKind: slackSourceKindFromEvent({ channelType, sourceThreadTs: outbound.threadId }),
+    emojiFollowup: true,
+    emojiFollowupKind: "reaction",
+    emojiFollowupEmoji: emoji,
+    emojiFollowupReferencedMessageId: outbound.messageId
+  };
+  const event = withSlackRuntimeContext({
+    source: "slack",
+    text: formatEmojiFollowupInput({
+      emoji,
+      platform: "Slack",
+      actorId: `slack:team:${teamId}:user:${slackEvent.user}`,
+      reference: outbound,
+      interaction: "reaction"
+    }),
+    attachments: [],
+    receivedAt,
+    metadata
+  }, {
+    teamId,
+    enterpriseId,
+    channelId: outbound.channelId!,
+    channelType,
+    userId: slackEvent.user,
+    botUserId,
+    messageTs: outbound.messageId,
+    threadTs: outbound.threadId,
+    eventId: resolvedEventId,
+    eventTime: envelope.event_time,
+    receivedAt
+  });
+  return { status: "event", event, eventId: resolvedEventId };
+}
+
 export function normalizeSlackText(text: string, botUserId?: string, stripBotMention = false): string {
   let normalized = text.replace(/\u00a0/g, " ").trim();
   if (stripBotMention && botUserId) {
@@ -240,7 +317,7 @@ export class SlackGateway {
         this.logger.warn({ component: "slack", event: "send_text_failed", channel, threadTs, error }, "Slack send_text failed");
         throw new Error(`Slack chat.postMessage failed: ${error}`);
       }
-      results.push({ channel: payload.channel, ts: payload.ts });
+      results.push({ channel: payload.channel, ts: payload.ts, text: chunk });
     }
     return results;
   }

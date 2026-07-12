@@ -18,6 +18,11 @@ import {
 const pairingCodePath = "data/pairing_code.txt";
 const subagentRuntimePath = "subagent_runtime.json";
 
+function outboundMessagePath(platform: "telegram" | "slack", conversationId: string, messageId: string): string {
+  const key = createHash("sha256").update(`${platform}\0${conversationId}\0${messageId}`).digest("hex");
+  return `outbound_messages/${platform}-${key}.json`;
+}
+
 interface SubagentRuntimeState {
   backendOverride?: SubagentBackendKind;
   updatedAt?: string;
@@ -34,6 +39,17 @@ export interface RecordedTelegramMessage {
   receivedAt?: string;
 }
 
+export interface OutboundMessageRecord {
+  platform: "telegram" | "slack";
+  messageId: string;
+  content: string;
+  sentAt: string;
+  chatId?: string;
+  teamId?: string;
+  channelId?: string;
+  threadId?: string;
+}
+
 export class StateStore {
   readonly root: string;
   private queues = new Map<string, Promise<void>>();
@@ -44,7 +60,7 @@ export class StateStore {
 
   async init(): Promise<void> {
     await ensureDir(this.root);
-    for (const dir of ["messages", "files", "turns", "queued_turns", "jobs", "employees", "employee_child_results", "loop_runs", "monitor_events", "actions", "audio_ingestions", "conversation_sessions", "progress_events", "slack_telemetry", "capability_decisions", "runtime_events"]) {
+    for (const dir of ["messages", "outbound_messages", "files", "turns", "queued_turns", "jobs", "employees", "employee_child_results", "loop_runs", "monitor_events", "actions", "audio_ingestions", "conversation_sessions", "progress_events", "slack_telemetry", "capability_decisions", "runtime_events"]) {
       await ensureDir(join(this.root, dir));
     }
     if (!(await pathExists(join(this.root, "schema.json")))) {
@@ -101,6 +117,28 @@ export class StateStore {
   async recordMessage(value: unknown): Promise<void> {
     const day = new Date().toISOString().slice(0, 10);
     await this.appendJsonl(`messages/${day}.jsonl`, value);
+  }
+
+  async saveOutboundMessage(record: OutboundMessageRecord): Promise<void> {
+    const conversationId = record.platform === "slack"
+      ? `${record.teamId ?? ""}:${record.channelId ?? ""}`
+      : record.chatId ?? "";
+    await this.writeJson(outboundMessagePath(record.platform, conversationId, record.messageId), record);
+  }
+
+  async findOutboundMessage(platform: OutboundMessageRecord["platform"], conversationId: string, messageId: string): Promise<OutboundMessageRecord | undefined> {
+    return this.readJson<OutboundMessageRecord | undefined>(outboundMessagePath(platform, conversationId, messageId), undefined);
+  }
+
+  /** Atomically claims a normalized emoji follow-up. False means it was already delivered. */
+  async claimEmojiFollowup(key: string): Promise<boolean> {
+    let claimed = false;
+    await this.updateJson<Record<string, { claimedAt: string }>>("emoji_followups/idempotency.json", {}, (current) => {
+      if (current[key]) return undefined;
+      claimed = true;
+      return { ...current, [key]: { claimedAt: nowIso() } };
+    });
+    return claimed;
   }
 
   async findRecentTelegramInboundMessage(input: {

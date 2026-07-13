@@ -384,11 +384,22 @@ work, and external-data lookup must dispatch a subagent with explicit
 `summary`, `model`, `effort`, and `serviceTier`. Fast is the default tier unless Tim explicitly asks for standard/slow/deep mode or config overrides it.
 
 The default main loop and routine non-coding dispatch model is
-`gpt-5.6-luna` at xhigh effort. Coding, implementation, debugging, review,
-and architecture dispatches use `gpt-5.6-sol` at high effort by default. Loop
-subagent dispatches that omit a per-loop override inherit
+`gpt-5.6-luna` at xhigh effort. This explicitly includes routine CRM/contact,
+calendar/email, project/todo, research, and other external-data reads or
+mutations, regardless of whether the job runs scripts or uses a profile that
+can write data. Source-code implementation, debugging, code review, software
+architecture, and deploy-sensitive engineering use `gpt-5.6-sol` at high
+effort by default. The `operator` subagent profile exists for bounded
+non-coding domain operations so record mutation is not conflated with code
+implementation. Loop subagent dispatches that omit a per-loop override inherit
 `gpt-5.6-luna`/`xhigh` from `config/loops.json` defaults. Explicit Claude
 routing remains per-dispatch and is unchanged.
+
+The service also normalizes classifiable dispatches to that rubric as a safety
+net. It preserves explicit user model/effort/tier requests and Claude/provider
+overrides. For example, a CRM follow-up mutation emitted accidentally as
+Sol/high is corrected to Luna/xhigh/fast, while fixing a bug in the CRM script
+is Sol/high/fast.
 
 The service does not enforce this policy by keyword-blocking final main-loop
 replies. The main Codex loop must choose the route up front, then either reply

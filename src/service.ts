@@ -24,6 +24,7 @@ import {
 import { loadCodexProfileConfig } from "./codex-profiles.js";
 import { DirectiveAction, DirectiveParseResult, FenceCloseScanner, parseDirectives } from "./directives.js";
 import { claudeFastModeSupported } from "./subagent-backends.js";
+import { normalizeSubagentRouting } from "./subagent-routing.js";
 import { EmployeeManager, parseEmployeeCommand, type EmployeeCommand } from "./employees.js";
 import { FileStore } from "./file-store.js";
 import { CodexHeartbeat } from "./heartbeat.js";
@@ -2059,17 +2060,35 @@ export class ServiceSupervisor {
         );
       }
       if (action.type === "dispatch_subagent") {
-        const { action: dispatchAction, changed: sanitizedProviderOverride } = await this.sanitizeSubagentProviderOverride(action, origin);
+        const { action: providerSafeAction, changed: sanitizedProviderOverride } = await this.sanitizeSubagentProviderOverride(action, origin);
+        const { action: dispatchAction, changed: normalizedRouting, workload } = normalizeSubagentRouting(providerSafeAction, origin.text);
         if (this.canSendTextToOutputTarget(origin.outputTarget)) {
           await this.sendTextToOutputTarget(
             origin.outputTarget,
-            sanitizedProviderOverride ? this.formatDispatchSummary(dispatchAction) : options.dispatchStatusText ?? this.formatDispatchSummary(dispatchAction)
+            sanitizedProviderOverride || normalizedRouting ? this.formatDispatchSummary(dispatchAction) : options.dispatchStatusText ?? this.formatDispatchSummary(dispatchAction)
           );
         }
         if (sanitizedProviderOverride) {
           this.logger.warn(
             { component: "subagents", event: "provider_override_ignored", profile: action.profile, model: action.model, codexProfile: action.codexProfile, modelProvider: action.modelProvider, serviceTierMode: action.serviceTierMode },
             "ignored subagent provider override because the origin did not explicitly request it"
+          );
+        }
+        if (normalizedRouting) {
+          this.logger.info(
+            {
+              component: "subagents",
+              event: "routing_normalized",
+              workload,
+              profile: action.profile,
+              requestedModel: providerSafeAction.model,
+              requestedEffort: providerSafeAction.effort,
+              requestedServiceTier: providerSafeAction.serviceTier,
+              model: dispatchAction.model,
+              effort: dispatchAction.effort,
+              serviceTier: dispatchAction.serviceTier
+            },
+            "normalized subagent model routing for workload"
           );
         }
         await this.subagents.dispatchFromDirective(dispatchAction, {

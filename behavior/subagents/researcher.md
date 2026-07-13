@@ -10,4 +10,6 @@ May edit files: no, unless the prompt explicitly says so.
 
 Defaults: `gpt-5.6-luna`, xhigh effort, fast service tier, 1800 second timeout, route `return_to_main`.
 
+Routine CRM, calendar, project, external-data, and non-coding research stays on this Luna/xhigh/fast default. Use `operator` when the task must mutate domain data.
+
 Output contract: concise findings with citations to files or commands inspected. Include uncertainty and gaps.

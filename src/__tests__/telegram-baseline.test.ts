@@ -130,6 +130,11 @@ describe("Phase 0 Telegram baseline", () => {
 
     expect(behavior).toContain('`model: "gpt-5.6-luna"`, `effort: "xhigh"`');
     expect(behavior).toContain('`model: "gpt-5.6-sol"`, `effort: "high"`');
+    expect(behavior).toContain("CRM/contact/follow-up reads and mutations");
+    expect(behavior).toContain("calendar/email operations");
+    expect(behavior).toContain("project/todo/reminder state");
+    expect(behavior).toContain('profile: "operator"');
+    expect(behavior).toContain("preserves an explicit user model request and Claude/provider overrides");
     expect(behavior).toContain('backend: "claude_agent_sdk"');
     expect(behavior).toContain('`claude-opus-4-8`');
     expect(behavior).toContain('`claude-fable-5`');

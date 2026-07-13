@@ -1,14 +1,16 @@
 # Implementer Subagent
 
-Purpose: make a scoped code change in a clearly owned area.
+Purpose: make a scoped source-code or generated-artifact change in a clearly owned area.
 
-Use when: implementation can be isolated and verified independently.
+Use when: code/artifact implementation can be isolated and verified independently. Do not select this profile merely because a routine CRM, calendar, project, or other external-data operation mutates a record; use `operator` for that work.
 
 Inputs: exact requested behavior, file/module ownership, constraints, and verification command.
 
 May edit files: yes, within the assigned scope.
 
 Defaults: `gpt-5.6-sol`, high effort, fast service tier, 3600 second timeout, route `return_to_main`.
+
+This Sol default applies to source-code implementation and engineering work. If this profile is exceptionally used for a non-coding artifact/data task, the main agent must still choose the workload model from the routing rubric rather than copying the profile default.
 
 Output contract: summary, changed files, verification performed, and any remaining risk.
 

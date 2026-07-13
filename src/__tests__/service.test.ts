@@ -1589,7 +1589,8 @@ describe("service supervisor", () => {
     await waitForIdle(service);
 
     expect(dispatchFromDirective).toHaveBeenCalled();
-    expect(sendText).toHaveBeenCalledWith(253768951, "Sub: Research routing\nresearcher · gpt-5.6-luna · high · fast", 502);
+    expect(dispatchFromDirective).toHaveBeenCalledWith(expect.objectContaining({ model: "gpt-5.6-luna", effort: "xhigh", serviceTier: "fast" }), expect.anything());
+    expect(sendText).toHaveBeenCalledWith(253768951, "Sub: Research routing\nresearcher · gpt-5.6-luna · xhigh · fast", 502);
     expect(sendText.mock.calls[0]?.[1]).not.toContain("tierMode");
   });
 
@@ -1615,11 +1616,11 @@ describe("service supervisor", () => {
     await waitForIdle(service);
 
     const dispatched = dispatchFromDirective.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(dispatched).toMatchObject({ model: "gpt-5.6-luna", effort: "high", serviceTier: "fast" });
+    expect(dispatched).toMatchObject({ model: "gpt-5.6-luna", effort: "xhigh", serviceTier: "fast" });
     expect(dispatched.codexProfile).toBeUndefined();
     expect(dispatched.modelProvider).toBeUndefined();
     expect(dispatched.serviceTierMode).toBeUndefined();
-    expect(sendText).toHaveBeenCalledWith(253768951, "Sub: Research routing\nresearcher · gpt-5.6-luna · high · fast", 507);
+    expect(sendText).toHaveBeenCalledWith(253768951, "Sub: Research routing\nresearcher · gpt-5.6-luna · xhigh · fast", 507);
   });
 
   test("OpenRouter dispatch summary includes provider, profile, and tierMode", async () => {

@@ -167,7 +167,7 @@ Optional fields:
 - `command` (string) and `args` (string[]): for `type: "command"`.
 - `cwd` (path), `env` (string→string map): for `type: "command"`.
 - `route`: `return_to_main` | `send_to_admins` | `store_only` | `dispatch_subagent`. Defaults to `defaults.route`.
-- `profile` (string): subagent profile (`researcher`, `debugger`, `implementer`, `reviewer`) when route or type involves dispatch.
+- `profile` (string): subagent profile (`researcher`, `operator`, `debugger`, `implementer`, `reviewer`) when route or type involves dispatch.
 - `timeoutSec` (number): per-run timeout. Defaults to `defaults.timeoutSec` (1800).
 - `model` (string): optional Codex model override for subagents spawned by this loop. Defaults to `defaults.model` (`gpt-5.6-luna`).
 - `effort` (`none` | `minimal` | `low` | `medium` | `high` | `xhigh`): optional Codex reasoning effort override for subagents spawned by this loop. Defaults to `defaults.effort` (`xhigh`).
@@ -258,8 +258,9 @@ Example: a concise git push loop.
 Dispatch a subagent when work is bounded, parallelizable, or needs isolated investigation:
 
 - `researcher`: find facts, docs, or repo context.
+- `operator`: execute bounded non-coding CRM, calendar, project, or other external-data reads/mutations through documented skills and scripts.
 - `debugger`: diagnose failures and logs.
-- `implementer`: make a scoped code change.
+- `implementer`: make a scoped code/artifact change; do not use this profile merely because a routine external-data operation mutates a record.
 - `reviewer`: review a diff or risky change.
 
 Use `return_to_main` unless the user explicitly asked for direct progress output.
@@ -296,7 +297,7 @@ For main-loop work, the user-facing reply must include a short line identifying 
 
 The main-loop service tier is config-driven. The current deployment default is Codex Fast mode. Disclose `tier=fast` unless the active config/workspace settings such as `[codex].serviceTier` or `CODEX_CHAT_CODEX_SERVICE_TIER` explicitly override it.
 
-For any reasoning, investigation, repo inspection, code or docs editing, code review, debugging, architecture, calendar/email lookup, external-data lookup, ambiguous, multi-step, or potentially slow task, dispatch a subagent. The top-level Codex loop must choose `model`, `effort`, and `serviceTier` explicitly for the task from the rubric below; do not rely on subagent defaults as the routing decision. Before or with every `dispatch_subagent`, provide a concise task summary via `summary`, and set explicit `model`, `effort`, and `serviceTier` fields. Default subagent dispatches to `serviceTier: "fast"`; use `serviceTier: "standard"` only when Tim explicitly requests standard/slow/deep mode or when an explicit config/workspace override requires it. The service will send a visible dispatch status containing the task, profile, model, effort, and tier, and the job will be visible in `agents` / `subagents`.
+For any reasoning, investigation, repo inspection, code or docs editing, code review, debugging, architecture, calendar/email lookup, external-data lookup, ambiguous, multi-step, or potentially slow task, dispatch a subagent. The top-level Codex loop must choose `model`, `effort`, and `serviceTier` explicitly for the task from the rubric below; do not rely on subagent/profile defaults as the routing decision. **Choose the model from the work itself, not from the profile name or whether the task writes data.** Routine CRM, calendar, project, todo, research, and other external-data operations remain non-coding work even when they update/delete records, run JavaScript scripts, or use an `operator`/`implementer` role. Before or with every `dispatch_subagent`, provide a concise task summary via `summary`, and set explicit `model`, `effort`, and `serviceTier` fields. Default subagent dispatches to `serviceTier: "fast"`; use `serviceTier: "standard"` only when Tim explicitly requests standard/slow/deep mode or when an explicit config/workspace override requires it. The service will send a visible dispatch status containing the task, profile, model, effort, and tier, and the job will be visible in `agents` / `subagents`.
 
 Provider overrides are opt-in only. For normal subagents, do not include `codexProfile`, `modelProvider`, or `serviceTierMode`, and use the OpenAI/Codex model rubric below. If Tim explicitly asks for an OpenRouter/non-OpenAI/provider-specific subagent, include `codexProfile: "openrouter"`, `modelProvider: "openrouter"`, and `serviceTierMode: "omit"`. If Tim gives an exact model slug, put that slug in `model`; otherwise set `model: "gpt-5.6-luna"` so the service recognizes the normal default and replaces it with the configured OpenRouter model from `$CODEX_HOME/openrouter.config.toml`.
 
@@ -310,10 +311,19 @@ Keep the safety gates: stop and report the concrete blocker for untrusted or thi
 
 Default routing rubric:
 
-- Most bounded research, repo-file inspection, log inspection, docs lookup/editing, calendar/email lookup, external-data lookup, and routine non-trivial analysis: `model: "gpt-5.6-luna"`, `effort: "xhigh"`.
-- Coding, implementation, debugging, code review, architecture, cross-module work, deploy-sensitive work, or tasks with meaningful correctness risk: `model: "gpt-5.6-sol"`, `effort: "high"`.
+- **Luna is the default and takes precedence for routine domain work:** CRM/contact/follow-up reads and mutations; calendar/email operations; project/todo/reminder state; finance/health/betting/messaging lookups; research; repo/log inspection; docs lookup/editing; and other non-coding/external-data work use `model: "gpt-5.6-luna"`, `effort: "xhigh"`, `serviceTier: "fast"`. A mutation, multi-step script workflow, important business record, or `implementer` profile does not by itself make work coding.
+- Reserve Sol for source-code implementation, debugging, code review, software architecture, cross-module code changes, and deploy-sensitive engineering work: `model: "gpt-5.6-sol"`, `effort: "high"`, `serviceTier: "fast"`.
 - Very intensive non-coding research or especially risky, ambiguous, high-stakes, large-scope, multi-step analysis: `model: "gpt-5.6-luna"`, `effort: "xhigh"`. For equivalently intensive coding work, keep `model: "gpt-5.6-sol"` and raise effort to `xhigh`.
 - Simple deterministic main-loop work: use the current top-level model/effort and disclose it as `main_loop`.
+
+Profile/model examples:
+
+- Updating three CRM follow-ups: `profile: "operator"`, Luna/xhigh/fast.
+- Reading a calendar or researching a vendor: `profile: "researcher"` or `"operator"`, Luna/xhigh/fast.
+- Updating a project note through project scripts: `profile: "operator"`, Luna/xhigh/fast.
+- Fixing the CRM script's TypeScript bug or reviewing its patch: `profile: "implementer"`/`"debugger"`/`"reviewer"`, Sol/high/fast.
+
+The service applies this rubric as a safety net when it can classify a dispatch. It preserves an explicit user model request and Claude/provider overrides. Still emit the correct values initially; normalization is not a substitute for correct routing.
 
 Service-tier rubric for subagents:
 
@@ -358,7 +368,7 @@ Claude-backed subagent directive shape (only when Tim asks for Claude/Opus/Fable
 
 Before handling ANY request that touches todos, bets/betting, CRM/contacts, reminders, calendar, email, finance, or health (Whoop), the actor doing the work MUST read the relevant skill file. This is mandatory — not optional. Skipping this step will cause the wrong workflow, wrong file paths, wrong script flags, or missed confirmation steps.
 
-Only direct todo/project state mutations or listing may stay in the main loop, and only when they are explicit deterministic script calls. Calendar/email lookups, finance/health/betting lookups, CRM investigation, messaging reads, and other external account/data access must dispatch a subagent; include the required skill-doc read in the subagent prompt.
+Only direct todo/project state mutations or listing may stay in the main loop, and only when they are explicit deterministic script calls. Calendar/email lookups, finance/health/betting lookups, CRM investigation, messaging reads, and other external account/data access must dispatch a subagent; include the required skill-doc read in the subagent prompt. Use the `operator` profile for bounded domain-data reads/mutations and route them with Luna/xhigh/fast. Do not route them to Sol merely because they mutate data or invoke a `.js` script.
 
 Reminder: the service already emitted the user-message 👀 reaction before Codex saw the request. If the task is allowed to stay in the main loop, read the skill file first, do the work, then emit the final reply. If it must dispatch, the subagent reads the skill file before doing the work.
 

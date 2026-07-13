@@ -1,29 +1,45 @@
 import { createHash } from "node:crypto";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join, relative } from "node:path";
-import { AppConfig, PathsConfig, resolveConfigPath } from "./config.js";
+import {
+  AppConfig,
+  OwnerConfig,
+  PathsConfig,
+  resolveConfigPath,
+} from "./config.js";
 import { pathExists } from "./util.js";
 
 export class BehaviorPack {
   readonly dir: string;
   readonly entrypointPath: string;
   private readonly paths: PathsConfig;
+  private readonly owner: OwnerConfig;
   constructor(config: AppConfig) {
     this.dir = resolveConfigPath(config, config.behavior.dir);
     this.entrypointPath = join(this.dir, config.behavior.entrypoint);
     this.paths = config.paths;
+    this.owner = config.owner;
   }
 
   /**
    * Behavior-pack markdown refers to the assistant-agent-logic checkout and
-   * the assistant workspace via {{LOGIC_REPO}} / {{WORKSPACE}} template
-   * tokens; substitute the configured absolute paths whenever file content
-   * is assembled into a prompt.
+   * the assistant workspace and optional owner metadata via template tokens;
+   * substitute configured values whenever file content is assembled into a
+   * prompt.
    */
   private substituteTemplateTokens(text: string): string {
     return text
       .replaceAll("{{LOGIC_REPO}}", this.paths.logicRepo)
-      .replaceAll("{{WORKSPACE}}", this.paths.assistantWorkspace);
+      .replaceAll("{{WORKSPACE}}", this.paths.assistantWorkspace)
+      .replaceAll("{{OWNER_NAME}}", this.owner.name)
+      .replaceAll(
+        "{{OWNER_TELEGRAM_CHAT_ID}}",
+        String(this.owner.telegramChatId),
+      )
+      .replaceAll(
+        "{{OWNER_TRUSTED_REMOTES}}",
+        this.owner.trustedRemotes.join(", ") || "none configured",
+      );
   }
 
   async loadBootstrapPrompt(): Promise<string> {

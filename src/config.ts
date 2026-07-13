@@ -145,6 +145,21 @@ export function defaultPathsConfig(): PathsConfig {
   return pathsSchema.parse({});
 }
 
+// Owner identity and repository trust settings used only by behavior packs
+// that opt into the corresponding template tokens.
+const ownerSchema = z.object({
+  name: z.string().default("the owner"),
+  telegramChatId: z.number().int().default(0),
+  trustedRemotes: z.array(z.string()).default([]),
+});
+
+export type OwnerConfig = z.infer<typeof ownerSchema>;
+
+/** Fully-defaulted [owner] config, derived from the schema. */
+export function defaultOwnerConfig(): OwnerConfig {
+  return ownerSchema.parse({});
+}
+
 const configSchema = z.object({
   version: z.literal(1).default(1),
   service: z.object({
@@ -239,6 +254,7 @@ const configSchema = z.object({
     entrypoint: z.string().default("AGENTS.md"),
     reloadOnSighup: z.boolean().default(true),
   }).prefault({}),
+  owner: ownerSchema.prefault({}),
   paths: pathsSchema.prefault({}),
   subagents: z.object({
     enabled: z.boolean().default(true),

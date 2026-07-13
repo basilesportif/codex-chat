@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
@@ -69,5 +69,77 @@ describe("BehaviorPack path template substitution", () => {
     expect(prompt).toContain(defaults.assistantWorkspace);
     expect(prompt).not.toContain("{{LOGIC_REPO}}");
     expect(prompt).not.toContain("{{WORKSPACE}}");
+  });
+
+  test("substitutes configured owner tokens in bootstrap and subagent prompts", async () => {
+    const root = await makeRoot();
+    const behaviorDir = join(root, "behavior");
+    await mkdir(join(behaviorDir, "subagents"), { recursive: true });
+    await writeFile(
+      join(behaviorDir, "AGENTS.md"),
+      "Owner={{OWNER_NAME}} chat={{OWNER_TELEGRAM_CHAT_ID}} remotes={{OWNER_TRUSTED_REMOTES}}\n",
+    );
+    await writeFile(
+      join(behaviorDir, "subagents", "tester.md"),
+      "Work for {{OWNER_NAME}} in chat {{OWNER_TELEGRAM_CHAT_ID}}.\n",
+    );
+    await writeFile(
+      join(root, "codex-chat.toml"),
+      [
+        "version = 1",
+        "[behavior]",
+        `dir = "${behaviorDir}"`,
+        "[owner]",
+        'name = "Alex Example"',
+        "telegramChatId = 987654321",
+        'trustedRemotes = ["example/*", "trusted/repo"]',
+      ].join("\n"),
+    );
+
+    const config = await loadConfig(join(root, "codex-chat.toml"));
+    const pack = new BehaviorPack(config);
+
+    const prompt = await pack.loadBootstrapPrompt();
+    expect(prompt).toContain(
+      "Owner=Alex Example chat=987654321 remotes=example/*, trusted/repo",
+    );
+    expect(prompt).not.toContain("{{OWNER_");
+
+    const profile = await pack.readSubagentProfile("tester");
+    expect(profile).toBe("Work for Alex Example in chat 987654321.\n");
+  });
+
+  test("generic behavior pack loads an owner-neutral prompt", async () => {
+    const root = await makeRoot();
+    const behaviorDir = join(root, "generic");
+    await cp(join(process.cwd(), "behavior-templates/generic"), behaviorDir, {
+      recursive: true,
+    });
+    await writeFile(
+      join(root, "codex-chat.toml"),
+      [
+        "version = 1",
+        "[behavior]",
+        `dir = "${behaviorDir}"`,
+        "[owner]",
+        'name = "Alex Example"',
+        "telegramChatId = 987654321",
+        'trustedRemotes = ["example/*"]',
+        "[paths]",
+        'logicRepo = "/srv/assistant-agent-logic"',
+        'assistantWorkspace = "/srv/assistant-workspace"',
+      ].join("\n"),
+    );
+
+    const config = await loadConfig(join(root, "codex-chat.toml"));
+    const prompt = await new BehaviorPack(config).loadBootstrapPrompt();
+
+    expect(prompt).toContain("Alex Example");
+    expect(prompt).toContain("987654321");
+    expect(prompt).toContain("example/*");
+    expect(prompt).not.toContain("{{OWNER_");
+    expect(prompt).not.toContain("Tim");
+    expect(prompt).not.toContain("253768951");
+    expect(prompt).not.toContain("/home/tim");
   });
 });

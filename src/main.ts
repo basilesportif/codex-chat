@@ -11,6 +11,7 @@ import { readIpcToken, sendIpcMessage, type IpcMessage } from "./ipc.js";
 import { formatLoopsStatus, runLoopCli, syncCron, validateLoops } from "./loops.js";
 import { validateMonitors } from "./monitors.js";
 import { injectFilePath, INJECT_TELEGRAM_USER_ID, ServiceSupervisor } from "./service.js";
+import { brainCapabilityStorePath } from "./capabilities.js";
 import { StateStore } from "./state.js";
 import { installUserService, uninstallUserService } from "./systemd.js";
 import { atomicWriteJson, nowIso, pathExists } from "./util.js";
@@ -69,12 +70,30 @@ program.command("health")
     await ensureConfiguredDirectories(config);
     const codexVersion = await runCapture(config, config.codex.binary, ["--version"]).catch((error) => `unavailable: ${error instanceof Error ? error.message : String(error)}`);
     const behaviorOk = await pathExists(resolveConfigPath(config, join(config.behavior.dir, config.behavior.entrypoint)));
+    // Capability-store readability: when enforcement is on, an unreadable/missing
+    // store means every Telegram/Slack event fails closed while the process still
+    // "runs". Surface it so health is honest instead of green-while-failing-closed.
+    const capabilityStorePath = brainCapabilityStorePath(config);
+    let capabilityStoreOk = false;
+    let capabilityStoreDetail = "";
+    try {
+      const parsed = JSON.parse(await readFile(capabilityStorePath, "utf8")) as { schemaVersion?: number; grants?: unknown[] };
+      capabilityStoreOk = parsed.schemaVersion === 2 && Array.isArray(parsed.grants);
+      if (!capabilityStoreOk) capabilityStoreDetail = "store present but not schema v2 with grants";
+    } catch (error) {
+      capabilityStoreDetail = error instanceof Error ? error.message : String(error);
+    }
+    const enforcementEnabled = config.brain.enforcementEnabled;
     const result = {
-      ok: true,
+      ok: !enforcementEnabled || capabilityStoreOk,
       config: config.configPath,
       runtime: runtimeVersion(),
       codex: codexVersion.trim(),
       behaviorOk,
+      enforcementEnabled,
+      capabilityStorePath,
+      capabilityStoreOk,
+      ...(capabilityStoreDetail ? { capabilityStoreDetail } : {}),
       telegramConfigured: Boolean(config.telegramBotToken),
       slackEnabled: config.slack.enabled,
       slackSigningSecretConfigured: Boolean(config.slackSigningSecret),
@@ -83,8 +102,13 @@ program.command("health")
       stateDir: resolveConfigPath(config, config.service.stateDir)
     };
     if (options.json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-    else process.stdout.write(`ok\ncodex: ${result.codex}\nstate: ${result.stateDir}\n`);
-    if (options.strict && (!result.telegramConfigured || (config.transcription.enabled && !result.openaiConfigured) || !behaviorOk)) process.exit(1);
+    else {
+      const storeLine = enforcementEnabled
+        ? `capabilityStore: ${capabilityStoreOk ? "ok" : `UNAVAILABLE (${capabilityStoreDetail || "unreadable"}) at ${capabilityStorePath}`}`
+        : "capabilityStore: enforcement disabled";
+      process.stdout.write(`${result.ok ? "ok" : "DEGRADED"}\ncodex: ${result.codex}\nstate: ${result.stateDir}\n${storeLine}\n`);
+    }
+    if (options.strict && (!result.telegramConfigured || (config.transcription.enabled && !result.openaiConfigured) || !behaviorOk || (enforcementEnabled && !capabilityStoreOk))) process.exit(1);
   });
 
 program.command("inject")

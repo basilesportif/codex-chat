@@ -63,6 +63,12 @@ function isClaudeOrProviderOverride(action: DispatchSubagentAction): boolean {
     Boolean(action.codexProfile || action.modelProvider || action.serviceTierMode);
 }
 
+/** True when the dispatch targets Fable (alias `fable` or `claude-fable-*`). */
+function isFableModel(model: string | undefined): boolean {
+  const normalized = (model ?? "").trim().toLowerCase();
+  return normalized === "fable" || normalized.startsWith("claude-fable");
+}
+
 export interface NormalizedSubagentRouting {
   action: DispatchSubagentAction;
   changed: boolean;
@@ -79,9 +85,18 @@ export function normalizeSubagentRouting(
   action: DispatchSubagentAction,
   originText: string
 ): NormalizedSubagentRouting {
+  // Fable defaults to medium reasoning effort unless the user explicitly asked
+  // for an effort level. Without this, the main agent's rubric tends to pick
+  // xhigh for Fable dispatches.
+  let changedByFableDefault = false;
+  if (isFableModel(action.model) && !explicitlyRequestsEffort(originText) && action.effort !== "medium") {
+    action = { ...action, effort: "medium" };
+    changedByFableDefault = true;
+  }
+
   const workload = classifySubagentWorkload(action);
   if (workload === "unknown" || isClaudeOrProviderOverride(action) || explicitlyRequestsModel(originText)) {
-    return { action, changed: false, workload };
+    return { action, changed: changedByFableDefault, workload };
   }
 
   const defaults = workload === "coding"

@@ -97,3 +97,37 @@ describe("subagent workload routing", () => {
     expect(normalizeSubagentRouting(input, input.prompt)).toMatchObject({ action: input, changed: false });
   });
 });
+
+describe("Fable effort default", () => {
+  test.each([["fable"], ["claude-fable-5"]] as const)(
+    "%s defaults to medium effort when no effort was explicitly requested",
+    (model) => {
+      const input = action({ model, backend: "claude_agent_sdk", effort: "xhigh", serviceTier: "standard" });
+      const result = normalizeSubagentRouting(input, "Use Fable to review this");
+      expect(result.changed).toBe(true);
+      expect(result.action.effort).toBe("medium");
+      expect(result.action.model).toBe(model);
+    }
+  );
+
+  test("an explicit effort request on Fable is preserved", () => {
+    const input = action({ model: "fable", backend: "claude_agent_sdk", effort: "xhigh", serviceTier: "standard" });
+    const result = normalizeSubagentRouting(input, "Use Fable at xhigh effort for this");
+    expect(result.action.effort).toBe("xhigh");
+    expect(result.changed).toBe(false);
+  });
+
+  test("Fable already at medium is a no-op", () => {
+    const input = action({ model: "fable", backend: "claude_agent_sdk", effort: "medium", serviceTier: "standard" });
+    const result = normalizeSubagentRouting(input, "Use Fable to review this");
+    expect(result.action.effort).toBe("medium");
+    expect(result.changed).toBe(false);
+  });
+
+  test("a non-Fable Claude model (opus) keeps its effort", () => {
+    const input = action({ model: "opus", backend: "claude_agent_sdk", effort: "xhigh", serviceTier: "fast" });
+    const result = normalizeSubagentRouting(input, "Use Opus to review this");
+    expect(result.action.effort).toBe("xhigh");
+    expect(result.changed).toBe(false);
+  });
+});

@@ -17,6 +17,130 @@ function action(overrides: Partial<DispatchSubagentAction> = {}): DispatchSubage
   };
 }
 
+describe("Claude-main subagent routing enforcement", () => {
+  test("rewrites a precedent-driven Luna dispatch for a routine calendar lookup to Sonnet", () => {
+    const input = action({
+      profile: "operator",
+      prompt: "Look up next event on football calendar",
+      model: "gpt-5.6-luna",
+      effort: "xhigh",
+      serviceTier: "fast"
+    });
+
+    expect(normalizeSubagentRouting(input, "Look up next event on football calendar", "claude_agent_sdk")).toMatchObject({
+      changed: true,
+      workload: "routine_non_coding",
+      action: {
+        model: "claude-sonnet-5",
+        effort: "high",
+        serviceTier: "standard",
+        backend: "claude_agent_sdk"
+      }
+    });
+  });
+
+  test("rewrites a Sol implementer dispatch for coding work to Fable", () => {
+    const input = action({
+      prompt: "Implement the service code change and run the tests.",
+      model: "gpt-5.6-sol",
+      effort: "high",
+      serviceTier: "fast"
+    });
+
+    expect(normalizeSubagentRouting(input, "Implement the service code change", "claude_agent_sdk")).toMatchObject({
+      changed: true,
+      workload: "coding",
+      action: {
+        model: "claude-fable-5",
+        effort: "medium",
+        serviceTier: "standard",
+        backend: "claude_agent_sdk"
+      }
+    });
+  });
+
+  test("rewrites an unknown GPT workload to the safe Sonnet default", () => {
+    const input = action({ prompt: "Handle this.", model: "gpt-5.6-sol" });
+
+    expect(normalizeSubagentRouting(input, "Handle this", "claude_agent_sdk")).toMatchObject({
+      changed: true,
+      workload: "unknown",
+      action: {
+        model: "claude-sonnet-5",
+        effort: "high",
+        serviceTier: "standard",
+        backend: "claude_agent_sdk"
+      }
+    });
+  });
+
+  test("honors an explicit Luna request through the Codex normalization path", () => {
+    const input = action({ prompt: "Look up the calendar event.", model: "gpt-5.6-luna", effort: "xhigh" });
+
+    expect(normalizeSubagentRouting(input, "use luna for this lookup", "claude_agent_sdk")).toEqual({
+      action: input,
+      changed: false,
+      workload: "routine_non_coding"
+    });
+  });
+
+  test("honors an explicit Codex request", () => {
+    const input = action({ prompt: "Handle this.", model: "gpt-5.6-luna", effort: "xhigh" });
+
+    expect(normalizeSubagentRouting(input, "use codex for this", "claude_agent_sdk")).toEqual({
+      action: input,
+      changed: false,
+      workload: "unknown"
+    });
+  });
+
+  test("preserves explicitly requested effort during a Claude rewrite", () => {
+    const input = action({ profile: "operator", prompt: "Look up the calendar event.", effort: "xhigh" });
+    const result = normalizeSubagentRouting(input, "Look up the calendar event with xhigh effort", "claude_agent_sdk");
+
+    expect(result).toMatchObject({ changed: true, workload: "routine_non_coding" });
+    expect(result.action).toMatchObject({
+      model: "claude-sonnet-5",
+      effort: "xhigh",
+      serviceTier: "standard",
+      backend: "claude_agent_sdk"
+    });
+  });
+
+  test("an existing Fable action gets the shared medium-effort default", () => {
+    const input = action({ model: "claude-fable-5", backend: "claude_agent_sdk", effort: "xhigh", serviceTier: "standard" });
+    const result = normalizeSubagentRouting(input, "Review this", "claude_agent_sdk");
+
+    expect(result.action).toEqual({ ...input, effort: "medium" });
+    expect(result.changed).toBe(true);
+  });
+
+  test("an explicit effort on an existing Fable action is untouched", () => {
+    const input = action({ model: "claude-fable-5", backend: "claude_agent_sdk", effort: "xhigh", serviceTier: "standard" });
+
+    expect(normalizeSubagentRouting(input, "Review this with xhigh effort", "claude_agent_sdk")).toEqual({
+      action: input,
+      changed: false,
+      workload: "unknown"
+    });
+  });
+
+  test("an explicit provider override passes through unchanged", () => {
+    const input = action({
+      codexProfile: "openrouter",
+      modelProvider: "openrouter",
+      serviceTierMode: "omit",
+      model: "z-ai/glm-5.2"
+    });
+
+    expect(normalizeSubagentRouting(input, "Handle this", "claude_agent_sdk")).toEqual({
+      action: input,
+      changed: false,
+      workload: "unknown"
+    });
+  });
+});
+
 describe("subagent workload routing", () => {
   test.each([
     ["CRM", "Read the CRM skill and update Neville's existing follow-up using --on-behalf-of."] as const,
@@ -60,6 +184,22 @@ describe("subagent workload routing", () => {
       changed: true,
       workload: "coding",
       action: { model: "gpt-5.6-sol", effort: "high", serviceTier: "fast" }
+    });
+  });
+
+  test("keeps Codex-mode defaults when the provider argument is omitted", () => {
+    const routine = action({ profile: "operator", prompt: "Look up the calendar event.", model: "gpt-5.6-sol" });
+    const coding = action({ prompt: "Debug the TypeScript service.", model: "gpt-5.6-luna", effort: "xhigh" });
+
+    expect(normalizeSubagentRouting(routine, "Look up the calendar event").action).toMatchObject({
+      model: "gpt-5.6-luna",
+      effort: "xhigh",
+      serviceTier: "fast"
+    });
+    expect(normalizeSubagentRouting(coding, "Debug the TypeScript service").action).toMatchObject({
+      model: "gpt-5.6-sol",
+      effort: "high",
+      serviceTier: "fast"
     });
   });
 

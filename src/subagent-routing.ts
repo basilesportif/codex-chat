@@ -1,4 +1,5 @@
 import type { DirectiveAction } from "./directives.js";
+import type { MainAgentProvider } from "./types.js";
 
 export type DispatchSubagentAction = Extract<DirectiveAction, { type: "dispatch_subagent" }>;
 export type SubagentWorkload = "coding" | "routine_non_coding" | "unknown";
@@ -39,7 +40,7 @@ export function classifySubagentWorkload(action: DispatchSubagentAction): Subage
 
 function explicitlyRequestsModel(text: string): boolean {
   return /\bgpt-[a-z0-9._-]+\b/i.test(text) ||
-    /\b(?:use|using|with|via|run|dispatch)(?:\s+the)?\s+(?:sol|luna|terra)\b/i.test(text) ||
+    /\b(?:use|using|with|via|run|dispatch)(?:\s+the)?\s+(?:sol|luna|terra|codex|openai)\b/i.test(text) ||
     /\b(?:sol|luna|terra)\s+(?:model|subagent)\b/i.test(text) ||
     /\bmodel(?:\s+is|\s*=|:)?[\s`"']+(?:sol|luna|terra)\b/i.test(text);
 }
@@ -83,7 +84,8 @@ export interface NormalizedSubagentRouting {
  */
 export function normalizeSubagentRouting(
   action: DispatchSubagentAction,
-  originText: string
+  originText: string,
+  mainProvider: MainAgentProvider = "codex"
 ): NormalizedSubagentRouting {
   // Fable defaults to medium reasoning effort unless the user explicitly asked
   // for an effort level. Without this, the main agent's rubric tends to pick
@@ -95,6 +97,29 @@ export function normalizeSubagentRouting(
   }
 
   const workload = classifySubagentWorkload(action);
+  if (mainProvider === "claude_agent_sdk") {
+    if (isClaudeOrProviderOverride(action)) {
+      return { action, changed: changedByFableDefault, workload };
+    }
+
+    if (!explicitlyRequestsModel(originText)) {
+      const defaults = workload === "coding"
+        ? { model: "claude-fable-5", effort: "medium" as const }
+        : { model: "claude-sonnet-5", effort: "high" as const };
+      const normalized: DispatchSubagentAction = {
+        ...action,
+        model: defaults.model,
+        effort: explicitlyRequestsEffort(originText) ? action.effort : defaults.effort,
+        serviceTier: explicitlyRequestsTier(originText) ? action.serviceTier : "standard",
+        backend: "claude_agent_sdk"
+      };
+      delete normalized.codexProfile;
+      delete normalized.modelProvider;
+      delete normalized.serviceTierMode;
+      return { action: normalized, changed: true, workload };
+    }
+  }
+
   if (workload === "unknown" || isClaudeOrProviderOverride(action) || explicitlyRequestsModel(originText)) {
     return { action, changed: changedByFableDefault, workload };
   }

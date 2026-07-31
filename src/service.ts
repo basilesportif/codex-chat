@@ -323,6 +323,7 @@ export class ServiceSupervisor {
   readonly telegram: TelegramGateway;
   readonly slack: SlackGateway;
   readonly codex: MainAgentSwitcher;
+  private readonly mainSwitcher: MainAgentSwitcher;
   private readonly appServerClient?: AppServerCodexClient;
   readonly loops: LoopManager;
   readonly monitors: MonitorManager;
@@ -386,6 +387,7 @@ export class ServiceSupervisor {
       });
     });
     this.codex = switcher;
+    this.mainSwitcher = switcher;
     this.appServerClient = appServerClient;
     if (config.employees.enabled && !this.appServerClient) {
       throw new Error("Claude main loop does not support durable Employees yet");
@@ -2101,7 +2103,7 @@ export class ServiceSupervisor {
       }
       if (action.type === "dispatch_subagent") {
         const { action: providerSafeAction, changed: sanitizedProviderOverride } = await this.sanitizeSubagentProviderOverride(action, origin);
-        const { action: dispatchAction, changed: normalizedRouting, workload } = normalizeSubagentRouting(providerSafeAction, origin.text);
+        const { action: dispatchAction, changed: normalizedRouting, workload } = normalizeSubagentRouting(providerSafeAction, origin.text, this.mainSwitcher.provider);
         if (this.canSendTextToOutputTarget(origin.outputTarget)) {
           await this.sendTextToOutputTarget(
             origin.outputTarget,
@@ -2119,6 +2121,7 @@ export class ServiceSupervisor {
             {
               component: "subagents",
               event: "routing_normalized",
+              mainProvider: this.mainSwitcher.provider,
               workload,
               profile: action.profile,
               requestedModel: providerSafeAction.model,

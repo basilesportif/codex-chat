@@ -12,7 +12,7 @@ import { BehaviorPack } from "./behavior.js";
 import { CAPABILITY_DENIED_MESSAGE, OUTSIDE_BRAIN_SCOPE_REASON, assertBrainCapabilitySourceAvailable, authorize, authorizeOutput, brainCapabilityStorePath, capabilityGrantFromDecision, formatBrainSubjectManifestBlock, loadBrainCapabilityStore, outOfScopeAllowedDecision, requirementForInboundEvent, resolveSubjectManifest, type BrainCapabilityStore } from "./capabilities.js";
 import { capabilityRegistry, registryVersion, type CapabilityId } from "./capability-registry.js";
 import { AppServerCodexClient, CodexCrashInfo } from "./codex.js";
-import { createMainAgentClient } from "./main-agent.js";
+import { createMainAgentSwitcher, type MainAgentProviderStatus, MainAgentSwitcher } from "./main-agent.js";
 import {
   consumeDeployMarker,
   DeployMarker,
@@ -67,7 +67,7 @@ import {
 } from "./slack-telemetry.js";
 import { TelegramGateway } from "./telegram.js";
 import { formatTemporalAnchorBlock, temporalAnchorForEvent } from "./temporal.js";
-import { ActorContext, CapabilityDecision, JsonRecord, MainAgentClient, StoredAction, SubagentBackendKind, SubagentJob, SubagentOwnerType, SubagentResultTarget, UserEvent } from "./types.js";
+import { ActorContext, CapabilityDecision, JsonRecord, MainAgentProvider, StoredAction, SubagentBackendKind, SubagentJob, SubagentOwnerType, SubagentResultTarget, UserEvent } from "./types.js";
 import { compactText, inlineCode, makeId, nowIso } from "./util.js";
 
 export const INJECT_TELEGRAM_USER_ID = 253768951;
@@ -253,6 +253,26 @@ export function parseSubagentBackendCommand(text: string): SubagentBackendComman
   return { isBackend: false };
 }
 
+export type MainProviderCommand =
+  | { isMainProvider: false }
+  | { isMainProvider: true; action: "status" | "set" | "clear"; provider?: MainAgentProvider };
+
+/** Parses service-owned "main provider [codex|claude|config]" recovery commands. */
+export function parseMainProviderCommand(text: string): MainProviderCommand {
+  const match = text.trim().match(/^main\s+provider(?:\s+(\S+))?$/i);
+  if (!match) return { isMainProvider: false };
+  const value = (match[1] ?? "status").toLowerCase();
+  if (value === "status") return { isMainProvider: true, action: "status" };
+  if (value === "config" || value === "clear" || value === "default") {
+    return { isMainProvider: true, action: "clear" };
+  }
+  if (value === "codex") return { isMainProvider: true, action: "set", provider: "codex" };
+  if (value === "claude" || value === "claude-agent-sdk" || value === "claude_agent_sdk") {
+    return { isMainProvider: true, action: "set", provider: "claude_agent_sdk" };
+  }
+  return { isMainProvider: false };
+}
+
 
 /**
  * Returns true when the message is a "help" command (service-level).
@@ -283,6 +303,10 @@ export const HELP_TEXT = `Service commands (handled instantly, bypass Codex):
   agent backend app-server — opt new/queued subagents into steerable app-server backend
   agent backend claude — opt new/queued subagents into Claude Agent SDK backend
   agent backend config — clear runtime backend override
+  main provider       — show effective main-loop provider and health
+  main provider codex — recovery: switch the main loop to Codex now
+  main provider claude — switch the main loop to Claude now
+  main provider config — clear runtime provider override and use config now
   employees           — list configured durable Employees
   employee status <id> — show Employee runtime/scaffold status
   employee start <id> — start/resume a minimal durable Employee runtime when enabled
@@ -298,7 +322,7 @@ export class ServiceSupervisor {
   readonly files: FileStore;
   readonly telegram: TelegramGateway;
   readonly slack: SlackGateway;
-  readonly codex: MainAgentClient;
+  readonly codex: MainAgentSwitcher;
   private readonly appServerClient?: AppServerCodexClient;
   readonly loops: LoopManager;
   readonly monitors: MonitorManager;
@@ -350,7 +374,7 @@ export class ServiceSupervisor {
     if (config.codex.transport !== "app-server") {
       throw new Error(DISABLED_EXEC_RESUME_MESSAGE);
     }
-    const { client, appServerClient } = createMainAgentClient(config, this.state, this.behavior, logger, (reason, info) => {
+    const { switcher, appServerClient } = createMainAgentSwitcher(config, this.state, this.behavior, logger, (reason, info) => {
       // Capture the active chat synchronously: by the time restartCodex's
       // first await resumes, processEventSafe's .finally may have already
       // cleared activeTurnEvent in response to the now-failed sendTurn
@@ -361,7 +385,7 @@ export class ServiceSupervisor {
         this.logger.error({ component: "service", event: "restart_failed", error }, "Codex restart failed");
       });
     });
-    this.codex = client;
+    this.codex = switcher;
     this.appServerClient = appServerClient;
     if (config.employees.enabled && !this.appServerClient) {
       throw new Error("Claude main loop does not support durable Employees yet");
@@ -692,6 +716,12 @@ export class ServiceSupervisor {
         if (backendCommand.isBackend) {
           if (!await this.authorizeServiceCommand(event, backendCommand.action === "status" ? "runtime.status.read" : "subagents.backend.set")) return;
           await this.handleSubagentBackendCommandEvent(event, backendCommand);
+          return;
+        }
+        const mainProviderCommand = parseMainProviderCommand(event.text);
+        if (mainProviderCommand.isMainProvider) {
+          if (!await this.authorizeServiceCommand(event, mainProviderCommand.action === "status" ? "runtime.status.read" : "subagents.backend.set")) return;
+          await this.handleMainProviderCommandEvent(event, mainProviderCommand);
           return;
         }
         const employeeCommand = parseEmployeeCommand(event.text);
@@ -3242,6 +3272,60 @@ export class ServiceSupervisor {
     } else {
       lines.push("Recovery command: agent backend exec");
     }
+    return lines.join("\n");
+  }
+
+  private async handleMainProviderCommandEvent(
+    event: UserEvent,
+    command: Exclude<MainProviderCommand, { isMainProvider: false }>
+  ): Promise<void> {
+    if (!event.chatId) return;
+    const updatedBy = event.userId ? `telegram:${event.userId}` : "telegram";
+    // Do not health-check the current provider before a recovery switch: its
+    // health path may be the very component the admin is trying to escape.
+    const beforeProvider = this.codex.provider;
+    try {
+      if (command.action === "set") await this.codex.switchProvider(command.provider!, updatedBy);
+      else if (command.action === "clear") await this.codex.useConfiguredProvider(updatedBy);
+      const after = await this.codex.providerStatus();
+      await this.sendTextToOutputTarget(event.outputTarget, this.formatMainProviderStatus(after, command.action, {
+        changed: beforeProvider !== after.effective
+      }));
+    } catch (error) {
+      await this.sendTextToOutputTarget(
+        event.outputTarget,
+        this.formatMainProviderStatus(undefined, command.action, { error, currentProvider: this.codex.provider })
+      );
+    }
+  }
+
+  private formatMainProviderStatus(
+    status: MainAgentProviderStatus | undefined,
+    action: "status" | "set" | "clear",
+    result: { changed?: boolean; error?: unknown; currentProvider?: MainAgentProvider }
+  ): string {
+    const lines: string[] = [];
+    if (result.error) {
+      lines.push(`Switch failed: ${result.error instanceof Error ? result.error.message : String(result.error)}`);
+    } else if (action === "status") {
+      lines.push("Switch performed: no (status only).");
+    } else {
+      lines.push(result.changed
+        ? `Switch performed: yes; main loop is now ${status?.effective ?? "unknown"}.`
+        : `Switch performed: no; ${status?.effective ?? "the configured provider"} was already active.`);
+    }
+    if (status) {
+      lines.push(
+        `Main provider: ${status.effective}`,
+        `source: ${status.source}`,
+        `configured: ${status.configured}`,
+        `runtime override: ${status.override ?? "none"}`,
+        `health: ${status.health.ok ? "ok" : "unhealthy"}; transport=${status.health.transport}; session=${status.health.sessionId ?? "new"}${status.health.detail ? `; detail=${status.health.detail}` : ""}`
+      );
+    } else {
+      lines.push(`Main provider: ${result.currentProvider ?? "unknown"}`, "Current health: unavailable after the failed switch.");
+    }
+    lines.push("Conversational context does not carry across providers; Codex and Claude each resume their own provider-scoped session.");
     return lines.join("\n");
   }
 

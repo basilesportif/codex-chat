@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
 import { AppConfig, resolveConfigPath } from "./config.js";
 import type { AudioIngestionRecord } from "./audio-ingest.js";
-import { CapabilityDecision, CapabilityDecisionRecord, ConversationSession, EmployeeRuntimeState, LoopRun, MonitorEvent, ProgressEvent, StoredAction, SubagentBackendKind, SubagentJob } from "./types.js";
+import { CapabilityDecision, CapabilityDecisionRecord, ConversationSession, EmployeeRuntimeState, LoopRun, MainAgentProvider, MonitorEvent, ProgressEvent, StoredAction, SubagentBackendKind, SubagentJob } from "./types.js";
 import type { RuntimeEvent } from "./runtime-events.js";
 import { atomicWriteJson, atomicWriteText, ensureDir, nowIso, pathExists, removeIfExists } from "./util.js";
 import {
@@ -17,6 +17,7 @@ import {
 
 const pairingCodePath = "data/pairing_code.txt";
 const subagentRuntimePath = "subagent_runtime.json";
+const mainAgentRuntimePath = "main_agent_runtime.json";
 
 function outboundMessagePath(platform: "telegram" | "slack", conversationId: string, messageId: string): string {
   const key = createHash("sha256").update(`${platform}\0${conversationId}\0${messageId}`).digest("hex");
@@ -25,6 +26,12 @@ function outboundMessagePath(platform: "telegram" | "slack", conversationId: str
 
 interface SubagentRuntimeState {
   backendOverride?: SubagentBackendKind;
+  updatedAt?: string;
+  updatedBy?: string;
+}
+
+interface MainAgentRuntimeState {
+  providerOverride?: MainAgentProvider;
   updatedAt?: string;
   updatedBy?: string;
 }
@@ -375,6 +382,23 @@ export class StateStore {
         updatedAt: nowIso(),
         updatedBy
       } satisfies SubagentRuntimeState);
+    });
+  }
+
+  async getMainProviderOverride(): Promise<MainAgentProvider | undefined> {
+    const state = await this.readJson<MainAgentRuntimeState>(mainAgentRuntimePath, {});
+    return state.providerOverride;
+  }
+
+  async setMainProviderOverride(provider: MainAgentProvider | undefined, updatedBy?: string): Promise<void> {
+    await this.withJsonFileLock(mainAgentRuntimePath, async (path) => {
+      const current = await readJsonFile<MainAgentRuntimeState>(path, {});
+      await atomicWriteJson(path, {
+        ...current,
+        providerOverride: provider,
+        updatedAt: nowIso(),
+        updatedBy
+      } satisfies MainAgentRuntimeState);
     });
   }
 

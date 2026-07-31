@@ -492,6 +492,10 @@ The following commands are intercepted by the service **before** they reach Code
 | `agent backend app-server` | Opt in new and queued subagents to the app-server child backend. |
 | `agent backend claude` | Opt in new and queued subagents to the Claude Agent SDK backend (canary/default flip; per-job routing uses the directive `backend` field instead). |
 | `agent backend config` | Clear the runtime override and use the configured backend. |
+| `main provider` | Show the effective main-loop provider, override source, and current health/session. |
+| `main provider codex` | Recovery command: switch the main loop to Codex without restarting the service. |
+| `main provider claude` | Switch the main loop to Claude Agent SDK without restarting the service. |
+| `main provider config` | Clear the persisted main-provider override and immediately use the configured provider. |
 | `help` | List all service-level commands. |
 | `update` / `deploy` | Pull latest and restart the service. |
 

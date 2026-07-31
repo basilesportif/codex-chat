@@ -4,9 +4,9 @@ import type { BehaviorPack } from "../behavior.js";
 import type { AppConfig } from "../config.js";
 import { ClaudeMainAgentClient } from "../claude-main-agent.js";
 import { AppServerCodexClient } from "../codex.js";
-import { createMainAgentClient } from "../main-agent.js";
+import { MainAgentSwitcher, createMainAgentClient } from "../main-agent.js";
 import type { StateStore } from "../state.js";
-import type { MainAgentClient, MainAgentEvent, MainAgentProvider } from "../types.js";
+import type { MainAgentClient, MainAgentEvent, MainAgentHealth, MainAgentProvider } from "../types.js";
 
 const state = {} as StateStore;
 const behavior = {} as BehaviorPack;
@@ -44,6 +44,205 @@ describe("main-agent client factory", () => {
     expect(() =>
       createMainAgentClient(configFor("claude_agent_sdk", true), state, behavior, logger, () => undefined)
     ).toThrow("Claude main loop does not support durable Employees yet");
+  });
+});
+
+type FakeMainClient = MainAgentClient & {
+  start: ReturnType<typeof vi.fn>;
+  stop: ReturnType<typeof vi.fn>;
+  health: ReturnType<typeof vi.fn>;
+  resetSession: ReturnType<typeof vi.fn>;
+  getRecentLogs: ReturnType<typeof vi.fn>;
+  consumePendingBehaviorRefresh: ReturnType<typeof vi.fn>;
+};
+
+function fakeMainClient(
+  provider: MainAgentProvider,
+  events: () => AsyncIterable<MainAgentEvent> = async function* () {
+    yield { type: "final", text: provider };
+  }
+): FakeMainClient {
+  const health: MainAgentHealth = {
+    ok: true,
+    transport: provider === "codex" ? "app-server" : "claude-agent-sdk",
+    provider,
+    sessionId: `${provider}-session`
+  };
+  return {
+    start: vi.fn().mockResolvedValue(undefined),
+    stop: vi.fn().mockResolvedValue(undefined),
+    health: vi.fn().mockResolvedValue(health),
+    sendTurn: vi.fn(events),
+    resetSession: vi.fn().mockResolvedValue(health),
+    getRecentLogs: vi.fn().mockReturnValue([`${provider} log`]),
+    consumePendingBehaviorRefresh: vi.fn().mockReturnValue(`${provider} refresh`)
+  } as FakeMainClient;
+}
+
+function switcherHarness(options: {
+  configured?: MainAgentProvider;
+  override?: MainAgentProvider;
+  employeesEnabled?: boolean;
+  graceMs?: number;
+  clients?: Partial<Record<MainAgentProvider, FakeMainClient>>;
+  onCrash?: (reason: string) => void;
+} = {}) {
+  const configured = options.configured ?? "codex";
+  const clients = {
+    codex: options.clients?.codex ?? fakeMainClient("codex"),
+    claude_agent_sdk: options.clients?.claude_agent_sdk ?? fakeMainClient("claude_agent_sdk")
+  };
+  const crashHandlers = new Map<MainAgentProvider, (reason: string) => void>();
+  const persistOverride = vi.fn().mockResolvedValue(undefined);
+  const createClient = vi.fn((provider: MainAgentProvider, onCrash: (reason: string) => void) => {
+    crashHandlers.set(provider, onCrash);
+    return clients[provider];
+  });
+  const switcher = new MainAgentSwitcher({
+    configuredProvider: configured,
+    employeesEnabled: options.employeesEnabled ?? false,
+    createClient,
+    loadOverride: vi.fn().mockResolvedValue(options.override),
+    persistOverride,
+    onCrash: options.onCrash,
+    switchGraceMs: options.graceMs
+  });
+  return { switcher, clients, createClient, persistOverride, crashHandlers };
+}
+
+describe("MainAgentSwitcher", () => {
+  test("delegates the MainAgentClient contract to the active inner client", async () => {
+    const { switcher, clients } = switcherHarness();
+
+    await switcher.start();
+    const events: MainAgentEvent[] = [];
+    for await (const event of switcher.sendTurn({ text: "hello" })) events.push(event);
+
+    expect(events).toEqual([{ type: "final", text: "codex" }]);
+    expect(await switcher.health()).toMatchObject({ provider: "codex", sessionId: "codex-session" });
+    expect(await switcher.resetSession("test")).toMatchObject({ provider: "codex" });
+    expect(switcher.getRecentLogs(3, true)).toEqual(["codex log"]);
+    expect(switcher.consumePendingBehaviorRefresh()).toBe("codex refresh");
+    await switcher.stop();
+
+    expect(clients.codex.start).toHaveBeenCalledOnce();
+    expect(clients.codex.resetSession).toHaveBeenCalledWith("test");
+    expect(clients.codex.getRecentLogs).toHaveBeenCalledWith(3, true);
+    expect(clients.codex.stop).toHaveBeenCalledOnce();
+  });
+
+  test("same-provider switches are no-ops", async () => {
+    const { switcher, clients, createClient, persistOverride } = switcherHarness();
+    await switcher.start();
+
+    const health = await switcher.switchProvider("codex", "test");
+
+    expect(health).toMatchObject({ provider: "codex", sessionId: "codex-session" });
+    expect(createClient).toHaveBeenCalledOnce();
+    expect(clients.codex.stop).not.toHaveBeenCalled();
+    expect(persistOverride).not.toHaveBeenCalled();
+  });
+
+  test("switches the inner client and persists the runtime override", async () => {
+    const { switcher, clients, persistOverride } = switcherHarness();
+    await switcher.start();
+
+    const health = await switcher.switchProvider("claude_agent_sdk", "telegram:1");
+
+    expect(clients.codex.stop).toHaveBeenCalledOnce();
+    expect(clients.claude_agent_sdk.start).toHaveBeenCalledOnce();
+    expect(persistOverride).toHaveBeenCalledWith("claude_agent_sdk", "telegram:1");
+    expect(health).toMatchObject({ provider: "claude_agent_sdk", sessionId: "claude_agent_sdk-session" });
+    expect((await switcher.providerStatus()).source).toBe("override");
+  });
+
+  test("loads the persisted override before starting the configured provider", async () => {
+    const { switcher, clients } = switcherHarness({ override: "claude_agent_sdk" });
+
+    await switcher.start();
+
+    expect(switcher.provider).toBe("claude_agent_sdk");
+    expect(clients.codex.start).not.toHaveBeenCalled();
+    expect(clients.claude_agent_sdk.start).toHaveBeenCalledOnce();
+  });
+
+  test("waits for an in-flight turn, then interrupts it after the grace period", async () => {
+    vi.useFakeTimers();
+    let releaseTurn!: () => void;
+    const turnGate = new Promise<void>((resolve) => {
+      releaseTurn = resolve;
+    });
+    const codex = fakeMainClient("codex", async function* () {
+      await turnGate;
+      yield { type: "final", text: "late" };
+    });
+    codex.stop.mockImplementation(async () => releaseTurn());
+    const { switcher, clients } = switcherHarness({ graceMs: 15_000, clients: { codex } });
+    await switcher.start();
+    const pendingTurn = switcher.sendTurn({ text: "stuck" })[Symbol.asyncIterator]().next();
+    await vi.advanceTimersByTimeAsync(0);
+
+    const switching = switcher.switchProvider("claude_agent_sdk", "test");
+    await vi.advanceTimersByTimeAsync(14_999);
+    expect(codex.stop).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await switching;
+
+    expect(codex.stop).toHaveBeenCalledOnce();
+    expect(clients.claude_agent_sdk.start).toHaveBeenCalledOnce();
+    await pendingTurn;
+    vi.useRealTimers();
+  });
+
+  test("rolls back when the new provider fails to start", async () => {
+    const claude = fakeMainClient("claude_agent_sdk");
+    claude.start.mockRejectedValue(new Error("claude start failed"));
+    const { switcher, clients, persistOverride } = switcherHarness({ clients: { claude_agent_sdk: claude } });
+    await switcher.start();
+
+    await expect(switcher.switchProvider("claude_agent_sdk", "test"))
+      .rejects.toThrow("claude start failed; rolled back to codex");
+
+    expect(switcher.provider).toBe("codex");
+    expect(clients.codex.start).toHaveBeenCalledTimes(2);
+    expect(persistOverride).not.toHaveBeenCalled();
+  });
+
+  test("surfaces both the switch and rollback errors", async () => {
+    const codex = fakeMainClient("codex");
+    codex.start.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("codex rollback failed"));
+    const claude = fakeMainClient("claude_agent_sdk");
+    claude.start.mockRejectedValue(new Error("claude start failed"));
+    const { switcher } = switcherHarness({ clients: { codex, claude_agent_sdk: claude } });
+    await switcher.start();
+
+    await expect(switcher.switchProvider("claude_agent_sdk", "test"))
+      .rejects.toThrow("claude start failed; rollback to codex also failed: codex rollback failed");
+    expect(switcher.provider).toBe("codex");
+  });
+
+  test("routes crashes only from the active inner client", async () => {
+    const onCrash = vi.fn();
+    const { switcher, crashHandlers } = switcherHarness({ onCrash });
+    await switcher.start();
+    const staleCrash = crashHandlers.get("codex")!;
+    await switcher.switchProvider("claude_agent_sdk", "test");
+
+    staleCrash("old crashed");
+    crashHandlers.get("claude_agent_sdk")!("active crashed");
+
+    expect(onCrash).toHaveBeenCalledOnce();
+    expect(onCrash).toHaveBeenCalledWith("active crashed", undefined);
+  });
+
+  test("refuses Claude while durable Employees are enabled", async () => {
+    const { switcher, clients, persistOverride } = switcherHarness({ employeesEnabled: true });
+    await switcher.start();
+
+    await expect(switcher.switchProvider("claude_agent_sdk", "test"))
+      .rejects.toThrow("Cannot switch the main provider to Claude while durable Employees are enabled");
+    expect(clients.codex.stop).not.toHaveBeenCalled();
+    expect(persistOverride).not.toHaveBeenCalled();
   });
 });
 

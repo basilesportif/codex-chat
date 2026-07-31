@@ -8,7 +8,7 @@ import { createLogger } from "../logger.js";
 import { sendIpcMessage } from "../ipc.js";
 import { authorize } from "../capabilities.js";
 import { capabilityRegistry, registryVersion } from "../capability-registry.js";
-import { injectFilePath, INJECT_TELEGRAM_USER_ID, ServiceSupervisor } from "../service.js";
+import { injectFilePath, INJECT_TELEGRAM_USER_ID, parseMainProviderCommand, ServiceSupervisor } from "../service.js";
 import type { CodexEvent, SubagentJob, UserEvent } from "../types.js";
 
 const tempDirs: string[] = [];
@@ -254,6 +254,114 @@ afterEach(async () => {
 });
 
 describe("service supervisor", () => {
+  test.each([
+    ["main provider", { isMainProvider: true, action: "status" }],
+    ["main provider status", { isMainProvider: true, action: "status" }],
+    ["main provider codex", { isMainProvider: true, action: "set", provider: "codex" }],
+    ["main provider claude", { isMainProvider: true, action: "set", provider: "claude_agent_sdk" }],
+    ["main provider config", { isMainProvider: true, action: "clear" }],
+    ["please use main provider codex", { isMainProvider: false }]
+  ])("parses the main-provider service command %j", (text, expected) => {
+    expect(parseMainProviderCommand(text)).toEqual(expected);
+  });
+
+  test("main-provider override state round-trips and clears", async () => {
+    const config = await loadTestConfig();
+    const service = makeService(config, createLogger("silent"));
+    await service.state.init();
+
+    expect(await service.state.getMainProviderOverride()).toBeUndefined();
+    await service.state.setMainProviderOverride("claude_agent_sdk", "test");
+    expect(await service.state.getMainProviderOverride()).toBe("claude_agent_sdk");
+    await service.state.setMainProviderOverride(undefined, "test");
+    expect(await service.state.getMainProviderOverride()).toBeUndefined();
+  });
+
+  test("handles main-provider status, set, and clear commands before the model loop", async () => {
+    const config = await loadTestConfig();
+    const service = makeService(config, createLogger("silent"));
+    await service.state.init();
+    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+    const sendTurn = vi.spyOn(service.codex, "sendTurn");
+    const codexStatus = {
+      configured: "codex" as const,
+      effective: "codex" as const,
+      source: "config" as const,
+      health: { ok: true, transport: "app-server", provider: "codex" as const, sessionId: "codex-session" }
+    };
+    const claudeStatus = {
+      configured: "codex" as const,
+      override: "claude_agent_sdk" as const,
+      effective: "claude_agent_sdk" as const,
+      source: "override" as const,
+      health: { ok: true, transport: "claude-agent-sdk", provider: "claude_agent_sdk" as const, sessionId: "claude-session" }
+    };
+    const providerStatus = vi.spyOn(service.codex, "providerStatus")
+      .mockResolvedValueOnce(codexStatus)
+      .mockResolvedValueOnce(claudeStatus)
+      .mockResolvedValueOnce(codexStatus);
+    const switchProvider = vi.spyOn(service.codex, "switchProvider").mockResolvedValue(claudeStatus.health);
+    const useConfiguredProvider = vi.spyOn(service.codex, "useConfiguredProvider").mockResolvedValue(codexStatus.health);
+
+    await service.enqueueUserEvent(userEvent(140, "main provider"));
+    await service.enqueueUserEvent(userEvent(141, "main provider claude"));
+    await service.enqueueUserEvent(userEvent(142, "main provider config"));
+
+    expect(providerStatus).toHaveBeenCalledTimes(3);
+    expect(switchProvider).toHaveBeenCalledWith("claude_agent_sdk", "telegram:253768951");
+    expect(useConfiguredProvider).toHaveBeenCalledWith("telegram:253768951");
+    expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("Main provider: codex"), 140);
+    expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("Switch performed: yes; main loop is now claude_agent_sdk."), 141);
+    expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("Conversational context does not carry across providers"), 142);
+    expect(sendTurn).not.toHaveBeenCalled();
+  });
+
+  test("denies main-provider changes when the backend admin capability is absent", async () => {
+    const config = await loadTestConfig();
+    const store = JSON.parse(await readFile(config.brain.storePath, "utf8")) as {
+      grants: Array<{ subjectId?: string; capabilityId?: string }>;
+    };
+    store.grants = store.grants.filter((grant) => !(
+      grant.subjectId === "person:person_tim" && grant.capabilityId === "subagents.backend.set"
+    ));
+    await writeFile(config.brain.storePath, JSON.stringify(store, null, 2));
+    const service = makeService(config, createLogger("silent"));
+    await service.state.init();
+    vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+    const switchProvider = vi.spyOn(service.codex, "switchProvider");
+
+    await service.enqueueUserEvent(userEvent(143, "main provider claude"));
+
+    expect(switchProvider).not.toHaveBeenCalled();
+  });
+
+  test("handles a main-provider recovery command while a model turn is in flight", async () => {
+    const config = await loadTestConfig();
+    const service = makeService(config, createLogger("silent"));
+    await service.state.init();
+    vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+    const blockedTurn = deferred();
+    vi.spyOn(service as unknown as { processEvent(event: UserEvent): Promise<void> }, "processEvent")
+      .mockReturnValue(blockedTurn.promise);
+    const status = {
+      configured: "codex" as const,
+      override: "claude_agent_sdk" as const,
+      effective: "claude_agent_sdk" as const,
+      source: "override" as const,
+      health: { ok: true, transport: "claude-agent-sdk", provider: "claude_agent_sdk" as const, sessionId: "claude-session" }
+    };
+    vi.spyOn(service.codex, "providerStatus").mockResolvedValue(status);
+    const switchProvider = vi.spyOn(service.codex, "switchProvider").mockResolvedValue(status.health);
+
+    await service.enqueueUserEvent(userEvent(144, "stuck model turn"));
+    expect((service as unknown as { turnRunning: boolean }).turnRunning).toBe(true);
+    await service.enqueueUserEvent(userEvent(145, "main provider claude"));
+
+    expect(switchProvider).toHaveBeenCalledWith("claude_agent_sdk", "telegram:253768951");
+    blockedTurn.resolve();
+    await flush();
+  });
+
   test("rejects non-app-server transport at startup", async () => {
     const config = await loadTestConfig("exec-resume");
     const logger = createLogger("silent");

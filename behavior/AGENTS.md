@@ -292,11 +292,9 @@ Use the main loop only for extremely direct deterministic operations:
 
 Do not use the main loop for README changes, documentation edits, code edits, repo/file inspection, calendar lookup, email/Gmail lookup, research, external-data lookup, debugging, architecture, multi-step work, or ambiguous work. Even a read-only calendar or email lookup must dispatch a subagent.
 
-For main-loop work, the user-facing reply must include a short line identifying it as main-loop work and stating the model/effort/tier actually being used, for example:
+For main-loop work, the user-facing reply must include a short line identifying it as main-loop work and stating the model/effort/tier actually being used — your ACTUAL current model, never a copied example (e.g. `main_loop: model=gpt-5.6-luna effort=xhigh tier=fast` on the Codex provider, or `main_loop: model=claude-sonnet-5 effort=high tier=standard` on the Claude provider).
 
-`main_loop: model=gpt-5.6-luna effort=xhigh tier=fast`
-
-The main-loop service tier is config-driven. The current deployment default is Codex Fast mode. Disclose `tier=fast` unless the active config/workspace settings such as `[codex].serviceTier` or `CODEX_CHAT_CODEX_SERVICE_TIER` explicitly override it.
+The main-loop service tier is config-driven. On the Codex provider the current deployment default is Codex Fast mode — disclose `tier=fast` unless the active config/workspace settings such as `[codex].serviceTier` or `CODEX_CHAT_CODEX_SERVICE_TIER` explicitly override it. On the Claude provider disclose `tier=standard` (fast mode applies only to Opus models).
 
 For any reasoning, investigation, repo inspection, code or docs editing, code review, debugging, architecture, calendar/email lookup, external-data lookup, ambiguous, multi-step, or potentially slow task, dispatch a subagent. The top-level Codex loop must choose `model`, `effort`, and `serviceTier` explicitly for the task from the rubric below; do not rely on subagent/profile defaults as the routing decision. **Choose the model from the work itself, not from the profile name or whether the task writes data.** Routine CRM, calendar, project, todo, research, and other external-data operations remain non-coding work even when they update/delete records, run JavaScript scripts, or use an `operator`/`implementer` role. Before or with every `dispatch_subagent`, provide a concise task summary via `summary`, and set explicit `model`, `effort`, and `serviceTier` fields. Default subagent dispatches to `serviceTier: "fast"`; use `serviceTier: "standard"` only when Tim explicitly requests standard/slow/deep mode or when an explicit config/workspace override requires it. The service will send a visible dispatch status containing the task, profile, model, effort, and tier, and the job will be visible in `agents` / `subagents`.
 
@@ -312,12 +310,24 @@ For Tim-owned repos resolved through repo-registry or a trusted `basilesportif/*
 
 Keep the safety gates: stop and report the concrete blocker for untrusted or third-party repos, unclear ownership/scope, dirty unrelated worktrees, failing tests/checks, merge conflicts, protected-branch restrictions, secrets exposure risk, destructive migrations, or any other specific safety concern. If a workflow helper such as `github:yeet` says to default to a draft PR, this Tim-owned direct-publish policy overrides that default for explicit commit/push/merge/deploy requests; the helper's unrelated-change and validation safeguards still apply.
 
-Default routing rubric:
+Default routing rubric — **provider-aware: pick the rubric matching the model family YOU (the main loop) are running as.** When the main provider is Claude (`main provider` shows `claude_agent_sdk`, or you are a Claude model such as Sonnet/Fable/Opus), the whole stack stays on Claude by default; use `gpt-5.6-*` models only when Tim explicitly asks for Codex/OpenAI. When you are a Codex/GPT model, use the Codex rubric; use Claude models only when Tim names Claude/Fable/Sonnet/Opus/Haiku (per the Claude Agent SDK paragraph above).
+
+Codex/GPT main loop (you are `gpt-5.6-*`):
 
 - **Luna is the default and takes precedence for routine domain work:** CRM/contact/follow-up reads and mutations; calendar/email operations; project/todo/reminder state; finance/health/betting/messaging lookups; research; repo/log inspection; docs lookup/editing; and other non-coding/external-data work use `model: "gpt-5.6-luna"`, `effort: "xhigh"`, `serviceTier: "fast"`. A mutation, multi-step script workflow, important business record, or `implementer` profile does not by itself make work coding.
 - Reserve Sol for source-code implementation, debugging, code review, software architecture, cross-module code changes, and deploy-sensitive engineering work: `model: "gpt-5.6-sol"`, `effort: "high"`, `serviceTier: "fast"`.
 - Very intensive non-coding research or especially risky, ambiguous, high-stakes, large-scope, multi-step analysis: `model: "gpt-5.6-luna"`, `effort: "xhigh"`. For equivalently intensive coding work, keep `model: "gpt-5.6-sol"` and raise effort to `xhigh`.
-- Simple deterministic main-loop work: use the current top-level model/effort and disclose it as `main_loop`.
+
+Claude main loop (you are a Claude model — Sonnet/Fable/Opus):
+
+- **Routine domain work** (the same CRM/calendar/email/project/todo/finance/health/betting/messaging/research/repo-inspection/docs categories as above): `model: "claude-sonnet-5"`, `effort: "high"`, `serviceTier: "standard"`, `backend: "claude_agent_sdk"`.
+- **Coding and engineering work** (source-code implementation, debugging, code review, architecture, cross-module changes, deploy-sensitive work): `model: "claude-fable-5"`, `effort: "medium"`, `serviceTier: "standard"`, `backend: "claude_agent_sdk"`. Hand Fable one bounded end-to-end task — it orchestrates its native implementer/investigator/reviewer subagents and raises effort itself where needed. Use a different effort only when Tim explicitly names one.
+- **Very intensive, risky, high-stakes, or large-scope analysis:** `model: "claude-fable-5"`, `effort: "high"` (xhigh only when Tim asks), `serviceTier: "standard"`, `backend: "claude_agent_sdk"`.
+- Always emit `backend: "claude_agent_sdk"` on these dispatches and never include Codex provider fields (`codexProfile`, `modelProvider`, `serviceTierMode`).
+
+Either provider:
+
+- Simple deterministic main-loop work: use the current top-level model/effort and disclose it as `main_loop` with your ACTUAL model id — never echo a model name from these examples.
 
 Profile/model examples:
 

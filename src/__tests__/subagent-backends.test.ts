@@ -671,6 +671,7 @@ describe("Claude Agent SDK subagent backend", () => {
   test("fast mode is only applied on models that support it", async () => {
     vi.resetModules();
     const { claudeFastModeSupported } = await import("../subagent-backends.js");
+    expect(claudeFastModeSupported("claude-opus-5")).toBe(true);
     expect(claudeFastModeSupported("claude-opus-4-8")).toBe(true);
     expect(claudeFastModeSupported("claude-opus-4-7")).toBe(true);
     expect(claudeFastModeSupported("opus")).toBe(true);

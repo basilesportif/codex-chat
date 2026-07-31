@@ -404,7 +404,11 @@ export class ClaudeMainAgentClient implements MainAgentClient {
     this.logBuffer.append("event", `[SDK] type=${message.type}${subtype ? ` subtype=${subtype}` : ""}`, true);
 
     if (message.type === "system" && message.subtype === "init") {
-      if (message.apiKeySource && message.apiKeySource !== "oauth" && message.apiKeySource !== "none") {
+      // SDK 0.3.220 narrowed the apiKeySource union to API-key sources only
+      // (OAuth sessions omit the field); widen so the historic oauth/none
+      // values stay tolerated while any API-key source still fails closed.
+      const mainApiKeySource = message.apiKeySource as string | undefined;
+      if (mainApiKeySource && mainApiKeySource !== "oauth" && mainApiKeySource !== "none") {
         throw new Error(
           `Claude Agent SDK requires OAuth credentials; SDK init reported apiKeySource=${message.apiKeySource}.`
         );

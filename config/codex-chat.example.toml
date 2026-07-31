@@ -156,7 +156,8 @@ cleanupArtifacts = true
 #
 # Model strings are passed through unchanged to the Claude Agent SDK. Prefer
 # pinned Claude IDs for reproducible subagent launches:
-#   claude-opus-4-8   # Opus 4.8; Claude Code alias `opus`
+#   claude-opus-5     # Opus 5 (flagship since 2026-07-24); Claude Code alias `opus`
+#   claude-opus-4-8   # Opus 4.8
 #   claude-fable-5    # Fable 5; Claude Code alias `fable`
 #   claude-sonnet-5   # Sonnet 5; Claude Code alias `sonnet`
 #   claude-haiku-4-5-20251001  # alias `claude-haiku-4-5`
@@ -171,7 +172,7 @@ implementerModel = "sonnet"
 # Investigator model alias or full ID; 'sonnet'/'haiku'/'opus'/'fable' resolve to the current family.
 investigatorModel = "sonnet"
 # Reviewer model alias or full ID; 'sonnet'/'haiku'/'opus'/'fable' resolve to the current family.
-reviewerModel = "claude-opus-4-8"
+reviewerModel = "claude-opus-5"
 permissionMode = "bypassPermissions"
 allowDangerouslySkipPermissions = true
 # codex-chat also injects the Claude SDK native "Agent" tool for all

@@ -113,7 +113,7 @@ const claudeSubagentSchema = z.object({
   pathToClaudeCodeExecutable: z.string().default(""),
   implementerModel: z.string().default("sonnet"),
   investigatorModel: z.string().default("sonnet"),
-  reviewerModel: z.string().default("claude-opus-4-8"),
+  reviewerModel: z.string().default("claude-opus-5"),
   permissionMode: claudePermissionModeSchema.default("bypassPermissions"),
   allowDangerouslySkipPermissions: z.boolean().default(true),
   allowedTools: z.array(z.string()).default(["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep"]),

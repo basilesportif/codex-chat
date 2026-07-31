@@ -83,7 +83,7 @@ const DEFAULT_CLAUDE_SUBAGENT_CONFIG: ClaudeSubagentConfig = defaultClaudeSubage
 
 const CLAUDE_SYNTHETIC_ACTIVE_TURN_ID = "claude-agent-sdk-stream";
 
-const CLAUDE_FAST_MODE_MODEL_PREFIXES = ["claude-opus-4-7", "claude-opus-4-8"];
+const CLAUDE_FAST_MODE_MODEL_PREFIXES = ["claude-opus-5", "claude-opus-4-7", "claude-opus-4-8"];
 const CLAUDE_AGENT_TOOL_NAME = "Agent";
 
 function claudeNativeAgents(cfg: ClaudeSubagentConfig): Record<string, ClaudeAgentDefinition> {
@@ -155,7 +155,7 @@ function uniqueToolNames(tools: string[]): string[] {
 }
 
 /**
- * Claude fast mode is a premium speed tier available only on Opus 4.8/4.7.
+ * Claude fast mode is a premium speed tier available only on Opus models (Opus 5, 4.8, 4.7).
  * An empty model means the SDK default — treat it as supported and let the
  * SDK decide. A serviceTier of "fast" on any other Claude model runs at the
  * standard tier; callers surface that downgrade in user-facing status.
@@ -739,7 +739,10 @@ class ClaudeAgentSdkSession {
     this.clearSettleGraceTimer();
     await this.appendEvent({ event: "claude_sdk_message", at: nowIso(), backend: "claude_agent_sdk", raw: message });
     if (message.type === "system" && message.subtype === "init") {
-      const apiKeySource = typeof message.apiKeySource === "string" ? message.apiKeySource : "";
+      // SDK 0.3.220 narrowed the apiKeySource union to API-key sources only
+      // (OAuth sessions omit the field); compare as plain string so the historic
+      // oauth/none values stay tolerated while any API-key source fails closed.
+      const apiKeySource: string = typeof message.apiKeySource === "string" ? message.apiKeySource : "";
       if ((apiKeySource && apiKeySource !== "oauth" && apiKeySource !== "none") || !this.oauthInitializationVerified) {
         const error = `Claude Agent SDK backend requires OAuth credentials; SDK init reported apiKeySource=${message.apiKeySource}.`;
         this.query?.close();

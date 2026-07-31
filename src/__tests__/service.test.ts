@@ -1001,6 +1001,19 @@ describe("service supervisor", () => {
     expect(prompt.indexOf("Telegram reply context")).toBeLessThan(prompt.indexOf("User content:"));
   });
 
+  test("injects the active main-loop runtime identity before user content", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = makeService(config, logger);
+    const prompt = (service as unknown as { formatEventForCodex(event: UserEvent): string }).formatEventForCodex(
+      userEvent(603, "what runtime is handling this turn?")
+    );
+
+    expect(prompt).toContain("Main-loop runtime (service-stamped, authoritative):");
+    expect(prompt).toContain("provider=codex model=gpt-5.6-luna effort=xhigh tier=fast");
+    expect(prompt.indexOf("Main-loop runtime")).toBeLessThan(prompt.indexOf("User content:"));
+  });
+
   test("injects Brain subject manifest headers before user content when resolved", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
@@ -1170,6 +1183,32 @@ describe("service supervisor", () => {
     await waitForIdle(service);
 
     expect(sendText).toHaveBeenCalledWith(253768951, "I checked your calendar.", 503, undefined);
+  });
+
+  test("stamps main-loop disclosures in clean text and send_text directives", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = makeService(config, logger);
+    await service.state.init();
+    const outputs = [
+      "main_loop: model=claude-sonnet-5 effort=high tier=standard\n\nPlain answer.",
+      `\`\`\`codex-chat
+{"version":1,"actions":[{"type":"send_text","idempotencyKey":"stamp-main-loop-1","text":"main_loop[model=claude-sonnet-5 effort=high tier=standard]\\n\\nDirective answer."}]}
+\`\`\``
+    ];
+    vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
+      yield { type: "final", text: outputs.shift() ?? "" };
+    });
+    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+
+    await service.enqueueUserEvent(userEvent(506, "plain disclosure"));
+    await waitForIdle(service);
+    await service.enqueueUserEvent(userEvent(507, "directive disclosure"));
+    await waitForIdle(service);
+
+    const canonical = "main_loop: model=gpt-5.6-luna effort=xhigh tier=fast";
+    expect(sendText).toHaveBeenCalledWith(253768951, `${canonical}\n\nPlain answer.`, 506);
+    expect(sendText).toHaveBeenCalledWith(253768951, `${canonical}\n\nDirective answer.`, 507, undefined);
   });
 
   test("defaults same-chat send_text directives to reply to the origin message", async () => {

@@ -59,6 +59,7 @@ import { AppServerTranscriber } from "./app-server-transcription.js";
 import { sanitizeChildProcessEnv } from "./env.js";
 import { SlackGateway } from "./slack.js";
 import { hydrateSlackContextForEvent } from "./slack-context.js";
+import { formatRuntimeIdentityBlock, mainLoopRuntimeIdentity, stampMainLoopDisclosure } from "./main-loop-disclosure.js";
 import {
   slackContextTelemetryObservation,
   slackOutboundTelemetryObservation,
@@ -1648,7 +1649,7 @@ export class ServiceSupervisor {
       if (this.isStaleTurnToken(turnToken)) return;
       const parsed = parseDirectives(output);
       if (parsed.cleanText && this.canSendTextToOutputTarget(event.outputTarget)) {
-        await this.sendTextToOutputTarget(event.outputTarget, parsed.cleanText);
+        await this.sendTextToOutputTarget(event.outputTarget, this.stampMainLoopText(parsed.cleanText));
         userFacingDelivered = true;
       }
       const finalPass = await this.executePendingDirectives(parsed, preExecutedActions, event, turnId, turnToken);
@@ -2060,8 +2061,9 @@ export class ServiceSupervisor {
     try {
       const defaultChatId = origin.chatId;
       if (action.type === "send_text") {
+        const text = this.stampMainLoopText(action.text);
         if (action.chatId === undefined && origin.outputTarget?.surfaceKind === "slack") {
-          await this.sendTextToOutputTarget(origin.outputTarget, action.text, action.format, true);
+          await this.sendTextToOutputTarget(origin.outputTarget, text, action.format, true);
         } else {
           const chatId = action.chatId ?? this.requireChat(defaultChatId);
           await this.sendTextToOutputTarget(
@@ -2071,7 +2073,7 @@ export class ServiceSupervisor {
               messageId: this.directiveReplyToMessageId(chatId, action.replyToMessageId, origin),
               routingPolicy: action.chatId === undefined ? "source_reply" : "explicit_target"
             }),
-            action.text,
+            text,
             action.format,
             true
           );
@@ -2993,7 +2995,8 @@ export class ServiceSupervisor {
       event.source === "slack" && typeof event.metadata?.slackMessageTs === "string" ? `slack message_ts: ${event.metadata.slackMessageTs}` : "",
       event.sourceTimestamp ? `source_timestamp: ${event.sourceTimestamp}` : "",
       `received_at: ${event.receivedAt}`,
-      formatTemporalAnchorBlock(temporalAnchor)
+      formatTemporalAnchorBlock(temporalAnchor),
+      formatRuntimeIdentityBlock(mainLoopRuntimeIdentity(this.config, this.mainSwitcher.provider))
     ].filter(Boolean).join("\n");
     const attachments = event.attachments.length > 0
       ? `\nAttachments:\n${event.attachments.map((item) => this.formatAttachmentForCodex(item)).join("\n")}`
@@ -3097,6 +3100,22 @@ export class ServiceSupervisor {
   private requireChat(chatId?: number): number {
     if (!chatId) throw new Error("Directive did not include chatId and the origin event has no Telegram chat");
     return chatId;
+  }
+
+  private stampMainLoopText(text: string): string {
+    const identity = mainLoopRuntimeIdentity(this.config, this.mainSwitcher.provider);
+    const stamped = stampMainLoopDisclosure(text, identity);
+    if (stamped !== text) {
+      const beforeModel = [...text.matchAll(/\bmain_loop\s*(?::\s*|\[\s*)model\s*=\s*([^\s,\]]+)/g)]
+        .map((match) => match[1])
+        .filter((model): model is string => model !== undefined)
+        .join(",");
+      this.logger.info(
+        { component: "service", event: "main_loop_disclosure_stamped", beforeModel, afterModel: identity.model },
+        "Stamped main-loop runtime disclosure"
+      );
+    }
+    return stamped;
   }
 
   private canSendTextToOutputTarget(target: UserEvent["outputTarget"]): boolean {

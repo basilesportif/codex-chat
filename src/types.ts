@@ -291,36 +291,50 @@ export const USER_EVENT_SOURCES = ["telegram", "slack", "loop", "monitor", "suba
 type MissingUserEventSource = Exclude<UserEvent["source"], (typeof USER_EVENT_SOURCES)[number]>;
 const _userEventSourcesAreExhaustive: Record<MissingUserEventSource, never> = {};
 
-export interface CodexTurnInput {
+export type MainAgentProvider = "codex" | "claude_agent_sdk";
+
+export interface MainAgentTurnInput {
   text: string;
   attachments?: Attachment[];
   source?: string;
   turnId?: string;
 }
 
-export type CodexEvent =
+export type MainAgentEvent =
   | { type: "delta"; text: string }
   | { type: "final"; text: string }
   | { type: "error"; message: string; raw?: unknown }
   | { type: "status"; message: string; raw?: unknown };
 
-export interface CodexHealth {
+export interface MainAgentHealth {
   ok: boolean;
   transport: string;
   detail?: string;
   sessionId?: string;
+  provider?: MainAgentProvider;
 }
 
-export interface CodexClient {
+export interface MainAgentClient {
   start(): Promise<void>;
   stop(): Promise<void>;
-  health(): Promise<CodexHealth>;
-  sendTurn(input: CodexTurnInput): AsyncIterable<CodexEvent>;
+  health(): Promise<MainAgentHealth>;
+  sendTurn(input: MainAgentTurnInput): AsyncIterable<MainAgentEvent>;
   /** Drop the current main thread/session and create a fresh one. */
-  resetSession?(reason?: string): Promise<CodexHealth>;
+  resetSession?(reason?: string): Promise<MainAgentHealth>;
   /** Optional — clients may expose recent app-server output for introspection. */
   getRecentLogs?(n?: number, includeRaw?: boolean): string[];
+  /** Optional: bootstrap text queued when the behavior pack changed since the session last saw it. */
+  consumePendingBehaviorRefresh?(): string | undefined;
 }
+
+/** @deprecated Use MainAgentTurnInput. */
+export type CodexTurnInput = MainAgentTurnInput;
+/** @deprecated Use MainAgentEvent. */
+export type CodexEvent = MainAgentEvent;
+/** @deprecated Use MainAgentHealth. */
+export type CodexHealth = MainAgentHealth;
+/** @deprecated Use MainAgentClient. */
+export type CodexClient = MainAgentClient;
 
 export interface StoredAction {
   id: string;

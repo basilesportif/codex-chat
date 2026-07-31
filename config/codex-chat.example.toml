@@ -11,6 +11,11 @@ logLevel = "info"
 timezone = "America/New_York"
 ipcSocket = "data/run/codex-chat.sock"
 
+[mainAgent]
+# Selects the main-loop provider. claude_agent_sdk requires Claude subscription
+# OAuth. The [codex] section remains the Codex adapter's settings.
+provider = "codex"
+
 [codex]
 binary = "codex"
 transport = "app-server"

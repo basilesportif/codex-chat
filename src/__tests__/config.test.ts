@@ -13,6 +13,7 @@ const overrideEnvNames = [
   "CODEX_CHAT_TIMEZONE",
   "CODEX_CHAT_STATE_DIR",
   "CODEX_CHAT_LOG_LEVEL",
+  "CODEX_CHAT_MAIN_PROVIDER",
   "CODEX_CHAT_CODEX_BINARY",
   "CODEX_CHAT_CODEX_MODEL",
   "CODEX_CHAT_CODEX_EFFORT",
@@ -102,6 +103,7 @@ userIds = [12345]
     const config = await loadConfig(path);
 
     expect(config.codex.model).toBe("gpt-test");
+    expect(config.mainAgent.provider).toBe("codex");
     expect(config.service.timezone).toBe("America/New_York");
     expect(config.codex.sandbox).toBe("danger-full-access");
     expect(config.codex.serviceTier).toBe("fast");
@@ -213,6 +215,7 @@ maxThreadMessages = 5
   });
 
   test("uses environment overrides after file values", async () => {
+    process.env.CODEX_CHAT_MAIN_PROVIDER = "claude_agent_sdk";
     process.env.CODEX_CHAT_CODEX_MODEL = "from-env";
     process.env.CODEX_CHAT_CODEX_SERVICE_TIER = "standard";
     process.env.CODEX_CHAT_SLACK_ENABLED = "true";
@@ -239,6 +242,7 @@ botTokenEnv = "CUSTOM_SLACK_BOT_TOKEN"
     const config = await loadConfig(path);
 
     expect(config.codex.model).toBe("from-env");
+    expect(config.mainAgent.provider).toBe("claude_agent_sdk");
     expect(config.codex.serviceTier).toBe("standard");
     expect(config.subagents.backend).toBe("codex_exec");
     expect(config.telegramBotToken).toBe("token-from-custom-env");
@@ -248,6 +252,13 @@ botTokenEnv = "CUSTOM_SLACK_BOT_TOKEN"
     expect(config.slack.publicBaseUrl).toBe("https://brain.decisive-outcomes.com");
     expect(config.slackSigningSecret).toBe("slack-signing-secret");
     expect(config.slackBotToken).toBe("xoxb-test-token");
+  });
+
+  test("rejects invalid main-agent provider values", async () => {
+    process.env.CODEX_CHAT_MAIN_PROVIDER = "invalid-provider";
+    const path = await tempConfig("version = 1\n");
+
+    await expect(loadConfig(path)).rejects.toThrow();
   });
 
   test("allows transcription model env overrides", async () => {

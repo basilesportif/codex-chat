@@ -300,6 +300,7 @@ export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient 
       ok: this.connected && this.isChildAlive(),
       transport: "app-server",
       sessionId: this.sessionId,
+      provider: "codex",
       detail: this.connected ? "connected" : "not connected"
     };
   }

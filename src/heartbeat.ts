@@ -1,5 +1,5 @@
 import type { Logger } from "pino";
-import type { CodexClient, CodexHealth } from "./types.js";
+import type { MainAgentClient, MainAgentHealth } from "./types.js";
 
 /**
  * Periodic Codex health probe with persistent ops alerting.
@@ -21,7 +21,7 @@ export class CodexHeartbeat {
   private lastAlertAt?: number;
 
   constructor(
-    private readonly codex: CodexClient,
+    private readonly codex: MainAgentClient,
     private readonly notifyOps: (text: string) => Promise<void>,
     private readonly logger: Logger,
     private readonly intervalMs = 15000,
@@ -58,7 +58,7 @@ export class CodexHeartbeat {
     }
   }
 
-  private async handleHealthy(health: CodexHealth): Promise<void> {
+  private async handleHealthy(health: MainAgentHealth): Promise<void> {
     this.logger.debug({ component: "heartbeat", event: "healthy", health }, "Codex heartbeat healthy");
     this.consecutiveFailures = 0;
     if (!this.wasHealthy) {
@@ -72,7 +72,7 @@ export class CodexHeartbeat {
     }
   }
 
-  private async handleFailure(health?: CodexHealth, error?: unknown): Promise<void> {
+  private async handleFailure(health?: MainAgentHealth, error?: unknown): Promise<void> {
     this.consecutiveFailures += 1;
     const details = {
       component: "heartbeat",

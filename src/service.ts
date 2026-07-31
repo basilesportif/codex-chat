@@ -12,6 +12,7 @@ import { BehaviorPack } from "./behavior.js";
 import { CAPABILITY_DENIED_MESSAGE, OUTSIDE_BRAIN_SCOPE_REASON, assertBrainCapabilitySourceAvailable, authorize, authorizeOutput, brainCapabilityStorePath, capabilityGrantFromDecision, formatBrainSubjectManifestBlock, loadBrainCapabilityStore, outOfScopeAllowedDecision, requirementForInboundEvent, resolveSubjectManifest, type BrainCapabilityStore } from "./capabilities.js";
 import { capabilityRegistry, registryVersion, type CapabilityId } from "./capability-registry.js";
 import { AppServerCodexClient, CodexCrashInfo } from "./codex.js";
+import { createMainAgentClient } from "./main-agent.js";
 import {
   consumeDeployMarker,
   DeployMarker,
@@ -66,7 +67,7 @@ import {
 } from "./slack-telemetry.js";
 import { TelegramGateway } from "./telegram.js";
 import { formatTemporalAnchorBlock, temporalAnchorForEvent } from "./temporal.js";
-import { ActorContext, CapabilityDecision, CodexClient, JsonRecord, StoredAction, SubagentBackendKind, SubagentJob, SubagentOwnerType, SubagentResultTarget, UserEvent } from "./types.js";
+import { ActorContext, CapabilityDecision, JsonRecord, MainAgentClient, StoredAction, SubagentBackendKind, SubagentJob, SubagentOwnerType, SubagentResultTarget, UserEvent } from "./types.js";
 import { compactText, inlineCode, makeId, nowIso } from "./util.js";
 
 export const INJECT_TELEGRAM_USER_ID = 253768951;
@@ -297,7 +298,8 @@ export class ServiceSupervisor {
   readonly files: FileStore;
   readonly telegram: TelegramGateway;
   readonly slack: SlackGateway;
-  readonly codex: CodexClient;
+  readonly codex: MainAgentClient;
+  private readonly appServerClient?: AppServerCodexClient;
   readonly loops: LoopManager;
   readonly monitors: MonitorManager;
   readonly api: ApiGateway;
@@ -348,7 +350,7 @@ export class ServiceSupervisor {
     if (config.codex.transport !== "app-server") {
       throw new Error(DISABLED_EXEC_RESUME_MESSAGE);
     }
-    this.codex = new AppServerCodexClient(config, this.state, this.behavior, logger, (reason, info) => {
+    const { client, appServerClient } = createMainAgentClient(config, this.state, this.behavior, logger, (reason, info) => {
       // Capture the active chat synchronously: by the time restartCodex's
       // first await resumes, processEventSafe's .finally may have already
       // cleared activeTurnEvent in response to the now-failed sendTurn
@@ -359,7 +361,12 @@ export class ServiceSupervisor {
         this.logger.error({ component: "service", event: "restart_failed", error }, "Codex restart failed");
       });
     });
-    this.employees = new EmployeeManager(config, this.state, logger, this.codex as AppServerCodexClient);
+    this.codex = client;
+    this.appServerClient = appServerClient;
+    if (config.employees.enabled && !this.appServerClient) {
+      throw new Error("Claude main loop does not support durable Employees yet");
+    }
+    this.employees = new EmployeeManager(config, this.state, logger, this.appServerClient);
     this.subagents = new SubagentManager(
       config,
       this.behavior,
@@ -772,7 +779,7 @@ export class ServiceSupervisor {
    * synthetic turn — otherwise the model keeps following the stale copy.
    */
   private async enqueueBehaviorRefreshIfPending(): Promise<void> {
-    const refresh = (this.codex as AppServerCodexClient).consumePendingBehaviorRefresh();
+    const refresh = this.codex.consumePendingBehaviorRefresh?.();
     if (!refresh) return;
     this.logger.info({ component: "service", event: "behavior_refresh_enqueued" }, "enqueueing behavior-refresh turn for resumed main session");
     await this.enqueueSynthetic(

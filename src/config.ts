@@ -177,6 +177,9 @@ const configSchema = z.object({
     timezone: ianaTimeZoneSchema.default(DEFAULT_USER_TIME_ZONE),
     ipcSocket: z.string().default("data/run/codex-chat.sock"),
   }).prefault({}),
+  mainAgent: z.object({
+    provider: z.enum(["codex", "claude_agent_sdk"]).default("codex"),
+  }).prefault({}),
   codex: z.object({
     binary: z.string().default("codex"),
     transport: z.string().default("app-server"),
@@ -501,6 +504,7 @@ export const ENV_OVERRIDE_SPECS: EnvOverrideSpec[] = [
     { name: "CODEX_CHAT_TIMEZONE", path: ["service", "timezone"] },
     { name: "CODEX_CHAT_STATE_DIR", path: ["service", "stateDir"] },
     { name: "CODEX_CHAT_LOG_LEVEL", path: ["service", "logLevel"] },
+    { name: "CODEX_CHAT_MAIN_PROVIDER", path: ["mainAgent", "provider"] },
     { name: "CODEX_CHAT_CODEX_BINARY", path: ["codex", "binary"] },
     { name: "CODEX_CHAT_CODEX_MODEL", path: ["codex", "model"] },
     { name: "CODEX_CHAT_CODEX_EFFORT", path: ["codex", "effort"] },

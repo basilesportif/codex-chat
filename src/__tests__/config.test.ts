@@ -25,6 +25,9 @@ const overrideEnvNames = [
   "CODEX_CHAT_SUBAGENTS_BACKEND",
   "CODEX_CHAT_SUBAGENTS_CLAUDE_ENABLED",
   "CODEX_CHAT_SUBAGENTS_CLAUDE_PATH",
+  "CODEX_CHAT_SUBAGENTS_CLAUDE_IMPLEMENTER_MODEL",
+  "CODEX_CHAT_SUBAGENTS_CLAUDE_INVESTIGATOR_MODEL",
+  "CODEX_CHAT_SUBAGENTS_CLAUDE_REVIEWER_MODEL",
   "CODEX_CHAT_SUBAGENTS_CLAUDE_PERMISSION_MODE",
   "CODEX_CHAT_SUBAGENTS_CLAUDE_ALLOWED_TOOLS",
   "CODEX_CHAT_SUBAGENTS_CLAUDE_DISALLOWED_TOOLS",
@@ -111,6 +114,9 @@ userIds = [12345]
     expect(config.subagents.claude).toMatchObject({
       enabled: false,
       pathToClaudeCodeExecutable: "",
+      implementerModel: "sonnet",
+      investigatorModel: "sonnet",
+      reviewerModel: "claude-opus-4-8",
       permissionMode: "bypassPermissions",
       allowDangerouslySkipPermissions: true,
       allowedTools: ["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep"],
@@ -155,6 +161,9 @@ maxThreadMessages = 5
     expect(config.subagents.claude).toEqual({
       enabled: false,
       pathToClaudeCodeExecutable: "",
+      implementerModel: "sonnet",
+      investigatorModel: "sonnet",
+      reviewerModel: "claude-opus-4-8",
       permissionMode: "bypassPermissions",
       allowDangerouslySkipPermissions: true,
       allowedTools: ["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep"],
@@ -342,6 +351,9 @@ fastMode = false
     process.env.CODEX_CHAT_SUBAGENTS_BACKEND = "claude_agent_sdk";
     process.env.CODEX_CHAT_SUBAGENTS_CLAUDE_ENABLED = "true";
     process.env.CODEX_CHAT_SUBAGENTS_CLAUDE_PATH = "/usr/local/bin/claude";
+    process.env.CODEX_CHAT_SUBAGENTS_CLAUDE_IMPLEMENTER_MODEL = "haiku";
+    process.env.CODEX_CHAT_SUBAGENTS_CLAUDE_INVESTIGATOR_MODEL = "claude-sonnet-5";
+    process.env.CODEX_CHAT_SUBAGENTS_CLAUDE_REVIEWER_MODEL = "opus";
     process.env.CODEX_CHAT_SUBAGENTS_CLAUDE_PERMISSION_MODE = "plan";
     process.env.CODEX_CHAT_SUBAGENTS_CLAUDE_ALLOWED_TOOLS = "Read, Glob";
     process.env.CODEX_CHAT_SUBAGENTS_CLAUDE_DISALLOWED_TOOLS = "Bash";
@@ -354,6 +366,9 @@ fastMode = false
     expect(config.subagents.claude).toMatchObject({
       enabled: true,
       pathToClaudeCodeExecutable: "/usr/local/bin/claude",
+      implementerModel: "haiku",
+      investigatorModel: "claude-sonnet-5",
+      reviewerModel: "opus",
       permissionMode: "plan",
       allowedTools: ["Read", "Glob"],
       disallowedTools: ["Bash"],

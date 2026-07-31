@@ -79,23 +79,62 @@ const CLAUDE_SYNTHETIC_ACTIVE_TURN_ID = "claude-agent-sdk-stream";
 
 const CLAUDE_FAST_MODE_MODEL_PREFIXES = ["claude-opus-4-7", "claude-opus-4-8"];
 const CLAUDE_AGENT_TOOL_NAME = "Agent";
-const CLAUDE_NATIVE_REVIEWER_AGENT_NAME = "reviewer";
-const CLAUDE_NATIVE_REVIEWER_MODEL = "claude-opus-4-8";
 
-const CLAUDE_NATIVE_REVIEWER_AGENT: ClaudeAgentDefinition = {
-  description: "Review code changes for bugs, regressions, missing tests, and operational risks.",
-  model: CLAUDE_NATIVE_REVIEWER_MODEL,
-  effort: "high",
-  tools: ["Read", "Glob", "Grep", "Bash"],
-  disallowedTools: ["Write", "Edit", "MultiEdit"],
-  prompt: [
-    "You are a Claude-native reviewer subagent launched via the Claude Agent SDK Agent tool from a codex-chat Claude-backed child session.",
-    "Review code changes for bugs, regressions, missing tests, and operational risks.",
-    "Focus on actionable findings only. Do not edit files unless explicitly instructed by the parent session.",
-    "When reviewing a diff or changed paths, inspect the relevant files and tests before concluding.",
-    "Output findings first, ordered by severity, with file and line references when possible. If no issues are found, say so and mention any residual uncertainty."
+function claudeNativeAgents(cfg: ClaudeSubagentConfig): Record<string, ClaudeAgentDefinition> {
+  return {
+    implementer: {
+      description: "Implement a bounded, well-specified coding task: write/edit files and run tests.",
+      model: cfg.implementerModel,
+      effort: "high",
+      tools: ["Read", "Glob", "Grep", "Bash", "Write", "Edit", "MultiEdit"],
+      prompt: [
+        "You are a focused coding subagent launched from a codex-chat Claude-backed parent session.",
+        "Implement exactly the delegated task — nothing more.",
+        "Run the repo's relevant tests/build and report actual results honestly; never claim untested success.",
+        "Report every file changed with a short summary of each change and any deviations from the brief.",
+        "Do NOT `git commit`, `git push`, or alter git state — the parent session reviews and decides what lands.",
+        "If the task is ambiguous or requires out-of-scope changes, stop and report the blocker instead of improvising."
+      ].join("\n")
+    },
+    investigator: {
+      description: "Investigate code/repos/logs and report findings; read-only.",
+      model: cfg.investigatorModel,
+      effort: "medium",
+      tools: ["Read", "Glob", "Grep", "Bash"],
+      disallowedTools: ["Write", "Edit", "MultiEdit"],
+      prompt: [
+        "You are a read-only investigation subagent launched from a codex-chat Claude-backed parent session.",
+        "Answer the parent's question with concrete evidence, including paths, line references, and command output.",
+        "Do not modify any file or git state.",
+        "Report uncertainty explicitly."
+      ].join("\n")
+    },
+    reviewer: {
+      description: "Review code changes for bugs, regressions, missing tests, and operational risks.",
+      model: cfg.reviewerModel,
+      effort: "high",
+      tools: ["Read", "Glob", "Grep", "Bash"],
+      disallowedTools: ["Write", "Edit", "MultiEdit"],
+      prompt: [
+        "You are a Claude-native reviewer subagent launched via the Claude Agent SDK Agent tool from a codex-chat Claude-backed child session.",
+        "Review code changes for bugs, regressions, missing tests, and operational risks.",
+        "Focus on actionable findings only. Do not edit files unless explicitly instructed by the parent session.",
+        "When reviewing a diff or changed paths, inspect the relevant files and tests before concluding.",
+        "Output findings first, ordered by severity, with file and line references when possible. If no issues are found, say so and mention any residual uncertainty."
+      ].join("\n")
+    }
+  };
+}
+
+export function nativeAgentGuidance(agents: Record<string, ClaudeAgentDefinition>): string {
+  const model = (name: string) => agents[name]?.model ?? "inherit";
+  return [
+    `Native subagents (Agent tool) available in this session: implementer (${model("implementer")}) — writes code and runs tests; investigator (${model("investigator")}) — read-only research; reviewer (${model("reviewer")}) — read-only code review.`,
+    "For multi-file or parallelizable coding work, prefer orchestrating: break the task into bounded briefs, dispatch implementer subagents (parallel when independent), then review their diffs yourself or via the reviewer agent, and iterate until the work meets your standards.",
+    "Keep one concern per subagent and pass each a complete, self-contained brief.",
+    "You remain responsible for the final result reported to your parent."
   ].join("\n")
-};
+}
 
 function uniqueToolNames(tools: string[]): string[] {
   const seen = new Set<string>();
@@ -471,7 +510,8 @@ class ClaudeAgentSdkSession {
     this.input.job.activeTurnId = CLAUDE_SYNTHETIC_ACTIVE_TURN_ID;
     await this.input.onJobUpdated(this.input.job);
     this.pendingUserTurns += 1;
-    this.queue.push(await this.buildUserMessage(this.input.assembledPrompt, this.input.images));
+    const initialPrompt = `${this.input.assembledPrompt}\n\n${nativeAgentGuidance(options.agents ?? {})}`;
+    this.queue.push(await this.buildUserMessage(initialPrompt, this.input.images));
 
     return {
       kind: "claude_agent_sdk",
@@ -652,9 +692,7 @@ class ClaudeAgentSdkSession {
   }
 
   private claudeSdkAgents(): Record<string, ClaudeAgentDefinition> {
-    return {
-      [CLAUDE_NATIVE_REVIEWER_AGENT_NAME]: CLAUDE_NATIVE_REVIEWER_AGENT
-    };
+    return claudeNativeAgents(claudeSubagentConfig(this.config));
   }
 
   private shouldApplyFastMode(): boolean {

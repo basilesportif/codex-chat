@@ -122,6 +122,9 @@ function enableClaude(config: AppConfig): AppConfig {
   config.subagents.claude = {
     enabled: true,
     pathToClaudeCodeExecutable: "",
+    implementerModel: "sonnet",
+    investigatorModel: "sonnet",
+    reviewerModel: "claude-opus-4-8",
     permissionMode: "bypassPermissions",
     allowDangerouslySkipPermissions: true,
     allowedTools: ["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep"],
@@ -472,11 +475,12 @@ describe("Claude Agent SDK subagent backend", () => {
     });
     vi.doMock("@anthropic-ai/claude-agent-sdk", () => ({ query: queryMock }));
 
-    const { ClaudeAgentSdkChildAgentBackend } = await import("../subagent-backends.js");
+    const { ClaudeAgentSdkChildAgentBackend, nativeAgentGuidance } = await import("../subagent-backends.js");
     const config = enableClaude(testConfig(root));
+    config.subagents.claude!.implementerModel = "haiku";
     const backend = new ClaudeAgentSdkChildAgentBackend(config, fakeLogger() as never);
     const job = subagentJob(root);
-    const started = await backend.start({
+    const startInput: Parameters<typeof backend.start>[0] = {
       job,
       assembledPrompt: "do claude work",
       lastMessagePath: join(root, "last-message.md"),
@@ -490,7 +494,8 @@ describe("Claude Agent SDK subagent backend", () => {
       images: [],
       brainSubjectId: "person:person_tim",
       onJobUpdated: vi.fn().mockResolvedValue(undefined)
-    });
+    };
+    const started = await backend.start(startInput);
 
     await expect(started.finished).resolves.toMatchObject({ code: 0, signal: null });
     expect(queryMock).toHaveBeenCalledOnce();
@@ -508,7 +513,27 @@ describe("Claude Agent SDK subagent backend", () => {
     expect(options.tools).toEqual(["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep", "Agent"]);
     expect(options.allowedTools).toEqual(options.tools);
     expect(options.disallowedTools).toEqual([]);
-    expect(options.agents).toMatchObject({
+    const agents = options.agents as Record<string, {
+      model?: string;
+      effort?: string;
+      tools?: string[];
+      disallowedTools?: string[];
+    }>;
+    expect(Object.keys(agents)).toEqual(["implementer", "investigator", "reviewer"]);
+    expect(agents).toMatchObject({
+      implementer: {
+        description: expect.stringContaining("Implement a bounded"),
+        model: "haiku",
+        effort: "high",
+        tools: ["Read", "Glob", "Grep", "Bash", "Write", "Edit", "MultiEdit"]
+      },
+      investigator: {
+        description: expect.stringContaining("read-only"),
+        model: "sonnet",
+        effort: "medium",
+        tools: ["Read", "Glob", "Grep", "Bash"],
+        disallowedTools: ["Write", "Edit", "MultiEdit"]
+      },
       reviewer: {
         description: expect.stringContaining("Review code changes"),
         model: "claude-opus-4-8",
@@ -518,10 +543,15 @@ describe("Claude Agent SDK subagent backend", () => {
         prompt: expect.stringContaining("findings first")
       }
     });
-    expect(prompts[0]).toMatchObject({
-      type: "user",
-      message: { role: "user", content: [{ type: "text", text: "do claude work" }] }
-    });
+    expect(agents.implementer?.tools).toEqual(expect.arrayContaining(["Write", "Edit"]));
+    expect(agents.investigator?.tools).not.toEqual(expect.arrayContaining(["Write", "Edit"]));
+    expect(agents.reviewer?.tools).not.toEqual(expect.arrayContaining(["Write", "Edit"]));
+    const guidance = nativeAgentGuidance(agents as never);
+    const initialText = (prompts[0] as { message: { content: Array<{ text: string }> } }).message.content[0]?.text;
+    expect(initialText).toBe(`do claude work\n\n${guidance}`);
+    expect(initialText).toContain("implementer (haiku)");
+    expect(startInput.assembledPrompt).toBe("do claude work");
+    expect(JSON.stringify(job)).not.toContain("Native subagents");
     expect(job.backendThreadId).toBe("claude-session");
     await expect(readFile(join(root, "last-message.md"), "utf8")).resolves.toBe("final answer");
     const events = await readFile(join(root, "events.jsonl"), "utf8");
@@ -634,7 +664,7 @@ describe("Claude Agent SDK subagent backend", () => {
     expect(options.disallowedTools).toEqual(["Bash"]);
     const events = await readFile(join(root, "events.jsonl"), "utf8");
     expect(events).toContain('"agentToolEnabled":true');
-    expect(events).toContain('"nativeAgents":["reviewer"]');
+    expect(events).toContain('"nativeAgents":["implementer","investigator","reviewer"]');
     await backend.shutdown();
   });
 
@@ -1061,8 +1091,7 @@ describe("Claude Agent SDK subagent backend", () => {
     });
     const interrupt = vi.fn().mockRejectedValue(new Error("interrupt failed"));
     const close = vi.fn(() => resolveClosed());
-    vi.doMock("@anthropic-ai/claude-agent-sdk", () => ({
-      query: vi.fn((params: { prompt: AsyncIterable<unknown> }) => {
+    const queryMock = vi.fn((params: { prompt: AsyncIterable<unknown>; options: Record<string, unknown> }) => {
         async function* messages() {
           const iterator = params.prompt[Symbol.asyncIterator]();
           await iterator.next();
@@ -1074,8 +1103,8 @@ describe("Claude Agent SDK subagent backend", () => {
           interrupt,
           close
         });
-      })
-    }));
+      });
+    vi.doMock("@anthropic-ai/claude-agent-sdk", () => ({ query: queryMock }));
 
     const { ClaudeAgentSdkChildAgentBackend } = await import("../subagent-backends.js");
     const backend = new ClaudeAgentSdkChildAgentBackend(enableClaude(testConfig(root)), fakeLogger() as never);
@@ -1094,6 +1123,8 @@ describe("Claude Agent SDK subagent backend", () => {
       onJobUpdated: vi.fn().mockResolvedValue(undefined)
     });
 
+    const options = queryMock.mock.calls[0]?.[0].options as { agents: Record<string, unknown> };
+    expect(Object.keys(options.agents)).toEqual(["implementer", "investigator", "reviewer"]);
     await backend.interrupt(job.id, "test");
     expect(interrupt).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalledOnce();

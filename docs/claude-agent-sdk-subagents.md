@@ -42,8 +42,20 @@ Anthropic's current model-ID convention for Claude 4.6 and later uses dateless p
 - Claude has no Codex `serviceTier` equivalent. codex-chat records the requested tier for observability. When `serviceTier: "fast"` and `[subagents.claude].fastMode = true`, codex-chat passes Claude Code fast-mode settings when the installed SDK supports them; otherwise tier is ignored.
 - `codexProfile` and `modelProvider` are Codex-provider concepts; the service **rejects** a Claude-routed dispatch that includes them. `serviceTierMode` is resolved for observability only.
 - The backend is steerable while its SDK streaming input session is active; `agent steer <ref> <text>` enqueues a follow-up user message in the same Claude session.
-- Every Claude-backed codex-chat child session gets the SDK native `Agent` tool plus programmatic agent definitions. This is intentionally separate from codex-chat-managed top-level routing: a Claude child can ask its own SDK session to launch a nested native agent, but Telegram/service dispatch semantics are unchanged.
-- The built-in native `reviewer` agent is pinned to `claude-opus-4-8`, uses Claude `high` effort, and is prompted for findings-first code review. Its tool list is intentionally narrower than the parent (`Read`, `Glob`, `Grep`, `Bash`) and explicitly disallows edit tools.
+
+## Native nested agents
+
+Every Claude-backed codex-chat child session gets the SDK-native `Agent` tool and three programmatic agent definitions:
+
+- `implementer` writes and edits code, runs relevant tests/builds, and uses `high` effort. Its model comes from `[subagents.claude].implementerModel` (default `sonnet`).
+- `investigator` performs read-only code, repository, and log research with `medium` effort. Its model comes from `[subagents.claude].investigatorModel` (default `sonnet`), and edit tools are explicitly disallowed.
+- `reviewer` performs findings-first, read-only code review with `high` effort. Its model comes from `[subagents.claude].reviewerModel` (default `claude-opus-4-8`), preserving the previous reviewer behavior by default.
+
+The corresponding environment overrides are `CODEX_CHAT_SUBAGENTS_CLAUDE_IMPLEMENTER_MODEL`, `CODEX_CHAT_SUBAGENTS_CLAUDE_INVESTIGATOR_MODEL`, and `CODEX_CHAT_SUBAGENTS_CLAUDE_REVIEWER_MODEL`. Aliases and full Claude model IDs are passed through to the SDK unchanged.
+
+Before the backend pushes the first user message, it appends generated guidance naming these agents, their configured models, their capabilities, and the preferred implement-review orchestration pattern. The stored `SubagentJob` prompt is not changed, and later steering messages are not augmented.
+
+Native nested agents run **inside** the parent Claude session; they are not separate `SubagentManager` jobs. Cancelling or timing out the parent job interrupts the SDK query and takes its nested agents down with it.
 
 ## Fable to GPT-5.5 coding helper evaluation
 

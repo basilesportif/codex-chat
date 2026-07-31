@@ -42,11 +42,14 @@ class PushStream<T> implements AsyncIterable<T> {
 interface FakeQueryPlan {
   sessionId?: string;
   initializationError?: Error;
+  initializationDelayMs?: number;
+  endImmediately?: boolean;
   account?: Record<string, unknown>;
 }
 
 interface FakeQueryInstance {
   options: Record<string, unknown>;
+  sessionId: string;
   input: AsyncIterator<unknown>;
   sdk: PushStream<unknown>;
   interrupt: ReturnType<typeof vi.fn>;
@@ -81,25 +84,30 @@ function fakeSdk(plans: FakeQueryPlan[] = [{}]) {
     const sdk = new PushStream<unknown>();
     const input = params.prompt[Symbol.asyncIterator]();
     async function* messages() {
-      yield fakeClaudeInitMessage(sessionId);
       for await (const message of sdk) yield message;
     }
     const generator = messages();
     const interrupt = vi.fn().mockResolvedValue(undefined);
     const close = vi.fn(() => sdk.close());
-    const instance: FakeQueryInstance = { options: params.options, input, sdk, interrupt, close };
+    const instance: FakeQueryInstance = { options: params.options, sessionId, input, sdk, interrupt, close };
     instances.push(instance);
+    if (plan.endImmediately) sdk.close();
+    const initializationResult = vi.fn(async () => {
+      if (plan.initializationDelayMs) {
+        await new Promise((resolve) => setTimeout(resolve, plan.initializationDelayMs));
+      }
+      if (plan.initializationError) throw plan.initializationError;
+      return {
+        account: plan.account ?? {
+          apiKeySource: "oauth",
+          apiProvider: "firstParty",
+          tokenSource: "oauth",
+          subscriptionType: "max"
+        }
+      };
+    });
     return Object.assign(generator, {
-      initializationResult: plan.initializationError
-        ? vi.fn().mockRejectedValue(plan.initializationError)
-        : vi.fn().mockResolvedValue({
-            account: plan.account ?? {
-              apiKeySource: "oauth",
-              apiProvider: "firstParty",
-              tokenSource: "oauth",
-              subscriptionType: "max"
-            }
-          }),
+      initializationResult,
       interrupt,
       close
     });
@@ -185,6 +193,19 @@ async function collect(stream: AsyncIterable<MainAgentEvent>): Promise<MainAgent
   return events;
 }
 
+async function beginFirstTurn(instance: FakeQueryInstance): Promise<void> {
+  await instance.input.next();
+  instance.sdk.push(fakeClaudeInitMessage(instance.sessionId));
+}
+
+async function waitFor(predicate: () => boolean, attempts = 50): Promise<void> {
+  for (let index = 0; index < attempts; index++) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  expect(predicate()).toBe(true);
+}
+
 const originalEnv = { ...process.env };
 
 beforeEach(() => {
@@ -199,13 +220,31 @@ afterEach(() => {
 });
 
 describe("ClaudeMainAgentClient", () => {
-  test("start persists the provider-scoped session id and behavior hash", async () => {
+  test("start succeeds from initializationResult alone and first-turn init persists the fresh session", async () => {
     const sdk = fakeSdk([{ sessionId: "claude-started" }]);
     const { state, sessions } = fakeState();
     const client = await loadClient(sdk, state, fakeBehavior("hash-v1", "bootstrap-v1"));
 
     await client.start();
 
+    expect(sessions.get("codex-chat-main-claude")).toBeUndefined();
+    await expect(client.health()).resolves.toMatchObject({
+      ok: true,
+      sessionId: undefined,
+      detail: "connected (awaiting first turn)"
+    });
+    const eventsPromise = collect(client.sendTurn({ text: "first turn" }));
+    await beginFirstTurn(sdk.instances[0]!);
+    sdk.instances[0]!.sdk.push({
+      type: "result",
+      subtype: "success",
+      result: "ready",
+      errors: [],
+      uuid: "first-result",
+      session_id: "claude-started"
+    });
+    await expect(eventsPromise).resolves.toEqual([{ type: "final", text: "ready" }]);
+    await waitFor(() => sessions.get("codex-chat-main-claude")?.sessionId === "claude-started");
     expect(sessions.get("codex-chat-main-claude")).toMatchObject({
       sessionId: "claude-started",
       provider: "claude_agent_sdk",
@@ -226,13 +265,23 @@ describe("ClaudeMainAgentClient", () => {
   });
 
   test("passes the stored session as resume and yields behavior refresh once after a hash change", async () => {
-    const sdk = fakeSdk([{ sessionId: "claude-resumed" }]);
-    const { state } = fakeState({ sessionId: "stored-session", behaviorHash: "old-hash" });
+    const sdk = fakeSdk([{ sessionId: "stored-session" }]);
+    const { state, sessions } = fakeState({ sessionId: "stored-session", behaviorHash: "old-hash" });
     const client = await loadClient(sdk, state, fakeBehavior("new-hash", "fresh bootstrap"));
 
     await client.start();
 
     expect(sdk.instances[0]?.options.resume).toBe("stored-session");
+    expect(sessions.get("codex-chat-main-claude")).toMatchObject({
+      sessionId: "stored-session",
+      behaviorHash: "new-hash",
+      provider: "claude_agent_sdk"
+    });
+    await expect(client.health()).resolves.toMatchObject({
+      ok: true,
+      sessionId: "stored-session",
+      detail: "connected (resumed)"
+    });
     expect(client.consumePendingBehaviorRefresh()).toBe("fresh bootstrap");
     expect(client.consumePendingBehaviorRefresh()).toBeUndefined();
     await client.stop();
@@ -252,8 +301,57 @@ describe("ClaudeMainAgentClient", () => {
     expect(sdk.instances[0]?.options.resume).toBe("stored-session");
     expect(sdk.instances[1]?.options.resume).toBeUndefined();
     expect((state.clearCodexSession as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith("codex-chat-main-claude");
-    expect(sessions.get("codex-chat-main-claude")?.sessionId).toBe("fresh-session");
+    expect(sessions.get("codex-chat-main-claude")).toBeUndefined();
+
+    const eventsPromise = collect(client.sendTurn({ text: "fresh first turn" }));
+    await beginFirstTurn(sdk.instances[1]!);
+    sdk.instances[1]!.sdk.push({
+      type: "result",
+      subtype: "success",
+      result: "fresh answer",
+      errors: [],
+      uuid: "fresh-result",
+      session_id: "fresh-session"
+    });
+    await eventsPromise;
+    await waitFor(() => sessions.get("codex-chat-main-claude")?.sessionId === "fresh-session");
     await client.stop();
+  });
+
+  test("first-turn init overwrites a resumed session when the SDK reports a different id", async () => {
+    const sdk = fakeSdk([{ sessionId: "reported-session" }]);
+    const { state, sessions } = fakeState({ sessionId: "stored-session", behaviorHash: "same-hash" });
+    const client = await loadClient(sdk, state, fakeBehavior("same-hash"));
+    await client.start();
+
+    const eventsPromise = collect(client.sendTurn({ text: "resume turn" }));
+    await beginFirstTurn(sdk.instances[0]!);
+    sdk.instances[0]!.sdk.push({
+      type: "result",
+      subtype: "success",
+      result: "resumed answer",
+      errors: [],
+      uuid: "resumed-result",
+      session_id: "reported-session"
+    });
+    await eventsPromise;
+
+    await waitFor(() => sessions.get("codex-chat-main-claude")?.sessionId === "reported-session");
+    expect(sessions.get("codex-chat-main-claude")).toMatchObject({
+      sessionId: "reported-session",
+      behaviorHash: "same-hash",
+      provider: "claude_agent_sdk"
+    });
+    await expect(client.health()).resolves.toMatchObject({ sessionId: "reported-session" });
+    await client.stop();
+  });
+
+  test("query death while OAuth initialization is pending fails start", async () => {
+    const sdk = fakeSdk([{ endImmediately: true, initializationDelayMs: 20 }]);
+    const client = await loadClient(sdk);
+
+    await expect(client.start()).rejects.toThrow("Claude Agent SDK query ended unexpectedly");
+    await expect(client.health()).resolves.toMatchObject({ ok: false });
   });
 
   test("maps partial deltas then one terminal final without duplicated content", async () => {
@@ -261,7 +359,7 @@ describe("ClaudeMainAgentClient", () => {
     const client = await loadClient(sdk);
     await client.start();
     const eventsPromise = collect(client.sendTurn({ text: "hello" }));
-    await sdk.instances[0]!.input.next();
+    await beginFirstTurn(sdk.instances[0]!);
 
     sdk.instances[0]!.sdk.push({
       type: "stream_event",
@@ -299,7 +397,7 @@ describe("ClaudeMainAgentClient", () => {
     await client.start();
 
     const firstEvents = collect(client.sendTurn({ text: "first" }));
-    await sdk.instances[0]!.input.next();
+    await beginFirstTurn(sdk.instances[0]!);
     sdk.instances[0]!.sdk.push({
       type: "result",
       subtype: "success",
@@ -330,7 +428,7 @@ describe("ClaudeMainAgentClient", () => {
     const client = await loadClient(sdk);
     await client.start();
     const eventsPromise = collect(client.sendTurn({ text: "hello" }));
-    await sdk.instances[0]!.input.next();
+    await beginFirstTurn(sdk.instances[0]!);
     sdk.instances[0]!.sdk.push({
       type: "result",
       subtype: "error_during_execution",
@@ -351,7 +449,7 @@ describe("ClaudeMainAgentClient", () => {
     await client.start();
     const first = client.sendTurn({ text: "first" })[Symbol.asyncIterator]();
     const firstNext = first.next();
-    await sdk.instances[0]!.input.next();
+    await beginFirstTurn(sdk.instances[0]!);
 
     const second = client.sendTurn({ text: "second" })[Symbol.asyncIterator]();
     await expect(second.next()).rejects.toThrow("already has an active turn");
@@ -371,24 +469,73 @@ describe("ClaudeMainAgentClient", () => {
 
   test("resetSession clears persisted state, interrupts, and starts fresh", async () => {
     const sdk = fakeSdk([{ sessionId: "before-reset" }, { sessionId: "after-reset" }]);
-    const { state } = fakeState();
+    const { state, sessions } = fakeState();
     const client = await loadClient(sdk, state);
     await client.start();
+    const beforeResetEvents = collect(client.sendTurn({ text: "before reset" }));
+    await beginFirstTurn(sdk.instances[0]!);
+    sdk.instances[0]!.sdk.push({
+      type: "result",
+      subtype: "success",
+      result: "before reset answer",
+      errors: [],
+      uuid: "before-reset-result",
+      session_id: "before-reset"
+    });
+    await beforeResetEvents;
+    await waitFor(() => sessions.get("codex-chat-main-claude")?.sessionId === "before-reset");
 
     const health = await client.resetSession("test-reset");
 
     expect(sdk.query).toHaveBeenCalledTimes(2);
     expect(sdk.instances[0]?.interrupt).toHaveBeenCalledOnce();
     expect((state.clearCodexSession as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith("codex-chat-main-claude");
-    expect(health).toMatchObject({ ok: true, sessionId: "after-reset", provider: "claude_agent_sdk" });
+    expect(health).toMatchObject({
+      ok: true,
+      sessionId: undefined,
+      provider: "claude_agent_sdk",
+      detail: "connected (awaiting first turn)"
+    });
+    expect(sessions.get("codex-chat-main-claude")).toBeUndefined();
+
+    const afterResetEvents = collect(client.sendTurn({ text: "after reset" }));
+    await beginFirstTurn(sdk.instances[1]!);
+    sdk.instances[1]!.sdk.push({
+      type: "result",
+      subtype: "success",
+      result: "after reset answer",
+      errors: [],
+      uuid: "after-reset-result",
+      session_id: "after-reset"
+    });
+    await afterResetEvents;
+    await waitFor(() => sessions.get("codex-chat-main-claude")?.sessionId === "after-reset");
     await client.stop();
   });
 
-  test("stop interrupts and health reports the Claude provider and transport", async () => {
+  test("health stays ok while awaiting first turn, then reports the lazily captured session", async () => {
     const sdk = fakeSdk([{ sessionId: "health-session" }]);
     const client = await loadClient(sdk);
     await client.start();
 
+    await expect(client.health()).resolves.toEqual({
+      ok: true,
+      transport: "claude-agent-sdk",
+      provider: "claude_agent_sdk",
+      sessionId: undefined,
+      detail: "connected (awaiting first turn)"
+    });
+    const eventsPromise = collect(client.sendTurn({ text: "health turn" }));
+    await beginFirstTurn(sdk.instances[0]!);
+    sdk.instances[0]!.sdk.push({
+      type: "result",
+      subtype: "success",
+      result: "healthy",
+      errors: [],
+      uuid: "health-result",
+      session_id: "health-session"
+    });
+    await eventsPromise;
     await expect(client.health()).resolves.toEqual({
       ok: true,
       transport: "claude-agent-sdk",

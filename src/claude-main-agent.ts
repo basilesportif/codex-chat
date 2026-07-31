@@ -15,7 +15,6 @@ import {
   checkClaudeOAuthReadiness,
   redactClaudeSecrets,
   verifyClaudeOAuthInitialization,
-  withTimeout,
   type ChildEnvSource
 } from "./claude-auth.js";
 import { resolveConfigPath, type AppConfig } from "./config.js";
@@ -38,7 +37,6 @@ interface Deferred<T> {
   promise: Promise<T>;
   resolve(value: T): void;
   reject(error: Error): void;
-  settled(): boolean;
 }
 
 class AsyncUserMessageQueue implements AsyncIterable<ClaudeSdkUserMessage> {
@@ -120,8 +118,9 @@ export class ClaudeMainAgentClient implements MainAgentClient {
   private query?: ClaudeAgentSdkQuery;
   private inputQueue?: AsyncUserMessageQueue;
   private activeTurn?: ActiveTurn;
-  private startupSession?: Deferred<string>;
+  private startupFailure?: Deferred<never>;
   private sessionId?: string;
+  private currentBehaviorHash?: string;
   private safeEnv: ChildEnvSource = {};
   private pendingBehaviorRefresh?: string;
   private alive = false;
@@ -190,6 +189,8 @@ export class ClaudeMainAgentClient implements MainAgentClient {
         this.state.getCodexSession(cfg.mainSessionName),
         this.state.getCodexSessionBehaviorHash(cfg.mainSessionName)
       ]);
+      this.currentBehaviorHash = behaviorHash;
+      this.sessionId = storedSessionId;
 
       let resumed = false;
       if (storedSessionId) {
@@ -215,7 +216,6 @@ export class ClaudeMainAgentClient implements MainAgentClient {
         await this.launchQuery(bootstrap, timeoutMs);
       }
 
-      if (!this.sessionId) throw new Error("Claude Agent SDK initialized without a session id.");
       if (resumed && storedBehaviorHash && storedBehaviorHash !== behaviorHash) {
         this.pendingBehaviorRefresh = bootstrap;
         this.logger.info(
@@ -223,20 +223,23 @@ export class ClaudeMainAgentClient implements MainAgentClient {
           "behavior pack changed since the Claude session last saw it; queueing behavior-refresh turn"
         );
       }
-      await this.state.setCodexSession(cfg.mainSessionName, {
-        sessionId: this.sessionId,
-        provider: "claude_agent_sdk",
-        transport: "claude-agent-sdk",
-        model: cfg.model,
-        behaviorHash
-      });
+      // A resumed session id is already known, so refresh its metadata now.
+      // A fresh streaming-input query does not emit system/init until the
+      // first user turn; persist fresh sessions lazily when that message arrives.
+      if (resumed && this.sessionId) await this.persistSession(this.sessionId, behaviorHash);
       if (this.endedGeneration === this.generation || !this.query) {
-        await this.state.clearCodexSession(cfg.mainSessionName);
         throw new Error("Claude Agent SDK query ended during startup.");
       }
       this.alive = true;
-      this.detail = resumed ? "connected (resumed)" : "connected";
-      this.logBuffer.append("event", `[SESSION] ${resumed ? "resumed" : "started"} session_id=${this.sessionId}`);
+      this.detail = resumed
+        ? "connected (resumed)"
+        : this.sessionId
+          ? "connected"
+          : "connected (awaiting first turn)";
+      this.logBuffer.append(
+        "event",
+        `[SESSION] ${resumed ? "resumed" : "started"} session_id=${this.sessionId ?? "awaiting-first-turn"}`
+      );
     } catch (error) {
       this.alive = false;
       this.detail = this.redactError(error);
@@ -324,31 +327,31 @@ export class ClaudeMainAgentClient implements MainAgentClient {
     const generation = ++this.generation;
     this.endedGeneration = undefined;
     const inputQueue = new AsyncUserMessageQueue();
-    const startupSession = deferred<string>();
+    const startupFailure = deferred<never>();
     const options = this.buildOptions(bootstrap, resume);
     const query = queryClaudeAgentSdk({ prompt: inputQueue, options });
     this.query = query;
     this.inputQueue = inputQueue;
-    this.startupSession = startupSession;
+    this.startupFailure = startupFailure;
     void this.consumeQuery(query, generation);
 
-    await Promise.all([
-      verifyClaudeOAuthInitialization(query, timeoutMs, (initialized) => {
-        this.logger.info(
-          {
-            component: "claude-main-agent",
-            event: "initialized",
-            account: initialized.account
-          },
-          "Claude Agent SDK main loop initialized with subscription OAuth"
-        );
-      }),
-      withTimeout(
-        startupSession.promise,
-        timeoutMs,
-        `Claude Agent SDK did not report a session id within ${timeoutMs}ms.`
-      )
-    ]);
+    try {
+      await Promise.race([
+        verifyClaudeOAuthInitialization(query, timeoutMs, (initialized) => {
+          this.logger.info(
+            {
+              component: "claude-main-agent",
+              event: "initialized",
+              account: initialized.account
+            },
+            "Claude Agent SDK main loop initialized with subscription OAuth"
+          );
+        }),
+        startupFailure.promise
+      ]);
+    } finally {
+      if (this.startupFailure === startupFailure) this.startupFailure = undefined;
+    }
     if (this.endedGeneration === generation || this.query !== query) {
       throw new Error("Claude Agent SDK query ended during initialization.");
     }
@@ -406,8 +409,26 @@ export class ClaudeMainAgentClient implements MainAgentClient {
           `Claude Agent SDK requires OAuth credentials; SDK init reported apiKeySource=${message.apiKeySource}.`
         );
       }
+      const previousSessionId = this.sessionId;
       this.sessionId = message.session_id;
-      this.startupSession?.resolve(message.session_id);
+      if (previousSessionId && previousSessionId !== message.session_id) {
+        this.logger.warn(
+          {
+            component: "claude-main-agent",
+            event: "session_id_changed",
+            previousSessionId,
+            reportedSessionId: message.session_id
+          },
+          "Claude Agent SDK reported a different session id; updating persisted main session"
+        );
+      }
+      if (this.alive && !previousSessionId) this.detail = "connected";
+      void this.persistSession(message.session_id).catch((error) => {
+        this.logger.error(
+          { component: "claude-main-agent", event: "session_persist_failed", error: this.redactError(error) },
+          "failed to persist Claude Agent SDK main session"
+        );
+      });
       return;
     }
 
@@ -471,7 +492,7 @@ export class ClaudeMainAgentClient implements MainAgentClient {
     this.alive = false;
     this.detail = reason;
     const error = new Error(reason);
-    this.startupSession?.reject(error);
+    this.startupFailure?.reject(error);
     const turn = this.activeTurn;
     if (turn) {
       turn.queue.push(this.errorEvent(error, raw));
@@ -496,7 +517,7 @@ export class ClaudeMainAgentClient implements MainAgentClient {
     this.inputQueue?.close();
     this.inputQueue = undefined;
     this.query = undefined;
-    this.startupSession = undefined;
+    this.startupFailure = undefined;
     if (!query) return;
     if (interrupt) {
       try {
@@ -509,6 +530,18 @@ export class ClaudeMainAgentClient implements MainAgentClient {
       }
     }
     query.close();
+  }
+
+  private async persistSession(sessionId: string, behaviorHash = this.currentBehaviorHash): Promise<void> {
+    if (!behaviorHash) throw new Error("Cannot persist Claude Agent SDK session before behavior hash is available.");
+    const cfg = this.config.mainAgent.claude;
+    await this.state.setCodexSession(cfg.mainSessionName, {
+      sessionId,
+      provider: "claude_agent_sdk",
+      transport: "claude-agent-sdk",
+      model: cfg.model,
+      behaviorHash
+    });
   }
 
   private async buildUserMessage(text: string, attachments: Attachment[]): Promise<ClaudeSdkUserMessage> {
@@ -584,8 +617,7 @@ function deferred<T>(): Deferred<T> {
       if (settled) return;
       settled = true;
       rejectPromise(error);
-    },
-    settled: () => settled
+    }
   };
 }
 

@@ -96,6 +96,21 @@ afterEach(() => {
 });
 
 describe("codex clients", () => {
+  test("maps image, voice, and audio attachments to app-server local inputs", async () => {
+    const { mapAttachmentsToAppServerInputs } = await import("../codex.js");
+
+    expect(mapAttachmentsToAppServerInputs([
+      { kind: "image", localPath: "/tmp/photo.png" },
+      { kind: "voice", localPath: "/tmp/voice.ogg" },
+      { kind: "audio", localPath: "/tmp/recording.m4a" },
+      { kind: "document", localPath: "/tmp/notes.pdf" },
+    ])).toEqual([
+      { type: "localImage", path: "/tmp/photo.png" },
+      { type: "localAudio", path: "/tmp/voice.ogg" },
+      { type: "localAudio", path: "/tmp/recording.m4a" },
+    ]);
+  });
+
   test("exec-resume and hybrid clients are not exported", async () => {
     const codex = await import("../codex.js");
 

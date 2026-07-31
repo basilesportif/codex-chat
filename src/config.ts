@@ -3,6 +3,7 @@ import { dirname, resolve } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { z } from "zod";
 import { parseIngestApiKeys } from "./ingest-auth.js";
+import { DEFAULT_USER_TIME_ZONE, isValidIanaTimeZone } from "./temporal.js";
 import { ensureDir, pathExists, resolveFrom } from "./util.js";
 
 const effortSchema = z.enum([
@@ -37,6 +38,9 @@ const employeeIdSchema = z
     /^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$/,
     "Employee IDs may contain only letters, numbers, dot, underscore, and dash",
   );
+const ianaTimeZoneSchema = z.string().min(1).refine(isValidIanaTimeZone, {
+  message: "must be a valid IANA timezone"
+});
 
 const employeeMemoryPolicySchema = z
   .object({
@@ -167,7 +171,7 @@ const configSchema = z.object({
     workspace: z.string().default(process.cwd()),
     stateDir: z.string().default("data/state"),
     logLevel: z.string().default("info"),
-    timezone: z.string().default("Etc/UTC"),
+    timezone: ianaTimeZoneSchema.default(DEFAULT_USER_TIME_ZONE),
     ipcSocket: z.string().default("data/run/codex-chat.sock"),
   }).prefault({}),
   codex: z.object({
@@ -309,12 +313,18 @@ const configSchema = z.object({
   }).prefault({}),
   transcription: z.object({
     enabled: z.boolean().default(true),
-    provider: z.enum(["openai"]).default("openai"),
+    // `openai` remains the explicit rollback path. `codex_app_server` uses the
+    // authenticated Codex/ChatGPT session for regular transcription while
+    // continuing to route diarization through OpenAI.
+    provider: z.enum(["openai", "codex_app_server"]).default("openai"),
     model: z.string().default("gpt-4o-transcribe"),
     diarizeModel: z.string().default("gpt-4o-transcribe-diarize"),
     apiKeyEnv: z.string().default("OPENAI_API_KEY"),
     language: z.string().default(""),
     promptPath: z.string().default(""),
+    appServerModel: z.string().default(""),
+    appServerEffort: effortSchema.default("medium"),
+    appServerTimeoutSec: z.number().positive().default(180),
   }).prefault({}),
   ingest: z.object({
     apiKeysEnv: z.string().default("CODEXCHAT_INGEST_API_KEYS"),
@@ -485,6 +495,7 @@ export type ConfigEnvValueKind = "string" | "boolean" | "number" | "csv";
  */
 export const ENV_OVERRIDE_SPECS: EnvOverrideSpec[] = [
     { name: "CODEX_CHAT_WORKSPACE", path: ["service", "workspace"] },
+    { name: "CODEX_CHAT_TIMEZONE", path: ["service", "timezone"] },
     { name: "CODEX_CHAT_STATE_DIR", path: ["service", "stateDir"] },
     { name: "CODEX_CHAT_LOG_LEVEL", path: ["service", "logLevel"] },
     { name: "CODEX_CHAT_CODEX_BINARY", path: ["codex", "binary"] },
@@ -545,6 +556,10 @@ export const ENV_OVERRIDE_SPECS: EnvOverrideSpec[] = [
       parse: parseBooleanEnv,
     },
     {
+      name: "CODEX_CHAT_TRANSCRIPTION_PROVIDER",
+      path: ["transcription", "provider"],
+    },
+    {
       name: "CODEX_CHAT_TRANSCRIPTION_MODEL",
       path: ["transcription", "model"],
     },
@@ -555,6 +570,19 @@ export const ENV_OVERRIDE_SPECS: EnvOverrideSpec[] = [
     {
       name: "CODEX_CHAT_TRANSCRIPTION_PROMPT_PATH",
       path: ["transcription", "promptPath"],
+    },
+    {
+      name: "CODEX_CHAT_TRANSCRIPTION_APP_SERVER_MODEL",
+      path: ["transcription", "appServerModel"],
+    },
+    {
+      name: "CODEX_CHAT_TRANSCRIPTION_APP_SERVER_EFFORT",
+      path: ["transcription", "appServerEffort"],
+    },
+    {
+      name: "CODEX_CHAT_TRANSCRIPTION_APP_SERVER_TIMEOUT_SEC",
+      path: ["transcription", "appServerTimeoutSec"],
+      parse: parseNumberEnv,
     },
     {
       name: "CODEXCHAT_AUDIO_INGEST_MAX_MB",

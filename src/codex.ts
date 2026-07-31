@@ -9,10 +9,22 @@ import type { EmployeeRuntimeClient, EmployeeThreadResumeInput, EmployeeThreadSp
 import { sanitizeCodexChildProcessEnv } from "./env.js";
 import { LogBuffer, scrubSecrets } from "./log-buffer.js";
 import { StateStore } from "./state.js";
-import { CodexClient, CodexEvent, CodexHealth, CodexTurnInput } from "./types.js";
+import { Attachment, CodexClient, CodexEvent, CodexHealth, CodexTurnInput } from "./types.js";
 import { killProcessTree } from "./util.js";
+import { assertLocalAudioAppServerCapability } from "./app-server-transcription.js";
 
 type JsonRpcMessage = Record<string, unknown> & { id?: string | number; method?: string; params?: unknown; result?: unknown; error?: unknown };
+
+export function mapAttachmentsToAppServerInputs(attachments: readonly Attachment[]): Array<Record<string, string>> {
+  const inputs: Array<Record<string, string>> = [];
+  for (const attachment of attachments) {
+    if (attachment.kind === "image") inputs.push({ type: "localImage", path: attachment.localPath });
+    if (attachment.kind === "voice" || attachment.kind === "audio") {
+      inputs.push({ type: "localAudio", path: attachment.localPath });
+    }
+  }
+  return inputs;
+}
 
 type QueueResult<T> = { kind: "value"; value: T } | { kind: "done" } | { kind: "error"; error: Error };
 
@@ -85,6 +97,7 @@ export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient 
   private sessionId?: string;
   private connected = false;
   private startupComplete = false;
+  private appServerUserAgent?: string;
   /**
    * Set when a stored thread was resumed but the behavior pack on disk no
    * longer matches the hash recorded when that thread last saw it. Holds the
@@ -235,10 +248,11 @@ export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient 
     const startupExit = this.rejectOnStartupExit(child);
     const startupSequence = (async () => {
       await this.connectWithRetry(listenUrl);
-      await this.request("initialize", {
+      const initialize = await this.request<Record<string, unknown>>("initialize", {
         clientInfo: { name: "codex-chat", title: "codex-chat", version: "0.1.0" },
         capabilities: { experimentalApi: true }
       });
+      this.appServerUserAgent = typeof initialize.userAgent === "string" ? initialize.userAgent : undefined;
       await this.ensureThread({ verifyExisting: true });
     })();
     try {
@@ -310,10 +324,14 @@ export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient 
     if (!this.sessionId) throw new Error("No Codex app-server thread is available");
     const queue = new AsyncQueue<CodexEvent>();
     const turnText = input.text;
-    const userInput: unknown[] = [{ type: "text", text: turnText, text_elements: [] }];
-    for (const attachment of input.attachments ?? []) {
-      if (attachment.kind === "image") userInput.push({ type: "localImage", path: attachment.localPath });
+    const attachments = input.attachments ?? [];
+    if (attachments.some((attachment) => attachment.kind === "voice" || attachment.kind === "audio")) {
+      assertLocalAudioAppServerCapability(this.appServerUserAgent ?? "");
     }
+    const userInput: unknown[] = [
+      { type: "text", text: turnText, text_elements: [] },
+      ...mapAttachmentsToAppServerInputs(attachments),
+    ];
     let turnId = "";
     let accumulated = "";
     const ownThreadId = this.sessionId;
@@ -401,10 +419,14 @@ export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient 
   async *sendEmployeeTurn(input: EmployeeTurnInput): AsyncIterable<CodexEvent> {
     this.assertConnected();
     const queue = new AsyncQueue<CodexEvent>();
-    const userInput: unknown[] = [{ type: "text", text: input.text, text_elements: [] }];
-    for (const attachment of input.attachments ?? []) {
-      if (attachment.kind === "image") userInput.push({ type: "localImage", path: attachment.localPath });
+    const attachments = input.attachments ?? [];
+    if (attachments.some((attachment) => attachment.kind === "voice" || attachment.kind === "audio")) {
+      assertLocalAudioAppServerCapability(this.appServerUserAgent ?? "");
     }
+    const userInput: unknown[] = [
+      { type: "text", text: input.text, text_elements: [] },
+      ...mapAttachmentsToAppServerInputs(attachments),
+    ];
     let turnId = "";
     let accumulated = "";
     const ownThreadId = input.backendThreadId;

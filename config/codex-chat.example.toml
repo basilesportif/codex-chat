@@ -8,7 +8,7 @@ name = "codex-chat"
 workspace = "."
 stateDir = "data/state"
 logLevel = "info"
-timezone = "Etc/UTC"
+timezone = "America/New_York"
 ipcSocket = "data/run/codex-chat.sock"
 
 [codex]
@@ -237,6 +237,9 @@ allowedSendRoots = [
 
 [transcription]
 enabled = true
+# Feature-flagged provider switch. `codex_app_server` uses Codex localAudio and
+# ChatGPT login for regular transcription; set `openai` for immediate rollback.
+# Diarization always remains on the OpenAI provider below.
 provider = "openai"
 # Regular Telegram voice/audio transcription model.
 model = "gpt-4o-transcribe"
@@ -246,6 +249,10 @@ diarizeModel = "gpt-4o-transcribe-diarize"
 apiKeyEnv = "OPENAI_API_KEY"
 language = ""
 promptPath = ""
+# Empty inherits [codex].model. localAudio requires Codex CLI/app-server >=0.145.0.
+appServerModel = ""
+appServerEffort = "medium"
+appServerTimeoutSec = 180
 
 [ingest]
 # Ingestion API keys are secret and read only from this env var. Format:

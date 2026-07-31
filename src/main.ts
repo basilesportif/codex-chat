@@ -15,6 +15,7 @@ import { brainCapabilityStorePath } from "./capabilities.js";
 import { StateStore } from "./state.js";
 import { installUserService, uninstallUserService } from "./systemd.js";
 import { atomicWriteJson, nowIso, pathExists } from "./util.js";
+import { compareVersions, MINIMUM_LOCAL_AUDIO_CODEX_VERSION, parseCodexVersion } from "./app-server-transcription.js";
 
 const program = new Command();
 
@@ -56,7 +57,9 @@ program.command("setup")
       `config: ${config.configPath}`,
       `state: ${resolveConfigPath(config, config.service.stateDir)}`,
       "",
-      `Set ${config.telegram.botTokenEnv} and ${config.transcription.apiKeyEnv} before starting.`,
+      config.transcription.provider === "openai"
+        ? `Set ${config.telegram.botTokenEnv} and ${config.transcription.apiKeyEnv} before starting.`
+        : `Set ${config.telegram.botTokenEnv} before starting. ${config.transcription.apiKeyEnv} is optional for regular localAudio transcription but still required for diarization.`,
       "If the Telegram allowlist is empty, `codex-chat start` will print a one-time /pair code."
     ].join("\n") + "\n");
   });
@@ -69,6 +72,9 @@ program.command("health")
     const config = await loadConfig(program.opts().config);
     await ensureConfiguredDirectories(config);
     const codexVersion = await runCapture(config, config.codex.binary, ["--version"]).catch((error) => `unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    const parsedCodexVersion = parseCodexVersion(codexVersion);
+    const localAudioCapable = config.transcription.provider !== "codex_app_server"
+      || Boolean(parsedCodexVersion && compareVersions(parsedCodexVersion, MINIMUM_LOCAL_AUDIO_CODEX_VERSION) >= 0);
     const behaviorOk = await pathExists(resolveConfigPath(config, join(config.behavior.dir, config.behavior.entrypoint)));
     // Capability-store readability: when enforcement is on, an unreadable/missing
     // store means every Telegram/Slack event fails closed while the process still
@@ -89,6 +95,7 @@ program.command("health")
       config: config.configPath,
       runtime: runtimeVersion(),
       codex: codexVersion.trim(),
+      localAudioCapable,
       behaviorOk,
       enforcementEnabled,
       capabilityStorePath,
@@ -108,7 +115,8 @@ program.command("health")
         : "capabilityStore: enforcement disabled";
       process.stdout.write(`${result.ok ? "ok" : "DEGRADED"}\ncodex: ${result.codex}\nstate: ${result.stateDir}\n${storeLine}\n`);
     }
-    if (options.strict && (!result.telegramConfigured || (config.transcription.enabled && !result.openaiConfigured) || !behaviorOk || (enforcementEnabled && !capabilityStoreOk))) process.exit(1);
+    const regularTranscriptionKeyRequired = config.transcription.enabled && config.transcription.provider === "openai";
+    if (options.strict && (!result.telegramConfigured || (regularTranscriptionKeyRequired && !result.openaiConfigured) || !localAudioCapable || !behaviorOk || (enforcementEnabled && !capabilityStoreOk))) process.exit(1);
   });
 
 program.command("inject")

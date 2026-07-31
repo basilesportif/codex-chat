@@ -2,7 +2,7 @@
   "version": 1,
   "namespace": "codex-chat",
   "defaults": {
-    "timezone": "Etc/UTC",
+    "timezone": "America/New_York",
     "timeoutSec": 1800,
     "route": "return_to_main",
     "model": "gpt-5.6-luna",

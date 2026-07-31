@@ -526,6 +526,7 @@ export class TelegramGateway {
   }
 
   private async handleMessage(ctx: Context): Promise<void> {
+    const receivedAt = nowIso();
     if (ctx.message?.text?.startsWith("/pair")) return;
     if (!(await this.isAuthorized(ctx))) {
       await this.logDenied(ctx);
@@ -533,6 +534,7 @@ export class TelegramGateway {
     }
     const message = ctx.message;
     if (!message || !ctx.from || !ctx.chat) return;
+    const sourceTimestamp = telegramUnixTimestamp(message.date);
     // React immediately at the Telegram ingress layer. Codex-emitted `react`
     // directives cannot fire until the model starts returning output, and voice
     // transcription can also add latency before the event reaches Codex. This
@@ -646,10 +648,10 @@ export class TelegramGateway {
       text,
       attachments,
       metadata: eventMetadata,
-      receivedAt: nowIso()
+      sourceTimestamp,
+      receivedAt
     });
 
-    const receivedAt = nowIso();
     const stateUsers = await this.state.listTelegramUsers();
     const runtimeEvent = withTelegramRuntimeContext({
       source: "telegram",
@@ -661,6 +663,7 @@ export class TelegramGateway {
       text,
       transcript: eventTranscript,
       attachments,
+      sourceTimestamp,
       receivedAt,
       metadata: eventMetadata
     }, {
@@ -702,6 +705,7 @@ export class TelegramGateway {
     const claimKey = `telegram:reaction:${update.chat.id}:${update.message_id}:${update.user.id}:${telegramReactionKey(added[0])}`;
     if (!await this.state.claimEmojiFollowup(claimKey)) return;
     const receivedAt = nowIso();
+    const sourceTimestamp = telegramUnixTimestamp(update.date);
     const metadata: Record<string, unknown> = {
       telegramMessageId: update.message_id,
       emojiFollowup: true,
@@ -725,6 +729,7 @@ export class TelegramGateway {
         interaction: "reaction"
       }),
       attachments: [],
+      sourceTimestamp,
       receivedAt,
       metadata
     }, {
@@ -878,4 +883,9 @@ export class TelegramGateway {
     await this.state.writePairingCode(code);
     return code;
   }
+}
+
+function telegramUnixTimestamp(seconds: number | undefined): string | undefined {
+  if (!Number.isFinite(seconds)) return undefined;
+  return new Date((seconds as number) * 1000).toISOString();
 }

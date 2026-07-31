@@ -95,8 +95,8 @@ Brain's canonical Slack roadmap.
 
 `POST /api/ingest/audio` accepts authenticated `multipart/form-data` uploads
 for transcription. The endpoint is general-purpose (not Soundcore-specific) and
-currently accepts MP3 files sent as form field `file` with content type
-`audio/mpeg` and a `.mp3` filename.
+accepts WAV, MP3, M4A, WebM, and OGG files sent as form field `file` with a
+matching supported audio MIME type and extension.
 
 Auth:
 
@@ -134,10 +134,13 @@ summarize, or otherwise use the speaker-labelled output. It is **not** passed
 to OpenAI as the model transcription prompt; transcription still uses the
 existing `[transcription]` config and optional `transcription.promptPath`.
 
-Size limit: `CODEXCHAT_AUDIO_INGEST_MAX_MB` (default `100`). Transcription uses
-the existing `[transcription]` config and `OPENAI_API_KEY`.
+Size limit: `CODEXCHAT_AUDIO_INGEST_MAX_MB` (default `100`). Regular
+transcription uses the selected `[transcription].provider`: `codex_app_server`
+uses Codex `localAudio` with ChatGPT login and no `OPENAI_API_KEY`; `openai` is
+the feature-flagged rollback path. Diarization continues to use the configured
+OpenAI diarization model and therefore still requires the configured API key.
 
-If an MP3 upload arrives without a caller `prompt`/context, the main assistant
+If an audio upload arrives without a caller `prompt`/context, the main assistant
 is instructed not to assume any source-specific workflow (including Soundcore)
 and to ask what to do with the transcript unless metadata clearly establishes
 intent.
@@ -417,7 +420,13 @@ Telegram accepts the upload.
 
 ## Transcription Modes, Diarization, and Prompt Dictionary
 
-Normal Telegram voice/audio transcription uses regular mode by default with
+Normal Telegram voice/audio transcription uses regular mode by default.
+`transcription.provider = "codex_app_server"` launches a dedicated one-shot
+Codex app-server with an ephemeral thread, read-only sandbox, disabled tools,
+and a hard timeout, then sends the attachment as `localAudio`. This path
+requires Codex CLI/app-server 0.145.0 or newer and uses ChatGPT login rather
+than `OPENAI_API_KEY`. Set `transcription.provider = "openai"` (or
+`CODEX_CHAT_TRANSCRIPTION_PROVIDER=openai`) for the rollback path, which uses
 `transcription.model` (default `gpt-4o-transcribe`). Diarization is opt-in:
 set `transcription_mode=diarize` on `/api/ingest/audio`, or send/reply with a
 clear Telegram request such as “diarize this” before attaching an MP3. Diarize
@@ -428,7 +437,7 @@ sets `chunking_strategy=auto`.
 After a diarized transcript is produced, codex-chat routes handling of that
 speaker-labelled output through a subagent. Regular Telegram transcription
 continues through the normal main-loop path and does not create a subagent just
-because an audio file was received. An uncaptioned/uncontexted MP3 still uses
+because an audio file was received. An uncaptioned/uncontexted audio file still uses
 the existing regular-transcription flow that asks what to do with the
 transcript rather than assuming a workflow.
 

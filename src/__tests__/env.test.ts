@@ -129,6 +129,12 @@ describe("child process environment sanitizer", () => {
     expect(sanitized.OTHER_VAR).toBe("keep");
   });
 
+  test("propagates configured IANA timezone to Codex and Claude children", () => {
+    const configured = { ...config(), service: { timezone: "America/New_York" } } as Parameters<typeof sanitizeCodexChildProcessEnv>[0];
+    expect(sanitizeCodexChildProcessEnv(configured, { TZ: "Etc/UTC" }).TZ).toBe("America/New_York");
+    expect(sanitizeClaudeAgentSdkChildProcessEnv(configured, { TZ: "Etc/UTC" }).TZ).toBe("America/New_York");
+  });
+
   test("strips configured Slack secrets", () => {
     const sanitized = sanitizeChildProcessEnv(
       config("CUSTOM_TRANSCRIPTION_KEY", "CODEXCHAT_INGEST_API_KEYS"),

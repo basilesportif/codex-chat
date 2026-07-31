@@ -43,7 +43,7 @@ function makeConfig(rootDir: string, maxConcurrent = 2): AppConfig {
   return {
     rootDir,
     configPath: join(rootDir, "config", "codex-chat.toml"),
-    service: { workspace: rootDir, stateDir: "state" },
+    service: { workspace: rootDir, stateDir: "state", timezone: "America/New_York" },
     codex: {
       binary: "/bin/true",
       sandbox: "danger-full-access",
@@ -233,12 +233,20 @@ describe("subagents", () => {
       brainCapabilityManifest: {
         subjectId: "person:person_tim",
         capabilities: [{ capabilityId: "calendar.event.write", selectors: { calendarId: "abc" } }]
+      },
+      temporalAnchor: {
+        anchorAt: "2026-07-23T03:30:00.000Z",
+        sourceTimestamp: "2026-07-23T03:30:00.000Z",
+        receivedAt: "2026-07-23T05:30:00.000Z",
+        timeZone: "America/New_York"
       }
     });
 
     expect(backend.starts[0]?.assembledPrompt).toContain("brain_subject: person:person_tim");
     expect(backend.starts[0]?.assembledPrompt).toContain("brain_capabilities: calendar.event.write{calendarId=abc}");
     expect(backend.starts[0]?.assembledPrompt).toContain("When running calendar/CRM/project scripts on behalf of this user, pass --on-behalf-of person:person_tim; actions outside brain_capabilities must be refused.");
+    expect(backend.starts[0]?.assembledPrompt).toContain("interpret_relative_dates_from: 2026-07-23T03:30:00.000Z");
+    expect(backend.starts[0]?.assembledPrompt).toContain("anchor_local_datetime: 2026-07-22T23:30:00");
     expect(backend.starts[0]?.brainSubjectId).toBe("person:person_tim");
   });
 

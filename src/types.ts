@@ -282,6 +282,8 @@ export interface UserEvent {
   capabilityGrants?: CapabilityGrant[];
   brainSubjectManifest?: BrainSubjectManifest;
   runContext?: RunContext;
+  /** Original timestamp supplied by the source surface, kept apart from processing time. */
+  sourceTimestamp?: string;
   receivedAt: string;
 }
 

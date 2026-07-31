@@ -274,6 +274,7 @@ describe("Telegram reply context extraction", () => {
       chatId: 100,
       messageId: 77,
       text: "hello",
+      sourceTimestamp: "2023-11-14T22:15:00.000Z",
       actor: expect.objectContaining({ id: "telegram:user:9", surfaceKind: "telegram", handle: "tim" }),
       outputTarget: expect.objectContaining({ surfaceKind: "telegram", chatId: "100", messageId: "77" }),
       conversationKey: expect.objectContaining({ id: "telegram:chat:100" }),
@@ -281,6 +282,10 @@ describe("Telegram reply context extraction", () => {
       correlationId: expect.stringMatching(/^corr_/),
       // Runtime no longer fabricates grants; Brain is the sole grant source (Slack-scoped).
       capabilityGrants: []
+    }));
+    expect(recordMessage).toHaveBeenCalledWith(expect.objectContaining({
+      sourceTimestamp: "2023-11-14T22:15:00.000Z",
+      receivedAt: expect.any(String)
     }));
   });
 

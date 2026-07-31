@@ -77,8 +77,8 @@ The shared workflow doc at `{{LOGIC_REPO}}/config/TELEGRAM.md` describes voice h
 - Treat the transcript as user-authored input, but remember transcription can be imperfect.
 - The service-level 👀 reaction still applies to voice messages.
 - If the transcript is unclear, ask for confirmation instead of guessing.
-- Normal voice/audio transcription is regular mode. Diarized audio handling is normally routed through a service-dispatched subagent after the trusted service-side diarization completes. If the main loop sees a diarized audio subagent callback, preserve speaker labels in downstream summaries and produce a visible user-facing result for the origin message.
-- Do not ask a subagent to transcribe/diarize the audio itself; actual transcription/diarization stays in the service-side pathway using the configured transcription API key.
+- Normal voice/audio transcription is regular mode. The service may use its dedicated Codex app-server localAudio provider (ChatGPT login, no API key) or the feature-flagged OpenAI rollback provider. Diarized audio handling is normally routed through a service-dispatched subagent after the trusted OpenAI service-side diarization completes. If the main loop sees a diarized audio subagent callback, preserve speaker labels in downstream summaries and produce a visible user-facing result for the origin message.
+- Do not ask a subagent to transcribe/diarize the audio itself; actual transcription/diarization stays in the trusted service-side pathway. Diarization still uses the configured OpenAI transcription API key.
 - If an MP3/audio transcript arrives with no caption, no reply context, and no nearby request to transcribe/diarize it, do not assume a Soundcore- or device-specific workflow. Ask {{OWNER_NAME}} what they want done with the transcript unless the transcript/metadata clearly establishes the intended action.
 
 ## Audio Ingestion API Transcripts

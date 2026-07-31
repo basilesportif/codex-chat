@@ -107,17 +107,19 @@ export function sanitizeChildProcessEnv(
 }
 
 export function sanitizeCodexChildProcessEnv(
-  config: Pick<AppConfig, "transcription"> & Partial<Pick<AppConfig, "ingest" | "slack" | "codex">>,
+  config: Pick<AppConfig, "transcription"> & Partial<Pick<AppConfig, "ingest" | "slack" | "codex" | "service">>,
   baseEnv: ChildEnvSource = process.env,
   overrides?: ChildEnvSource
 ): NodeJS.ProcessEnv {
-  return sanitizeChildProcessEnv(config, baseEnv, overrides, {
+  const env = sanitizeChildProcessEnv(config, baseEnv, overrides, {
     allowSecretEnvNames: config.codex?.providerApiKeyEnvNames ?? []
   });
+  if (config.service?.timezone) env.TZ = config.service.timezone;
+  return env;
 }
 
 export function sanitizeClaudeAgentSdkChildProcessEnv(
-  config: Pick<AppConfig, "transcription"> & Partial<Pick<AppConfig, "ingest" | "slack" | "codex">>,
+  config: Pick<AppConfig, "transcription"> & Partial<Pick<AppConfig, "ingest" | "slack" | "codex" | "service">>,
   baseEnv: ChildEnvSource = process.env,
   overrides?: ChildEnvSource
 ): NodeJS.ProcessEnv {
@@ -129,5 +131,6 @@ export function sanitizeClaudeAgentSdkChildProcessEnv(
     const trimmed = name.trim();
     if (trimmed) delete env[trimmed];
   }
+  if (config.service?.timezone) env.TZ = config.service.timezone;
   return env;
 }

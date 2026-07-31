@@ -36,6 +36,7 @@ export interface RecordedTelegramMessage {
   userId?: number;
   messageId?: number;
   text?: string;
+  sourceTimestamp?: string;
   receivedAt?: string;
 }
 

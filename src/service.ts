@@ -54,6 +54,7 @@ import {
   type SubagentTerminalResult
 } from "./subagents.js";
 import { DisabledTranscriber, OpenAITranscriber, Transcriber, type TranscriptionMode, type TranscriptionSpeakerSegment } from "./transcription.js";
+import { AppServerTranscriber } from "./app-server-transcription.js";
 import { sanitizeChildProcessEnv } from "./env.js";
 import { SlackGateway } from "./slack.js";
 import { hydrateSlackContextForEvent } from "./slack-context.js";
@@ -64,6 +65,7 @@ import {
   type SlackTelemetryObservation
 } from "./slack-telemetry.js";
 import { TelegramGateway } from "./telegram.js";
+import { formatTemporalAnchorBlock, temporalAnchorForEvent } from "./temporal.js";
 import { ActorContext, CapabilityDecision, CodexClient, JsonRecord, StoredAction, SubagentBackendKind, SubagentJob, SubagentOwnerType, SubagentResultTarget, UserEvent } from "./types.js";
 import { compactText, inlineCode, makeId, nowIso } from "./util.js";
 
@@ -937,7 +939,8 @@ export class ServiceSupervisor {
         originTarget: input.event.outputTarget,
         defaultOutputTarget: input.event.outputTarget,
         brainSubjectId: input.event.brainSubjectManifest?.subjectId,
-        brainCapabilityManifest: input.event.brainSubjectManifest
+        brainCapabilityManifest: input.event.brainSubjectManifest,
+        temporalAnchor: temporalAnchorForEvent(input.event, this.config.service.timezone)
       });
       this.logger.info({
         component: "service",
@@ -2100,7 +2103,8 @@ export class ServiceSupervisor {
           originTarget: origin.outputTarget,
           defaultOutputTarget: origin.outputTarget,
           brainSubjectId: origin.brainSubjectManifest?.subjectId,
-          brainCapabilityManifest: origin.brainSubjectManifest
+          brainCapabilityManifest: origin.brainSubjectManifest,
+          temporalAnchor: temporalAnchorForEvent(origin, this.config.service.timezone)
         });
         await this.state.recordProgressEvent(createProgressEvent({
           type: "subagent_dispatched",
@@ -2926,6 +2930,7 @@ export class ServiceSupervisor {
 
   private formatEventForCodex(event: UserEvent, hydratedContext?: string): string {
     ensureEventRuntimeContext(event);
+    const temporalAnchor = temporalAnchorForEvent(event, this.config.service.timezone);
     const header = [
       `codex-chat event source: ${event.source}`,
       event.conversationSessionId ? `conversation_session_id: ${event.conversationSessionId}` : "",
@@ -2946,7 +2951,9 @@ export class ServiceSupervisor {
       event.source === "slack" && typeof event.metadata?.slackReplyThreadTs === "string" ? `slack reply_thread_ts: ${event.metadata.slackReplyThreadTs}` : "",
       event.source === "slack" && typeof event.metadata?.slackThreadTs === "string" ? `slack thread_ts: ${event.metadata.slackThreadTs}` : "",
       event.source === "slack" && typeof event.metadata?.slackMessageTs === "string" ? `slack message_ts: ${event.metadata.slackMessageTs}` : "",
-      `received_at: ${event.receivedAt}`
+      event.sourceTimestamp ? `source_timestamp: ${event.sourceTimestamp}` : "",
+      `received_at: ${event.receivedAt}`,
+      formatTemporalAnchorBlock(temporalAnchor)
     ].filter(Boolean).join("\n");
     const attachments = event.attachments.length > 0
       ? `\nAttachments:\n${event.attachments.map((item) => this.formatAttachmentForCodex(item)).join("\n")}`
@@ -3183,6 +3190,7 @@ export class ServiceSupervisor {
 
   private createTranscriber(): Transcriber {
     if (!this.config.transcription.enabled) return new DisabledTranscriber();
+    if (this.config.transcription.provider === "codex_app_server") return new AppServerTranscriber(this.config);
     if (this.config.transcription.provider === "openai") return new OpenAITranscriber(this.config);
     return new DisabledTranscriber();
   }

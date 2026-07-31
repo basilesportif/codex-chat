@@ -10,6 +10,7 @@ const tempDirs: string[] = [];
 const originalEnv = { ...process.env };
 const overrideEnvNames = [
   "CODEX_CHAT_WORKSPACE",
+  "CODEX_CHAT_TIMEZONE",
   "CODEX_CHAT_STATE_DIR",
   "CODEX_CHAT_LOG_LEVEL",
   "CODEX_CHAT_CODEX_BINARY",
@@ -98,6 +99,7 @@ userIds = [12345]
     const config = await loadConfig(path);
 
     expect(config.codex.model).toBe("gpt-test");
+    expect(config.service.timezone).toBe("America/New_York");
     expect(config.codex.sandbox).toBe("danger-full-access");
     expect(config.codex.serviceTier).toBe("fast");
     expect(config.codex.serviceTierMode).toBe("auto");
@@ -123,8 +125,12 @@ userIds = [12345]
     expect(config.slack.context.enabled).toBe(true);
     expect(config.slack.context.maxChannelMessages).toBe(15);
     expect(config.ingest.audioMaxMb).toBe(100);
+    expect(config.transcription.provider).toBe("openai");
     expect(config.transcription.model).toBe("gpt-4o-transcribe");
     expect(config.transcription.diarizeModel).toBe("gpt-4o-transcribe-diarize");
+    expect(config.transcription.appServerModel).toBe("");
+    expect(config.transcription.appServerEffort).toBe("medium");
+    expect(config.transcription.appServerTimeoutSec).toBe(180);
     expect(config.telegram.allowlist.userIds).toEqual([12345]);
     expect(config.rootDir).toBe(resolve(path, "../.."));
   });
@@ -187,6 +193,16 @@ maxThreadMessages = 5
     await expect(loadConfig(path)).rejects.toThrow();
   });
 
+  test("accepts explicit IANA timezone overrides and rejects invalid timezones", async () => {
+    process.env.CODEX_CHAT_TIMEZONE = "Europe/London";
+    const validPath = await tempConfig("version = 1\n");
+    expect((await loadConfig(validPath)).service.timezone).toBe("Europe/London");
+
+    delete process.env.CODEX_CHAT_TIMEZONE;
+    const invalidPath = await tempConfig('version = 1\n[service]\ntimezone = "Mars/Olympus_Mons"\n');
+    await expect(loadConfig(invalidPath)).rejects.toThrow(/valid IANA timezone/);
+  });
+
   test("uses environment overrides after file values", async () => {
     process.env.CODEX_CHAT_CODEX_MODEL = "from-env";
     process.env.CODEX_CHAT_CODEX_SERVICE_TIER = "standard";
@@ -226,17 +242,25 @@ botTokenEnv = "CUSTOM_SLACK_BOT_TOKEN"
   });
 
   test("allows transcription model env overrides", async () => {
+    process.env.CODEX_CHAT_TRANSCRIPTION_PROVIDER = "codex_app_server";
     process.env.CODEX_CHAT_TRANSCRIPTION_MODEL = "gpt-4o-transcribe-custom";
     process.env.CODEX_CHAT_TRANSCRIPTION_DIARIZE_MODEL =
       "gpt-4o-transcribe-diarize-custom";
+    process.env.CODEX_CHAT_TRANSCRIPTION_APP_SERVER_MODEL = "gpt-audio-custom";
+    process.env.CODEX_CHAT_TRANSCRIPTION_APP_SERVER_EFFORT = "low";
+    process.env.CODEX_CHAT_TRANSCRIPTION_APP_SERVER_TIMEOUT_SEC = "42";
     const path = await tempConfig("version = 1\n");
 
     const config = await loadConfig(path);
 
+    expect(config.transcription.provider).toBe("codex_app_server");
     expect(config.transcription.model).toBe("gpt-4o-transcribe-custom");
     expect(config.transcription.diarizeModel).toBe(
       "gpt-4o-transcribe-diarize-custom",
     );
+    expect(config.transcription.appServerModel).toBe("gpt-audio-custom");
+    expect(config.transcription.appServerEffort).toBe("low");
+    expect(config.transcription.appServerTimeoutSec).toBe(42);
   });
 
 

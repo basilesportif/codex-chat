@@ -51,14 +51,14 @@ const loopsConfigSchema = z.object({
   version: z.literal(1),
   namespace: z.string().default("codex-chat"),
   defaults: z.object({
-    timezone: z.string().default("Etc/UTC"),
+    timezone: z.string().default("America/New_York"),
     timeoutSec: z.number().int().positive().default(1800),
     route: routeSchema.default("return_to_main"),
     model: z.string().default("gpt-5.6-luna"),
     effort: effortSchema.default("xhigh"),
     serviceTier: serviceTierSchema.default("fast"),
     lock: z.boolean().default(true)
-  }).default({ timezone: "Etc/UTC", timeoutSec: 1800, route: "return_to_main", model: "gpt-5.6-luna", effort: "xhigh", serviceTier: "fast", lock: true }),
+  }).default({ timezone: "America/New_York", timeoutSec: 1800, route: "return_to_main", model: "gpt-5.6-luna", effort: "xhigh", serviceTier: "fast", lock: true }),
   loops: z.array(loopSchema).default([])
 });
 

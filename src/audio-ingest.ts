@@ -84,7 +84,18 @@ export class AudioIngestionError extends Error {
 }
 
 const supportedAudioTypes: Record<string, { extensions: string[]; canonicalExtension: string; kind: Attachment["kind"] }> = {
-  "audio/mpeg": { extensions: [".mp3"], canonicalExtension: ".mp3", kind: "audio" }
+  "audio/wav": { extensions: [".wav"], canonicalExtension: ".wav", kind: "audio" },
+  "audio/x-wav": { extensions: [".wav"], canonicalExtension: ".wav", kind: "audio" },
+  "audio/wave": { extensions: [".wav"], canonicalExtension: ".wav", kind: "audio" },
+  "audio/mpeg": { extensions: [".mp3"], canonicalExtension: ".mp3", kind: "audio" },
+  "audio/mp3": { extensions: [".mp3"], canonicalExtension: ".mp3", kind: "audio" },
+  "audio/mp4": { extensions: [".m4a"], canonicalExtension: ".m4a", kind: "audio" },
+  "audio/m4a": { extensions: [".m4a"], canonicalExtension: ".m4a", kind: "audio" },
+  "audio/x-m4a": { extensions: [".m4a"], canonicalExtension: ".m4a", kind: "audio" },
+  "audio/webm": { extensions: [".webm"], canonicalExtension: ".webm", kind: "audio" },
+  "audio/ogg": { extensions: [".ogg"], canonicalExtension: ".ogg", kind: "audio" },
+  "audio/opus": { extensions: [".ogg"], canonicalExtension: ".ogg", kind: "audio" },
+  "application/ogg": { extensions: [".ogg"], canonicalExtension: ".ogg", kind: "audio" }
 };
 
 export class AudioIngestionService {
@@ -249,7 +260,7 @@ export class AudioIngestionService {
     const ext = extname(file.filename ?? "").toLowerCase();
     const allowed = supportedAudioTypes[contentType];
     if (!allowed || !allowed.extensions.includes(ext)) {
-      throw new AudioIngestionError(400, "unsupported_file_type", "only MP3 audio/mpeg uploads with .mp3 extension are currently supported");
+      throw new AudioIngestionError(400, "unsupported_file_type", "supported audio formats are WAV, MP3, M4A, WebM, and OGG with matching MIME types and extensions");
     }
   }
 

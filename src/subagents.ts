@@ -17,6 +17,7 @@ import {
   StartedChildAgent
 } from "./subagent-backends.js";
 import { ensureDir, makeId, normalizeRef, nowIso, pathExists } from "./util.js";
+import { formatTemporalAnchorBlock, processingTemporalAnchor, type TemporalAnchor } from "./temporal.js";
 
 const SIGKILL_GRACE_MS = 5_000;
 const MAX_QUEUE_DEPTH = 200;
@@ -63,6 +64,7 @@ interface DispatchInput {
   images?: string[];
   originChatId?: number;
   originMessageId?: number;
+  temporalAnchor?: TemporalAnchor;
 }
 
 /**
@@ -268,6 +270,7 @@ export class SubagentManager {
       defaultOutputTarget?: OutputTarget;
       brainSubjectId?: string;
       brainCapabilityManifest?: BrainSubjectManifest;
+      temporalAnchor?: TemporalAnchor;
     }
   ): Promise<string> {
     return this.dispatch({
@@ -296,7 +299,8 @@ export class SubagentManager {
       summary: action.summary,
       images: action.images,
       originChatId: origin?.chatId,
-      originMessageId: origin?.messageId
+      originMessageId: origin?.messageId,
+      temporalAnchor: origin?.temporalAnchor
     });
   }
 
@@ -712,12 +716,15 @@ export class SubagentManager {
     await ensureDir(artifactDir);
     const promptPath = job.promptPath;
     const profileContents = await this.behavior.readSubagentProfile(job.profile);
+    const temporalAnchor = input.temporalAnchor ?? processingTemporalAnchor(this.config.service.timezone ?? "America/New_York");
     const assembledPrompt = [
       profileContents.trim(),
       "",
       remoteRepoAuthorityRules(this.config.paths.assistantWorkspace),
       "",
       SELF_RESTART_SAFETY_RULES,
+      "",
+      formatTemporalAnchorBlock(temporalAnchor),
       job.brainCapabilityManifest ? `\n${formatBrainSubjectManifestBlock(job.brainCapabilityManifest)}\n` : "",
       "",
       "Task:",

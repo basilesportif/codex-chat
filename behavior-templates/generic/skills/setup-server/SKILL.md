@@ -154,7 +154,9 @@ nvm install --lts
 nvm alias default lts/*
 nvm use default
 
-npm install -g @openai/codex
+# localAudio first shipped in 0.145.0. Keep this minimum pin in sync with
+# codex-chat's startup/capability check before changing it.
+npm install -g @openai/codex@0.145.0
 bun --version
 node --version
 npm --version
@@ -250,12 +252,17 @@ Recommended transcription dictionary file:
 ```toml
 [transcription]
 enabled = true
+# Keep `openai` until a deployment-specific known-speech localAudio canary
+# succeeds; then switch to `codex_app_server`.
 provider = "openai"
 model = "gpt-4o-transcribe"
 diarizeModel = "gpt-4o-transcribe-diarize"
 apiKeyEnv = "OPENAI_API_KEY"
 language = ""
 promptPath = "/home/$USERNAME/.assistant-claude/workspace/instructions/prompts/voice-transcription.md"
+appServerModel = ""
+appServerEffort = "medium"
+appServerTimeoutSec = 180
 ```
 
 Create the prompt file on the server if the deployment uses voice messages:
@@ -275,7 +282,7 @@ PROMPT
 REMOTE
 ```
 
-`codex-chat` reads this file fresh for every regular voice/audio transcription. Editing the dictionary contents does not require a service restart. Changing `promptPath` itself does require restarting the service because the configured path is loaded at startup. Do not put secrets in the prompt file; it is sent to OpenAI with each regular transcription request. Diarization uses `gpt-4o-transcribe-diarize` with `diarized_json` and does not send this prompt because OpenAI does not support `prompt` for that model.
+`codex-chat` reads this file fresh for every regular voice/audio transcription. Editing the dictionary contents does not require a service restart. Changing `promptPath` itself does require restarting the service because the configured path is loaded at startup. Do not put secrets in the prompt file; it is included as vocabulary guidance for the dedicated ephemeral, read-only, tool-disabled app-server transcription turn. This regular path requires Codex CLI/app-server 0.145.0 or newer, uses ChatGPT login, and works without `OPENAI_API_KEY`. Set `provider = "openai"` (or `CODEX_CHAT_TRANSCRIPTION_PROVIDER=openai`) for rollback. Diarization remains on OpenAI, uses `gpt-4o-transcribe-diarize` with `diarized_json`, still requires the configured API key, and does not send this prompt because OpenAI does not support `prompt` for that model.
 
 If no allowlist is configured yet, start the service and use its one-time `/pair <code>` flow from Telegram.
 

@@ -77,6 +77,12 @@ function formWithMp3(fields: Record<string, string> = {}, bytes: Buffer | string
   return form;
 }
 
+function formWithAudio(filename: string, contentType: string, bytes = "audio-data"): FormData {
+  const form = new FormData();
+  form.set("file", new Blob([bytes], { type: contentType }), filename);
+  return form;
+}
+
 async function postAudio(baseUrl: string, form: FormData, headers: Record<string, string> = {}): Promise<Response> {
   return fetch(`${baseUrl}/api/ingest/audio`, { method: "POST", headers, body: form });
 }
@@ -184,6 +190,24 @@ describe("audio ingestion API", () => {
     expect(record?.metadata).toMatchObject({ source: "soundcore", device: "soundcore-work", client_request_id: "req-1", prompt: "Summarize action items for Tim." });
     expect(record?.status).toBe("completed");
     expect(record?.file?.localPath).toBe(transcriberInput?.path);
+  });
+
+  test.each([
+    ["recording.wav", "audio/wav"],
+    ["recording.mp3", "audio/mpeg"],
+    ["recording.m4a", "audio/mp4"],
+    ["recording.webm", "audio/webm"],
+    ["recording.ogg", "audio/ogg"],
+  ])("accepts supported audio upload %s (%s)", async (filename, contentType) => {
+    const { baseUrl, transcriber } = await makeHarness();
+    const response = await postAudio(baseUrl, formWithAudio(filename, contentType), { Authorization: "Bearer test-secret" });
+
+    expect(response.status).toBe(201);
+    const body = await response.json() as { file: { filename: string; content_type: string }; transcription: { text: string } };
+    expect(body.file).toMatchObject({ filename, content_type: contentType });
+    expect(body.transcription.text).toBe("hello transcript");
+    expect(transcriber.transcribe).toHaveBeenCalledOnce();
+    expect(transcriber.transcribe.mock.calls[0]?.[0].path).toMatch(new RegExp(`original\\.${filename.split(".").at(-1)}$`));
   });
 
   test("passes requested diarization mode and returns speaker segments", async () => {

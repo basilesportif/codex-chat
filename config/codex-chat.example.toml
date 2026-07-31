@@ -16,6 +16,23 @@ ipcSocket = "data/run/codex-chat.sock"
 # OAuth. The [codex] section remains the Codex adapter's settings.
 provider = "codex"
 
+[mainAgent.claude]
+# Alias or full Claude model ID. Requires Claude subscription OAuth: run
+# `claude auth login` as the service user. Change [mainAgent].provider to
+# "claude_agent_sdk" and restart to enable. Roll back by setting it to "codex"
+# and restarting; the provider-scoped Codex session remains available.
+model = "claude-sonnet-5"
+effort = "high"
+permissionMode = "bypassPermissions"
+allowDangerouslySkipPermissions = true
+allowedTools = ["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep", "Agent"]
+disallowedTools = []
+# Empty prevents user/project settings from adding non-OAuth auth sources.
+settingSources = []
+pathToClaudeCodeExecutable = ""
+mainSessionName = "codex-chat-main-claude"
+startupTimeoutSec = 90
+
 [codex]
 binary = "codex"
 transport = "app-server"

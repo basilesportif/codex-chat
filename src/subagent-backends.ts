@@ -2,7 +2,6 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { appendFile, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
-import { homedir } from "node:os";
 import { extname, join } from "node:path";
 import {
   query as queryClaudeAgentSdk,
@@ -16,11 +15,18 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import WebSocket from "ws";
 import type { Logger } from "pino";
+import {
+  ClaudeOAuthReadinessError,
+  checkClaudeOAuthReadiness,
+  redactClaudeSecrets,
+  verifyClaudeOAuthInitialization,
+  type ChildEnvSource
+} from "./claude-auth.js";
 import { defaultClaudeSubagentConfig, resolveConfigPath, type AppConfig } from "./config.js";
 import { loadCodexProfileConfig } from "./codex-profiles.js";
-import { CLAUDE_NON_OAUTH_AUTH_ENV, CLAUDE_OAUTH_CHILD_ENV, sanitizeClaudeAgentSdkChildProcessEnv, sanitizeCodexChildProcessEnv, type ChildEnvSource } from "./env.js";
+import { sanitizeCodexChildProcessEnv } from "./env.js";
 import type { ServiceTier, ServiceTierMode, SubagentBackendKind, SubagentJob } from "./types.js";
-import { ensureDir, killProcessTree, nowIso, pathExists } from "./util.js";
+import { ensureDir, killProcessTree, nowIso } from "./util.js";
 
 type JsonRpcMessage = Record<string, unknown> & {
   id?: string | number;
@@ -423,15 +429,6 @@ export class ClaudeAgentSdkChildAgentBackend extends SessionMapChildAgentBackend
   }
 }
 
-type ClaudeAccountSummary = {
-  apiProvider?: string;
-  apiKeySource?: string;
-  tokenSource?: string;
-  subscriptionType?: string;
-  emailPresent: boolean;
-  organizationPresent: boolean;
-};
-
 class ClaudeAgentSdkSession {
   private readonly queue = new AsyncUserMessageQueue();
   private query?: ClaudeAgentSdkQuery;
@@ -584,55 +581,40 @@ class ClaudeAgentSdkSession {
     strippedNonOAuthEnv: string[];
   }> {
     const cfg = claudeSubagentConfig(this.config);
-    const safeEnv = sanitizeClaudeAgentSdkChildProcessEnv(this.config, process.env, childBrainEnv(this.config, this.input.brainSubjectId));
-    const credentialFiles = await this.credentialFiles(safeEnv);
-    const oauthEnvPresent = Boolean(safeEnv.CLAUDE_CODE_OAUTH_TOKEN);
-    const strippedNonOAuthEnv = this.strippedNonOAuthEnvNames(safeEnv);
+    let ready;
+    try {
+      ready = await checkClaudeOAuthReadiness(this.config, {
+        overrides: childBrainEnv(this.config, this.input.brainSubjectId),
+        enabled: cfg.enabled,
+        disabledError: "Claude Agent SDK backend is disabled. Set [subagents.claude].enabled = true after configuring Claude subscription OAuth."
+      });
+    } catch (error) {
+      if (error instanceof ClaudeOAuthReadinessError) {
+        const readiness = {
+          event: "claude_readiness",
+          at: nowIso(),
+          backend: "claude_agent_sdk",
+          enabled: cfg.enabled,
+          oauthEnvPresent: error.readiness.oauthEnvPresent,
+          credentialFiles: error.readiness.credentialFiles,
+          strippedNonOAuthEnv: error.readiness.strippedNonOAuthEnv
+        };
+        await this.appendEvent(readiness);
+        await this.appendEvent({ ...readiness, event: "claude_readiness_failed", error: error.message });
+      }
+      throw error;
+    }
     const readiness = {
       event: "claude_readiness",
       at: nowIso(),
       backend: "claude_agent_sdk",
       enabled: cfg.enabled,
-      oauthEnvPresent,
-      credentialFiles,
-      strippedNonOAuthEnv
+      oauthEnvPresent: ready.oauthEnvPresent,
+      credentialFiles: ready.credentialFiles,
+      strippedNonOAuthEnv: ready.strippedNonOAuthEnv
     };
     await this.appendEvent(readiness);
-    if (!cfg.enabled) {
-      const error = "Claude Agent SDK backend is disabled. Set [subagents.claude].enabled = true after configuring Claude subscription OAuth.";
-      await this.appendEvent({ ...readiness, event: "claude_readiness_failed", error });
-      throw new Error(error);
-    }
-    if (!oauthEnvPresent && !credentialFiles.some((candidate) => candidate.exists)) {
-      const error = "Claude Agent SDK backend requires subscription OAuth: run `claude auth login` or provide CLAUDE_CODE_OAUTH_TOKEN.";
-      await this.appendEvent({ ...readiness, event: "claude_readiness_failed", error });
-      throw new Error(error);
-    }
-    const leaked = CLAUDE_NON_OAUTH_AUTH_ENV.filter((name) => safeEnv[name]);
-    if (leaked.length > 0) {
-      const error = `Claude Agent SDK sanitized environment still contains non-OAuth auth variables: ${leaked.join(", ")}`;
-      await this.appendEvent({ ...readiness, event: "claude_readiness_failed", error });
-      throw new Error(error);
-    }
-    return { safeEnv, oauthEnvPresent, credentialFiles, strippedNonOAuthEnv };
-  }
-
-  private async credentialFiles(env: NodeJS.ProcessEnv): Promise<Array<{ path: string; exists: boolean }>> {
-    const configuredDir = env.CLAUDE_CONFIG_DIR || process.env.CLAUDE_CONFIG_DIR;
-    const configDir = configuredDir || join(homedir(), ".claude");
-    return [{ path: join(configDir, ".credentials.json"), exists: await pathExists(join(configDir, ".credentials.json")) }];
-  }
-
-  private strippedNonOAuthEnvNames(safeEnv: NodeJS.ProcessEnv): string[] {
-    const stripped = new Set<string>();
-    for (const name of CLAUDE_NON_OAUTH_AUTH_ENV) {
-      if (process.env[name] && !safeEnv[name]) stripped.add(name);
-    }
-    for (const name of this.config.codex.providerApiKeyEnvNames ?? []) {
-      const trimmed = name.trim();
-      if (trimmed && process.env[trimmed] && !safeEnv[trimmed]) stripped.add(trimmed);
-    }
-    return [...stripped].sort();
+    return ready;
   }
 
   private buildOptions(env: NodeJS.ProcessEnv): ClaudeAgentSdkOptions {
@@ -708,45 +690,16 @@ class ClaudeAgentSdkSession {
 
   private async verifyOAuthInitialization(query: ClaudeAgentSdkQuery): Promise<void> {
     const timeoutMs = Math.max(1, this.config.subagents.childStartupTimeoutSec ?? 60) * 1000;
-    const initialized = await withTimeout(
-      query.initializationResult(),
-      timeoutMs,
-      `Claude Agent SDK initialization did not complete within ${timeoutMs}ms. Check Claude OAuth login and network connectivity.`
-    );
-    const account = initialized.account ?? {};
-    const summary = this.accountSummary(account);
-    await this.appendEvent({
-      event: "claude_initialized",
-      at: nowIso(),
-      backend: "claude_agent_sdk",
-      account: summary,
-      fastModeState: initialized.fast_mode_state
+    await verifyClaudeOAuthInitialization(query, timeoutMs, async (initialized) => {
+      await this.appendEvent({
+        event: "claude_initialized",
+        at: nowIso(),
+        backend: "claude_agent_sdk",
+        account: initialized.account,
+        fastModeState: initialized.fastModeState
+      });
     });
-    if (summary.apiProvider && summary.apiProvider !== "firstParty") {
-      throw new Error(`Claude Agent SDK backend requires first-party subscription OAuth; SDK reported apiProvider=${summary.apiProvider}.`);
-    }
-    if (summary.apiKeySource && summary.apiKeySource !== "oauth" && summary.apiKeySource !== "none") {
-      throw new Error(`Claude Agent SDK backend requires OAuth credentials; SDK reported apiKeySource=${summary.apiKeySource}.`);
-    }
     this.oauthInitializationVerified = true;
-  }
-
-  private accountSummary(account: {
-    apiProvider?: string;
-    apiKeySource?: string;
-    tokenSource?: string;
-    subscriptionType?: string;
-    email?: string;
-    organization?: string;
-  }): ClaudeAccountSummary {
-    return {
-      apiProvider: account.apiProvider,
-      apiKeySource: account.apiKeySource,
-      tokenSource: account.tokenSource,
-      subscriptionType: account.subscriptionType,
-      emailPresent: Boolean(account.email),
-      organizationPresent: Boolean(account.organization)
-    };
   }
 
   private async consumeQuery(query: ClaudeAgentSdkQuery): Promise<void> {
@@ -881,18 +834,7 @@ class ClaudeAgentSdkSession {
   }
 
   private redactSecrets(value: string): string {
-    const env = { ...process.env, ...this.redactionEnv };
-    const secretNames = new Set<string>([
-      ...CLAUDE_OAUTH_CHILD_ENV,
-      ...CLAUDE_NON_OAUTH_AUTH_ENV,
-      ...(this.config.codex.providerApiKeyEnvNames ?? [])
-    ]);
-    let result = value;
-    for (const name of secretNames) {
-      const secret = env[name]?.trim();
-      if (secret && secret.length >= 4) result = result.split(secret).join(`[REDACTED:${name}]`);
-    }
-    return result;
+    return redactClaudeSecrets(value, this.config, { ...process.env, ...this.redactionEnv });
   }
 
   private settle(finish: ChildAgentFinish): void {
@@ -945,16 +887,6 @@ class ClaudeAgentSdkSession {
     this.query?.close();
     await this.input.onJobUpdated(this.input.job).catch(() => undefined);
   }
-}
-
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
-  });
-  return Promise.race([promise, timeout]).finally(() => {
-    if (timer) clearTimeout(timer);
-  }) as Promise<T>;
 }
 
 function extractClaudeAssistantText(message: Extract<ClaudeSdkMessage, { type: "assistant" }>): string {

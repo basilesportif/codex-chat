@@ -130,6 +130,19 @@ const claudeSubagentSchema = z.object({
   steerSettleGraceMs: z.number().int().positive().default(10_000),
 });
 
+const claudeMainAgentSchema = z.object({
+  model: z.string().default("claude-sonnet-5"),
+  effort: z.enum(["low", "medium", "high", "xhigh"]).default("high"),
+  permissionMode: claudePermissionModeSchema.default("bypassPermissions"),
+  allowDangerouslySkipPermissions: z.boolean().default(true),
+  allowedTools: z.array(z.string()).default(["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep", "Agent"]),
+  disallowedTools: z.array(z.string()).default([]),
+  settingSources: z.array(claudeSettingSourceSchema).default([]),
+  pathToClaudeCodeExecutable: z.string().default(""),
+  mainSessionName: z.string().default("codex-chat-main-claude"),
+  startupTimeoutSec: z.number().int().positive().default(90),
+}).prefault({});
+
 export type ClaudeSubagentConfig = z.infer<typeof claudeSubagentSchema>;
 
 /** Fully-defaulted [subagents.claude] config, derived from the schema. */
@@ -179,6 +192,7 @@ const configSchema = z.object({
   }).prefault({}),
   mainAgent: z.object({
     provider: z.enum(["codex", "claude_agent_sdk"]).default("codex"),
+    claude: claudeMainAgentSchema,
   }).prefault({}),
   codex: z.object({
     binary: z.string().default("codex"),
@@ -505,6 +519,11 @@ export const ENV_OVERRIDE_SPECS: EnvOverrideSpec[] = [
     { name: "CODEX_CHAT_STATE_DIR", path: ["service", "stateDir"] },
     { name: "CODEX_CHAT_LOG_LEVEL", path: ["service", "logLevel"] },
     { name: "CODEX_CHAT_MAIN_PROVIDER", path: ["mainAgent", "provider"] },
+    { name: "CODEX_CHAT_MAIN_CLAUDE_MODEL", path: ["mainAgent", "claude", "model"] },
+    { name: "CODEX_CHAT_MAIN_CLAUDE_EFFORT", path: ["mainAgent", "claude", "effort"] },
+    { name: "CODEX_CHAT_MAIN_CLAUDE_PERMISSION_MODE", path: ["mainAgent", "claude", "permissionMode"] },
+    { name: "CODEX_CHAT_MAIN_CLAUDE_ALLOWED_TOOLS", path: ["mainAgent", "claude", "allowedTools"], parse: splitCsvEnv },
+    { name: "CODEX_CHAT_MAIN_CLAUDE_DISALLOWED_TOOLS", path: ["mainAgent", "claude", "disallowedTools"], parse: splitCsvEnv },
     { name: "CODEX_CHAT_CODEX_BINARY", path: ["codex", "binary"] },
     { name: "CODEX_CHAT_CODEX_MODEL", path: ["codex", "model"] },
     { name: "CODEX_CHAT_CODEX_EFFORT", path: ["codex", "effort"] },

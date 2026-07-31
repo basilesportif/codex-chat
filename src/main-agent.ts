@@ -1,5 +1,6 @@
 import type { Logger } from "pino";
 import type { BehaviorPack } from "./behavior.js";
+import { ClaudeMainAgentClient } from "./claude-main-agent.js";
 import type { AppConfig } from "./config.js";
 import { AppServerCodexClient, type CodexCrashHandler } from "./codex.js";
 import type { StateStore } from "./state.js";
@@ -25,7 +26,5 @@ export function createMainAgentClient(
     return { client: appServerClient, appServerClient };
   }
 
-  throw new Error(
-    "mainAgent.provider=claude_agent_sdk is not implemented yet (landing in the next change); set mainAgent.provider=codex."
-  );
+  return { client: new ClaudeMainAgentClient(config, state, behavior, logger, onCrash) };
 }

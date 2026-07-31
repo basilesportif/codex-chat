@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { loadConfig, writeDefaultConfigFilesIfMissing } from "../config.js";
+import { assertMainAgentConfig } from "../main-agent.js";
 import { loadLoopsConfig } from "../loops.js";
 import { loadMonitorsConfig } from "../monitors.js";
 
@@ -14,6 +15,11 @@ const overrideEnvNames = [
   "CODEX_CHAT_STATE_DIR",
   "CODEX_CHAT_LOG_LEVEL",
   "CODEX_CHAT_MAIN_PROVIDER",
+  "CODEX_CHAT_MAIN_CLAUDE_MODEL",
+  "CODEX_CHAT_MAIN_CLAUDE_EFFORT",
+  "CODEX_CHAT_MAIN_CLAUDE_PERMISSION_MODE",
+  "CODEX_CHAT_MAIN_CLAUDE_ALLOWED_TOOLS",
+  "CODEX_CHAT_MAIN_CLAUDE_DISALLOWED_TOOLS",
   "CODEX_CHAT_CODEX_BINARY",
   "CODEX_CHAT_CODEX_MODEL",
   "CODEX_CHAT_CODEX_EFFORT",
@@ -104,6 +110,18 @@ userIds = [12345]
 
     expect(config.codex.model).toBe("gpt-test");
     expect(config.mainAgent.provider).toBe("codex");
+    expect(config.mainAgent.claude).toEqual({
+      model: "claude-sonnet-5",
+      effort: "high",
+      permissionMode: "bypassPermissions",
+      allowDangerouslySkipPermissions: true,
+      allowedTools: ["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep", "Agent"],
+      disallowedTools: [],
+      settingSources: [],
+      pathToClaudeCodeExecutable: "",
+      mainSessionName: "codex-chat-main-claude",
+      startupTimeoutSec: 90,
+    });
     expect(config.service.timezone).toBe("America/New_York");
     expect(config.codex.sandbox).toBe("danger-full-access");
     expect(config.codex.serviceTier).toBe("fast");
@@ -259,6 +277,58 @@ botTokenEnv = "CUSTOM_SLACK_BOT_TOKEN"
     const path = await tempConfig("version = 1\n");
 
     await expect(loadConfig(path)).rejects.toThrow();
+  });
+
+  test("loads Claude main-agent keys and environment overrides", async () => {
+    process.env.CODEX_CHAT_MAIN_CLAUDE_MODEL = "claude-opus-4-8";
+    process.env.CODEX_CHAT_MAIN_CLAUDE_EFFORT = "xhigh";
+    process.env.CODEX_CHAT_MAIN_CLAUDE_PERMISSION_MODE = "dontAsk";
+    process.env.CODEX_CHAT_MAIN_CLAUDE_ALLOWED_TOOLS = "Read, Glob, Agent";
+    process.env.CODEX_CHAT_MAIN_CLAUDE_DISALLOWED_TOOLS = "Bash, Write";
+    const path = await tempConfig(`
+version = 1
+
+[mainAgent]
+provider = "claude_agent_sdk"
+
+[mainAgent.claude]
+model = "sonnet"
+effort = "low"
+pathToClaudeCodeExecutable = "/opt/claude"
+mainSessionName = "custom-claude-main"
+startupTimeoutSec = 12
+`);
+
+    const config = await loadConfig(path);
+
+    expect(config.mainAgent).toMatchObject({
+      provider: "claude_agent_sdk",
+      claude: {
+        model: "claude-opus-4-8",
+        effort: "xhigh",
+        permissionMode: "dontAsk",
+        allowedTools: ["Read", "Glob", "Agent"],
+        disallowedTools: ["Bash", "Write"],
+        pathToClaudeCodeExecutable: "/opt/claude",
+        mainSessionName: "custom-claude-main",
+        startupTimeoutSec: 12,
+      },
+    });
+  });
+
+  test("still rejects Employees with the Claude main-loop provider", async () => {
+    const path = await tempConfig(`
+version = 1
+
+[mainAgent]
+provider = "claude_agent_sdk"
+
+[employees]
+enabled = true
+`);
+
+    const config = await loadConfig(path);
+    expect(() => assertMainAgentConfig(config)).toThrow("Claude main loop does not support durable Employees yet");
   });
 
   test("allows transcription model env overrides", async () => {

@@ -70,6 +70,11 @@ function isFableModel(model: string | undefined): boolean {
   return normalized === "fable" || normalized.startsWith("claude-fable");
 }
 
+/** True when the user's own message asked for Fable by name. */
+function explicitlyRequestsFable(text: string): boolean {
+  return /\bfable\b/i.test(text);
+}
+
 export interface NormalizedSubagentRouting {
   action: DispatchSubagentAction;
   changed: boolean;
@@ -98,13 +103,17 @@ export function normalizeSubagentRouting(
 
   const workload = classifySubagentWorkload(action);
   if (mainProvider === "claude_agent_sdk") {
-    if (isClaudeOrProviderOverride(action)) {
+    // Fable is quota-precious: it runs only when the USER explicitly asked for
+    // it. A Fable dispatch the main loop invented on its own (precedent drift)
+    // is rewritten to the workload default like any other non-explicit choice.
+    const unrequestedFable = isFableModel(action.model) && !explicitlyRequestsFable(originText);
+    if (!unrequestedFable && isClaudeOrProviderOverride(action)) {
       return { action, changed: changedByFableDefault, workload };
     }
 
-    if (!explicitlyRequestsModel(originText)) {
+    if (unrequestedFable || !explicitlyRequestsModel(originText)) {
       const defaults = workload === "coding"
-        ? { model: "claude-fable-5", effort: "medium" as const }
+        ? { model: "claude-opus-5", effort: "high" as const }
         : { model: "claude-sonnet-5", effort: "high" as const };
       const normalized: DispatchSubagentAction = {
         ...action,

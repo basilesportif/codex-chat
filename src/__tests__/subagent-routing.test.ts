@@ -39,7 +39,7 @@ describe("Claude-main subagent routing enforcement", () => {
     });
   });
 
-  test("rewrites a Sol implementer dispatch for coding work to Fable", () => {
+  test("rewrites a Sol implementer dispatch for coding work to Opus 5", () => {
     const input = action({
       prompt: "Implement the service code change and run the tests.",
       model: "gpt-5.6-sol",
@@ -51,11 +51,40 @@ describe("Claude-main subagent routing enforcement", () => {
       changed: true,
       workload: "coding",
       action: {
-        model: "claude-fable-5",
-        effort: "medium",
+        model: "claude-opus-5",
+        effort: "high",
         serviceTier: "standard",
         backend: "claude_agent_sdk"
       }
+    });
+  });
+
+  test("rewrites an unrequested Fable dispatch to the workload default (Fable is explicit-only)", () => {
+    const coding = action({
+      prompt: "Implement the service code change and run the tests.",
+      model: "claude-fable-5",
+      backend: "claude_agent_sdk",
+      effort: "medium",
+      serviceTier: "standard"
+    });
+    expect(normalizeSubagentRouting(coding, "Implement the service code change", "claude_agent_sdk")).toMatchObject({
+      changed: true,
+      workload: "coding",
+      action: { model: "claude-opus-5", effort: "high", serviceTier: "standard", backend: "claude_agent_sdk" }
+    });
+
+    const routine = action({
+      profile: "operator",
+      prompt: "Look up next event on football calendar",
+      model: "fable",
+      backend: "claude_agent_sdk",
+      effort: "medium",
+      serviceTier: "standard"
+    });
+    expect(normalizeSubagentRouting(routine, "Look up next event on football calendar", "claude_agent_sdk")).toMatchObject({
+      changed: true,
+      workload: "routine_non_coding",
+      action: { model: "claude-sonnet-5", effort: "high", serviceTier: "standard", backend: "claude_agent_sdk" }
     });
   });
 
@@ -107,18 +136,18 @@ describe("Claude-main subagent routing enforcement", () => {
     });
   });
 
-  test("an existing Fable action gets the shared medium-effort default", () => {
+  test("an explicitly requested Fable action passes through with the medium-effort default", () => {
     const input = action({ model: "claude-fable-5", backend: "claude_agent_sdk", effort: "xhigh", serviceTier: "standard" });
-    const result = normalizeSubagentRouting(input, "Review this", "claude_agent_sdk");
+    const result = normalizeSubagentRouting(input, "Use Fable to review this", "claude_agent_sdk");
 
     expect(result.action).toEqual({ ...input, effort: "medium" });
     expect(result.changed).toBe(true);
   });
 
-  test("an explicit effort on an existing Fable action is untouched", () => {
+  test("an explicit effort on an explicitly requested Fable action is untouched", () => {
     const input = action({ model: "claude-fable-5", backend: "claude_agent_sdk", effort: "xhigh", serviceTier: "standard" });
 
-    expect(normalizeSubagentRouting(input, "Review this with xhigh effort", "claude_agent_sdk")).toEqual({
+    expect(normalizeSubagentRouting(input, "Use Fable to review this with xhigh effort", "claude_agent_sdk")).toEqual({
       action: input,
       changed: false,
       workload: "unknown"

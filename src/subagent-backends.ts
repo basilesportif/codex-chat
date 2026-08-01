@@ -136,8 +136,8 @@ export function nativeAgentGuidance(agents: Record<string, ClaudeAgentDefinition
   const model = (name: string) => agents[name]?.model ?? "inherit";
   return [
     `Native subagents (Agent tool) available in this session: implementer (${model("implementer")}) — writes code and runs tests; investigator (${model("investigator")}) — read-only research; reviewer (${model("reviewer")}) — read-only code review.`,
-    "For multi-file or parallelizable coding work, prefer orchestrating: break the task into bounded briefs, dispatch implementer subagents (parallel when independent), then review their diffs yourself or via the reviewer agent, and iterate until the work meets your standards.",
-    "Keep one concern per subagent and pass each a complete, self-contained brief.",
+    "Delegate substantive coding, repo research, and rote/mechanical execution to these subagents instead of doing it yourself: break the task into bounded briefs, dispatch implementer subagents for changes (parallel when independent) and investigators for research, then review what comes back, follow the leads it surfaces, and iterate until the work meets your standards.",
+    "Reserve your own effort for briefs, review judgment, and decisions. Keep one concern per subagent and pass each a complete, self-contained brief.",
     "You remain responsible for the final result reported to your parent."
   ].join("\n")
 }

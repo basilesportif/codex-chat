@@ -121,6 +121,8 @@ userIds = [12345]
       pathToClaudeCodeExecutable: "",
       mainSessionName: "codex-chat-main-claude",
       startupTimeoutSec: 90,
+      nestedAgentSettleGraceMs: 10_000,
+      nestedAgentHoldMaxMs: 55_000,
     });
     expect(config.service.timezone).toBe("America/New_York");
     expect(config.codex.sandbox).toBe("danger-full-access");

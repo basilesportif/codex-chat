@@ -141,6 +141,15 @@ const claudeMainAgentSchema = z.object({
   pathToClaudeCodeExecutable: z.string().default(""),
   mainSessionName: z.string().default("codex-chat-main-claude"),
   startupTimeoutSec: z.number().int().positive().default(90),
+  // A turn result that arrives while nested native agents are still running
+  // describes work that has not happened yet, so it is held. Once the nested
+  // set drains, this is how long the session may stay silent before codex-chat
+  // nudges it once for the real post-nested report.
+  nestedAgentSettleGraceMs: z.number().int().positive().default(10_000),
+  // Absolute cap on holding one turn's result. The service watchdog force-
+  // aborts any main turn older than 80s (TURN_ABORT_MS) and tells the user it
+  // timed out, so the hold must always release before that.
+  nestedAgentHoldMaxMs: z.number().int().positive().default(55_000),
 }).prefault({});
 
 export type ClaudeSubagentConfig = z.infer<typeof claudeSubagentSchema>;

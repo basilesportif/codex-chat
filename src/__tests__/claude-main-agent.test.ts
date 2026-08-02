@@ -115,7 +115,7 @@ function fakeSdk(plans: FakeQueryPlan[] = [{}]) {
   return { query, instances };
 }
 
-function testConfig(): AppConfig {
+function testConfig(nested?: { settleGraceMs?: number; holdMaxMs?: number }): AppConfig {
   return {
     rootDir: "/tmp/codex-chat-test",
     service: {
@@ -135,7 +135,9 @@ function testConfig(): AppConfig {
         settingSources: [],
         pathToClaudeCodeExecutable: "",
         mainSessionName: "codex-chat-main-claude",
-        startupTimeoutSec: 2
+        startupTimeoutSec: 2,
+        nestedAgentSettleGraceMs: nested?.settleGraceMs ?? 5_000,
+        nestedAgentHoldMaxMs: nested?.holdMaxMs ?? 55_000
       }
     },
     codex: { providerApiKeyEnvNames: ["OPENROUTER_API_KEY"] }
@@ -179,12 +181,30 @@ async function loadClient(
   sdk: ReturnType<typeof fakeSdk>,
   state = fakeState().state,
   behavior = fakeBehavior(),
-  onCrash = vi.fn()
+  onCrash = vi.fn(),
+  config = testConfig()
 ) {
   vi.resetModules();
   vi.doMock("@anthropic-ai/claude-agent-sdk", () => ({ query: sdk.query }));
   const { ClaudeMainAgentClient } = await import("../claude-main-agent.js");
-  return new ClaudeMainAgentClient(testConfig(), state, behavior, fakeLogger() as never, onCrash);
+  return new ClaudeMainAgentClient(config, state, behavior, fakeLogger() as never, onCrash);
+}
+
+function backgroundTasksMessage(
+  sessionId: string,
+  tasks: Array<{ task_id: string; task_type: string; description: string }>
+) {
+  return {
+    type: "system",
+    subtype: "background_tasks_changed",
+    tasks,
+    uuid: `bg-${sessionId}-${tasks.length}-${Math.random()}`,
+    session_id: sessionId
+  };
+}
+
+function successResult(sessionId: string, result: string, uuid = `result-${Math.random()}`) {
+  return { type: "result", subtype: "success", result, errors: [], uuid, session_id: sessionId };
 }
 
 async function collect(stream: AsyncIterable<MainAgentEvent>): Promise<MainAgentEvent[]> {
@@ -254,13 +274,16 @@ describe("ClaudeMainAgentClient", () => {
     });
     expect(sdk.instances[0]?.options).toMatchObject({
       cwd: "/tmp/codex-chat-test",
-      systemPrompt: "bootstrap-v1",
       model: "claude-sonnet-5",
       effort: "high",
       includePartialMessages: true,
       strictMcpConfig: true,
       title: "codex-chat main"
     });
+    const systemPrompt = sdk.instances[0]?.options.systemPrompt as string;
+    expect(systemPrompt.startsWith("bootstrap-v1")).toBe(true);
+    expect(systemPrompt).toContain("run_in_background: false");
+    expect(systemPrompt).toContain("Do not send your final report while any nested agent is still running");
     await client.stop();
   });
 
@@ -546,6 +569,157 @@ describe("ClaudeMainAgentClient", () => {
     await client.stop();
     expect(sdk.instances[0]?.interrupt).toHaveBeenCalledOnce();
     await expect(client.health()).resolves.toMatchObject({ ok: false, detail: "stopped" });
+  });
+
+  test("holds a result that arrives while a nested agent is live, then releases the post-nested result", async () => {
+    const sdk = fakeSdk([{ sessionId: "nested-session" }]);
+    const client = await loadClient(sdk);
+    await client.start();
+
+    const events: MainAgentEvent[] = [];
+    let settled = false;
+    const done = (async () => {
+      for await (const event of client.sendTurn({ text: "fix the bug" })) events.push(event);
+      settled = true;
+    })();
+    await beginFirstTurn(sdk.instances[0]!);
+
+    sdk.instances[0]!.sdk.push(
+      backgroundTasksMessage("nested-session", [
+        { task_id: "task-1", task_type: "local_agent", description: "investigator: find the root cause" },
+        { task_id: "task-2", task_type: "local_bash", description: "npm run dev" }
+      ])
+    );
+    // The session reports back while the nested investigator is still running.
+    sdk.instances[0]!.sdk.push(successResult("nested-session", "spawned an investigator; nothing fixed yet"));
+
+    await waitFor(() => events.some((event) => event.type === "status"));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(settled).toBe(false);
+    expect(events.some((event) => event.type === "final")).toBe(false);
+    expect(events[0]).toMatchObject({ type: "status", message: "waiting on 1 nested agent before replying" });
+
+    // The nested agent finishes; the backgrounded dev server keeps running and
+    // must not keep holding the reply.
+    sdk.instances[0]!.sdk.push(
+      backgroundTasksMessage("nested-session", [{ task_id: "task-2", task_type: "local_bash", description: "npm run dev" }])
+    );
+    sdk.instances[0]!.sdk.push(successResult("nested-session", "investigator finished; bug fixed and tests pass"));
+
+    await done;
+    expect(events.filter((event) => event.type === "final")).toEqual([
+      { type: "final", text: "investigator finished; bug fixed and tests pass" }
+    ]);
+    await client.stop();
+  });
+
+  test("a live backgrounded Bash task does not hold a successful result", async () => {
+    const sdk = fakeSdk([{ sessionId: "bash-session" }]);
+    const client = await loadClient(sdk);
+    await client.start();
+
+    const eventsPromise = collect(client.sendTurn({ text: "start the dev server and verify" }));
+    await beginFirstTurn(sdk.instances[0]!);
+    sdk.instances[0]!.sdk.push(
+      backgroundTasksMessage("bash-session", [
+        { task_id: "task-1", task_type: "local_bash", description: "npm run dev" },
+        { task_id: "task-2", task_type: "local_workflow", description: "spec" }
+      ])
+    );
+    sdk.instances[0]!.sdk.push(successResult("bash-session", "fix verified against the dev server"));
+
+    await expect(eventsPromise).resolves.toEqual([{ type: "final", text: "fix verified against the dev server" }]);
+    await client.stop();
+  });
+
+  test("nudges a quiet session once after its nested agents drain, then settles on that turn's result", async () => {
+    const sdk = fakeSdk([{ sessionId: "drain-session" }]);
+    const client = await loadClient(sdk, fakeState().state, fakeBehavior(), vi.fn(), testConfig({ settleGraceMs: 20 }));
+    await client.start();
+
+    const eventsPromise = collect(client.sendTurn({ text: "fix the bug" }));
+    await beginFirstTurn(sdk.instances[0]!);
+    sdk.instances[0]!.sdk.push(
+      backgroundTasksMessage("drain-session", [
+        { task_id: "task-1", task_type: "local_agent", description: "implementer: apply the fix" }
+      ])
+    );
+    sdk.instances[0]!.sdk.push(successResult("drain-session", "dispatched an implementer"));
+    sdk.instances[0]!.sdk.push(backgroundTasksMessage("drain-session", []));
+
+    // The session never woke on its own; the drain timer nudges it.
+    const nudge = await sdk.instances[0]!.input.next();
+    expect(nudge.value).toMatchObject({
+      type: "user",
+      message: {
+        role: "user",
+        content: [{ type: "text", text: expect.stringContaining("every nested agent you launched has finished") }]
+      }
+    });
+
+    sdk.instances[0]!.sdk.push(successResult("drain-session", "implementer's fix reviewed; tests pass"));
+    const events = await eventsPromise;
+    expect(events.filter((event) => event.type === "final")).toEqual([
+      { type: "final", text: "implementer's fix reviewed; tests pass" }
+    ]);
+    await client.stop();
+  });
+
+  test("stopping mid-hold flushes the held reply instead of dropping it", async () => {
+    const sdk = fakeSdk([{ sessionId: "stop-session" }]);
+    const client = await loadClient(sdk);
+    await client.start();
+
+    const eventsPromise = collect(client.sendTurn({ text: "fix the bug" }));
+    await beginFirstTurn(sdk.instances[0]!);
+    sdk.instances[0]!.sdk.push(
+      backgroundTasksMessage("stop-session", [
+        { task_id: "task-1", task_type: "local_agent", description: "implementer: apply the fix" }
+      ])
+    );
+    sdk.instances[0]!.sdk.push(successResult("stop-session", "held interim answer"));
+    await waitFor(() => client.getRecentLogs(50).join("\n").includes("[TURN HELD]"));
+
+    await client.stop();
+    const events = await eventsPromise;
+    expect(events.filter((event) => event.type === "final")).toEqual([{ type: "final", text: "held interim answer" }]);
+  });
+
+  test("rewrites nested Agent tool calls to run in the foreground", async () => {
+    const sdk = fakeSdk([{ sessionId: "hook-session" }]);
+    const client = await loadClient(sdk);
+    await client.start();
+
+    const options = sdk.instances[0]!.options as {
+      hooks?: { PreToolUse?: Array<{ matcher?: string; hooks: Array<(input: unknown) => Promise<unknown>> }> };
+    };
+    const matcher = options.hooks?.PreToolUse?.[0];
+    expect(matcher?.matcher).toBe("Agent");
+    const hook = matcher?.hooks[0];
+    await expect(
+      hook?.({
+        hook_event_name: "PreToolUse",
+        tool_name: "Agent",
+        tool_use_id: "toolu_1",
+        tool_input: { prompt: "investigate", subagent_type: "investigator", run_in_background: true }
+      })
+    ).resolves.toMatchObject({
+      continue: true,
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        updatedInput: { prompt: "investigate", subagent_type: "investigator", run_in_background: false }
+      }
+    });
+    await expect(
+      hook?.({
+        hook_event_name: "PreToolUse",
+        tool_name: "Bash",
+        tool_use_id: "toolu_2",
+        tool_input: { command: "ls", run_in_background: true }
+      })
+    ).resolves.toEqual({ continue: true });
+    expect(client.getRecentLogs(50).join("\n")).toContain("forced foreground subagent_type=investigator");
+    await client.stop();
   });
 
   test("rejects initialization when the SDK reports a non-first-party provider", async () => {

@@ -17,6 +17,15 @@ import {
   verifyClaudeOAuthInitialization,
   type ChildEnvSource
 } from "./claude-auth.js";
+import {
+  CLAUDE_AGENT_TOOL_NAME,
+  CLAUDE_NESTED_AGENTS_DRAINED_NUDGE,
+  buildForceForegroundNestedAgentsHook,
+  claudeNestedAgentPromptRules,
+  isClaudeNestedAgentTask,
+  normalizeClaudeBackgroundTasks,
+  type ClaudeBackgroundTask
+} from "./claude-nested-agents.js";
 import { resolveConfigPath, type AppConfig } from "./config.js";
 import type { CodexCrashHandler } from "./codex.js";
 import { LogBuffer } from "./log-buffer.js";
@@ -31,7 +40,31 @@ interface ActiveTurn {
   readonly queue: AsyncEventQueue<MainAgentEvent>;
   assistantText: string;
   partialText: string;
+  /**
+   * A successful result withheld because nested native agents launched by this
+   * turn were still running. The turn stays open until they drain and the
+   * session produces a post-nested result (or a bound below releases this).
+   */
+  heldFinalText?: string;
+  /** Fires `nestedAgentSettleGraceMs` after the nested set drains while quiet. */
+  drainTimer?: NodeJS.Timeout;
+  /** Absolute `nestedAgentHoldMaxMs` bound armed when the hold starts. */
+  holdTimer?: NodeJS.Timeout;
+  nudgeSent: boolean;
 }
+
+/**
+ * Appended to the behavior-pack bootstrap for the Claude main session only.
+ * `[mainAgent.claude].allowedTools` includes the SDK-native `Agent` tool, and
+ * SDK 0.3.220 backgrounds those calls by default — which would let the session
+ * finish its turn (and codex-chat reply on Telegram) while the nested agent it
+ * just launched is still working.
+ */
+const CLAUDE_MAIN_NESTED_AGENT_GUIDANCE = [
+  "Nested agents (codex-chat main loop):",
+  ...claudeNestedAgentPromptRules("bug"),
+  "If you have nothing to report yet because nested work is still running, keep working instead of ending your turn: the user only sees your final message."
+].join("\n");
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -129,6 +162,20 @@ export class ClaudeMainAgentClient implements MainAgentClient {
   private detail = "not initialized";
   private generation = 0;
   private endedGeneration?: number;
+  /**
+   * Live background tasks from the SDK's `system` / `background_tasks_changed`
+   * message (REPLACE semantics: every payload carries the whole set). Only the
+   * nested-agent subset gates turn completion; a backgrounded `Bash` dev server
+   * must never hold a user's reply.
+   */
+  private liveBackgroundTasks: ClaudeBackgroundTask[] = [];
+  private liveNestedAgentTasks: ClaudeBackgroundTask[] = [];
+  /**
+   * Bumped on every SDK message. The quiet-parent drain timer captures it and
+   * aborts if the session spoke again, so a stale timer cannot release a turn
+   * that is making progress.
+   */
+  private sdkActivityGeneration = 0;
   private readonly logBuffer = new LogBuffer(300);
 
   constructor(
@@ -254,6 +301,10 @@ export class ClaudeMainAgentClient implements MainAgentClient {
     this.stopping = true;
     this.alive = false;
     this.detail = "stopped";
+    // A provider switch only waits MAIN_AGENT_SWITCH_GRACE_MS for in-flight
+    // turns before calling stop(); flush anything being held so the switch
+    // costs the user a stale reply rather than silence.
+    this.flushHeldResult("session stopped");
     this.activeTurn?.queue.close();
     this.activeTurn = undefined;
     await this.disposeQuery(true);
@@ -280,7 +331,8 @@ export class ClaudeMainAgentClient implements MainAgentClient {
     const turn: ActiveTurn = {
       queue: new AsyncEventQueue<MainAgentEvent>(),
       assistantText: "",
-      partialText: ""
+      partialText: "",
+      nudgeSent: false
     };
     this.activeTurn = turn;
     this.logBuffer.append("event", `[TURN START] session_id=${this.sessionId ?? "?"}`);
@@ -295,6 +347,7 @@ export class ClaudeMainAgentClient implements MainAgentClient {
       throw error;
     } finally {
       if (this.activeTurn === turn) this.activeTurn = undefined;
+      this.clearNestedHoldTimers(turn);
       turn.queue.close();
     }
   }
@@ -365,7 +418,7 @@ export class ClaudeMainAgentClient implements MainAgentClient {
         ...this.safeEnv,
         CLAUDE_AGENT_SDK_CLIENT_APP: "codex-chat/main"
       },
-      systemPrompt: bootstrap,
+      systemPrompt: `${bootstrap}\n\n${CLAUDE_MAIN_NESTED_AGENT_GUIDANCE}`,
       model: cfg.model,
       effort: cfg.effort as ClaudeEffortLevel,
       permissionMode: cfg.permissionMode,
@@ -375,6 +428,35 @@ export class ClaudeMainAgentClient implements MainAgentClient {
       allowedTools: cfg.allowedTools,
       disallowedTools: cfg.disallowedTools,
       settingSources: cfg.settingSources,
+      // The main loop declares no programmatic `agents`; whatever agent types
+      // the Agent tool exposes come from the SDK and from any filesystem
+      // agent definitions `settingSources` loads, none of which codex-chat can
+      // annotate with `background: false`. The hook is therefore the only
+      // structural place to force foreground execution here.
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: CLAUDE_AGENT_TOOL_NAME,
+            hooks: [
+              buildForceForegroundNestedAgentsHook(({ subagentType }) => {
+                this.logBuffer.append(
+                  "event",
+                  `[NESTED AGENT] forced foreground subagent_type=${subagentType ?? "unspecified"}`
+                );
+                this.logger.info(
+                  {
+                    component: "claude-main-agent",
+                    event: "claude_nested_agent_forced_foreground",
+                    sessionId: this.sessionId,
+                    subagentType
+                  },
+                  "rewrote a nested Agent call to run in the foreground"
+                );
+              })
+            ]
+          }
+        ]
+      },
       strictMcpConfig: true,
       includePartialMessages: true,
       stderr: (data) => this.captureStderr(data),
@@ -400,8 +482,25 @@ export class ClaudeMainAgentClient implements MainAgentClient {
   }
 
   private handleSdkMessage(message: ClaudeSdkMessage): void {
+    // Any SDK message means the session is not quiet, so a pending quiet-parent
+    // release must be cancelled and re-armed only once it goes silent again.
+    this.sdkActivityGeneration += 1;
+    this.clearNestedDrainTimer();
+    try {
+      this.routeSdkMessage(message);
+    } finally {
+      this.armNestedDrainTimerIfIdle();
+    }
+  }
+
+  private routeSdkMessage(message: ClaudeSdkMessage): void {
     const subtype = "subtype" in message && typeof message.subtype === "string" ? message.subtype : undefined;
     this.logBuffer.append("event", `[SDK] type=${message.type}${subtype ? ` subtype=${subtype}` : ""}`, true);
+
+    if (message.type === "system" && message.subtype === "background_tasks_changed") {
+      this.replaceLiveBackgroundTasks(message.tasks ?? []);
+      return;
+    }
 
     if (message.type === "system" && message.subtype === "init") {
       // SDK 0.3.220 narrowed the apiKeySource union to API-key sources only
@@ -454,9 +553,27 @@ export class ClaudeMainAgentClient implements MainAgentClient {
     if (message.type === "result") {
       if (message.subtype === "success") {
         const final = message.result || turn.assistantText || turn.partialText;
+        if (this.liveNestedAgentTasks.length > 0 && !this.stopping) {
+          // The session ended its turn while nested agents it launched are
+          // still running: this "answer" describes work that has not happened
+          // yet. Hold it — the user must not be replied to until the nested
+          // work drains and the session reports again.
+          this.holdResultForNestedAgents(turn, final);
+          return;
+        }
+        this.clearNestedHoldTimers(turn);
+        if (turn.heldFinalText !== undefined) {
+          turn.heldFinalText = undefined;
+          this.logBuffer.append("event", "[NESTED AGENT] released held turn on post-nested result");
+          this.logger.info(
+            { component: "claude-main-agent", event: "claude_result_released_after_nested_agents", sessionId: this.sessionId },
+            "post-nested result released the held main turn"
+          );
+        }
         turn.queue.push({ type: "final", text: final });
         this.logBuffer.append("event", `[TURN END] status=success session_id=${message.session_id}`);
       } else {
+        this.clearNestedHoldTimers(turn);
         const errors = message.errors.length > 0 ? message.errors.join("; ") : message.subtype;
         turn.queue.push(this.errorEvent(errors, message));
         this.logBuffer.append("event", `[TURN END] status=error kind=${classifyClaudeError(errors)}`);
@@ -490,6 +607,175 @@ export class ClaudeMainAgentClient implements MainAgentClient {
     }
   }
 
+  /**
+   * REPLACE semantics per the SDK contract for `background_tasks_changed`:
+   * swap the whole set rather than pairing start/stop edges, so a missed
+   * bookend cannot wedge a stale "still running" state.
+   */
+  private replaceLiveBackgroundTasks(
+    tasks: ReadonlyArray<{ task_id: string; task_type: string; description: string }>
+  ): void {
+    const previousNestedAgentCount = this.liveNestedAgentTasks.length;
+    this.liveBackgroundTasks = normalizeClaudeBackgroundTasks(tasks);
+    this.liveNestedAgentTasks = this.liveBackgroundTasks.filter((task) => isClaudeNestedAgentTask(task.taskType));
+    if (previousNestedAgentCount === this.liveNestedAgentTasks.length && this.liveNestedAgentTasks.length === 0) return;
+    this.logBuffer.append(
+      "event",
+      `[BACKGROUND TASKS] nested_agents=${this.liveNestedAgentTasks.length} total=${this.liveBackgroundTasks.length}`
+    );
+    this.logger.info(
+      {
+        component: "claude-main-agent",
+        event: "claude_background_tasks_changed",
+        sessionId: this.sessionId,
+        previousNestedAgentCount,
+        nestedAgentTasks: this.liveNestedAgentTasks,
+        backgroundTasks: this.liveBackgroundTasks,
+        resultHeld: this.activeTurn?.heldFinalText !== undefined
+      },
+      "Claude main-loop background task set changed"
+    );
+  }
+
+  /** Withhold a successful result until the turn's nested agents drain. */
+  private holdResultForNestedAgents(turn: ActiveTurn, final: string): void {
+    const firstHold = turn.heldFinalText === undefined;
+    turn.heldFinalText = final;
+    const count = this.liveNestedAgentTasks.length;
+    this.logBuffer.append("event", `[TURN HELD] waiting on ${count} nested agent(s)`);
+    this.logger.info(
+      {
+        component: "claude-main-agent",
+        event: "claude_result_held_for_nested_agents",
+        sessionId: this.sessionId,
+        nestedAgentTasks: this.liveNestedAgentTasks
+      },
+      "held a Claude main-loop result because nested agents are still running"
+    );
+    turn.queue.push({
+      type: "status",
+      message: `waiting on ${count} nested agent${count === 1 ? "" : "s"} before replying`,
+      raw: { event: "claude_result_held_for_nested_agents", nestedAgents: count }
+    });
+    if (!firstHold || turn.holdTimer) return;
+    // Absolute bound: the service watchdog force-aborts any main turn older
+    // than TURN_ABORT_MS and tells the user it timed out, so the hold has to
+    // release on its own well before that.
+    turn.holdTimer = setTimeout(() => {
+      turn.holdTimer = undefined;
+      this.releaseHeldResultOnMaxHold(turn);
+    }, this.config.mainAgent.claude.nestedAgentHoldMaxMs);
+    turn.holdTimer.unref?.();
+  }
+
+  private armNestedDrainTimerIfIdle(): void {
+    this.clearNestedDrainTimer();
+    const turn = this.activeTurn;
+    if (!turn || turn.heldFinalText === undefined) return;
+    if (this.stopping || this.liveNestedAgentTasks.length > 0) return;
+    const generation = this.sdkActivityGeneration;
+    turn.drainTimer = setTimeout(() => {
+      turn.drainTimer = undefined;
+      this.settleOrNudgeAfterNestedDrain(turn, generation);
+    }, this.config.mainAgent.claude.nestedAgentSettleGraceMs);
+    turn.drainTimer.unref?.();
+  }
+
+  private clearNestedDrainTimer(): void {
+    const turn = this.activeTurn;
+    if (!turn?.drainTimer) return;
+    clearTimeout(turn.drainTimer);
+    turn.drainTimer = undefined;
+  }
+
+  private clearNestedHoldTimers(turn: ActiveTurn): void {
+    if (turn.drainTimer) clearTimeout(turn.drainTimer);
+    if (turn.holdTimer) clearTimeout(turn.holdTimer);
+    turn.drainTimer = undefined;
+    turn.holdTimer = undefined;
+  }
+
+  /**
+   * The nested agents drained while a result was held and the session then
+   * stayed quiet. Ask it once for the report that accounts for the nested
+   * results; if it has already been asked (or cannot be), release the held
+   * text rather than leaving the user waiting.
+   */
+  private settleOrNudgeAfterNestedDrain(turn: ActiveTurn, generation: number): void {
+    if (this.activeTurn !== turn || turn.heldFinalText === undefined) return;
+    if (this.stopping || this.liveNestedAgentTasks.length > 0) return;
+    if (this.sdkActivityGeneration !== generation) return;
+    if (!turn.nudgeSent && this.alive && this.inputQueue) {
+      turn.nudgeSent = true;
+      this.logBuffer.append("event", "[NESTED AGENT] nudging quiet session for the post-nested report");
+      this.logger.info(
+        { component: "claude-main-agent", event: "claude_nested_agents_drained_nudge", sessionId: this.sessionId },
+        "nested agents drained while a main-loop result was held; nudging the session"
+      );
+      void this.buildUserMessage(CLAUDE_NESTED_AGENTS_DRAINED_NUDGE, [])
+        .then((nudge) => {
+          if (this.activeTurn !== turn || this.stopping) return;
+          this.inputQueue?.push(nudge);
+        })
+        .catch((error) => {
+          this.logger.warn(
+            {
+              component: "claude-main-agent",
+              event: "claude_nested_agents_drained_nudge_failed",
+              error: this.redactError(error)
+            },
+            "failed to nudge the Claude main session after its nested agents drained"
+          );
+          this.releaseHeldResult(turn, "nudge failed");
+        });
+      return;
+    }
+    this.releaseHeldResult(turn, "session stayed quiet after its nested agents drained");
+  }
+
+  private releaseHeldResultOnMaxHold(turn: ActiveTurn): void {
+    if (this.activeTurn !== turn || turn.heldFinalText === undefined) return;
+    const count = this.liveNestedAgentTasks.length;
+    this.logger.warn(
+      {
+        component: "claude-main-agent",
+        event: "claude_nested_agent_hold_expired",
+        sessionId: this.sessionId,
+        nestedAgentTasks: this.liveNestedAgentTasks
+      },
+      "released a held Claude main-loop result at the maximum hold window"
+    );
+    const note =
+      count > 0
+        ? `\n\n_(codex-chat: ${count} nested agent${count === 1 ? " was" : "s were"} still running when this reply was sent.)_`
+        : "";
+    this.releaseHeldResult(turn, "maximum hold window elapsed", note);
+  }
+
+  /** End a held turn with the withheld text. */
+  private releaseHeldResult(turn: ActiveTurn, reason: string, suffix = "", closeTurn = true): void {
+    const held = turn.heldFinalText;
+    if (held === undefined) return;
+    turn.heldFinalText = undefined;
+    this.clearNestedHoldTimers(turn);
+    this.logBuffer.append("event", `[TURN END] status=success held_release reason=${reason}`);
+    turn.queue.push({ type: "final", text: `${held}${suffix}` });
+    if (!closeTurn) return;
+    turn.queue.close();
+    if (this.activeTurn === turn) this.activeTurn = undefined;
+  }
+
+  /**
+   * Emit whatever the active turn is holding without ending it; the stop and
+   * termination paths close the turn themselves (and termination still needs
+   * to append its error after the held text).
+   */
+  private flushHeldResult(reason: string): void {
+    const turn = this.activeTurn;
+    if (!turn || turn.heldFinalText === undefined) return;
+    this.releaseHeldResult(turn, reason, "", false);
+  }
+
   private handleUnexpectedTermination(generation: number, reason: string, raw?: unknown): void {
     if (generation !== this.generation) return;
     this.endedGeneration = generation;
@@ -499,6 +785,7 @@ export class ClaudeMainAgentClient implements MainAgentClient {
     this.startupFailure?.reject(error);
     const turn = this.activeTurn;
     if (turn) {
+      this.flushHeldResult(reason);
       turn.queue.push(this.errorEvent(error, raw));
       turn.queue.close();
       this.activeTurn = undefined;

@@ -7,6 +7,8 @@ import {
   query as queryClaudeAgentSdk,
   type AgentDefinition as ClaudeAgentDefinition,
   type EffortLevel as ClaudeEffortLevel,
+  type HookInput as ClaudeHookInput,
+  type HookJSONOutput as ClaudeHookJsonOutput,
   type Options as ClaudeAgentSdkOptions,
   type Query as ClaudeAgentSdkQuery,
   type SDKMessage as ClaudeSdkMessage,
@@ -86,12 +88,41 @@ const CLAUDE_SYNTHETIC_ACTIVE_TURN_ID = "claude-agent-sdk-stream";
 const CLAUDE_FAST_MODE_MODEL_PREFIXES = ["claude-opus-5", "claude-opus-4-7", "claude-opus-4-8"];
 const CLAUDE_AGENT_TOOL_NAME = "Agent";
 
+/**
+ * Pushed as a follow-up user turn when the SDK reports that every background
+ * task has drained but the parent session went quiet without producing a
+ * post-nested report. Without it a job could sit held until its timeout.
+ */
+/**
+ * `task_type` values in the SDK's `background_tasks_changed` payload are the
+ * raw task-state discriminants (Claude Code 2.1.220 builds the payload as
+ * `{task_id: t.id, task_type: t.type, description: t.description}`). Nested
+ * Agent-tool runs register as `local_agent`; `remote_agent` and
+ * `in_process_teammate` are the other agent-shaped kinds. Backgrounded Bash
+ * (`local_bash`), `local_workflow`, and `mcp_task` are deliberately excluded:
+ * a child that leaves a dev server or watcher running must still be able to
+ * complete. `subagent` is the friendly label the same tasks carry elsewhere in
+ * the SDK surface, accepted here so a label-shaped payload still gates.
+ */
+const CLAUDE_NESTED_AGENT_TASK_TYPES = new Set(["local_agent", "remote_agent", "in_process_teammate", "subagent"]);
+
+function isClaudeNestedAgentTask(taskType: string): boolean {
+  const normalized = taskType.trim().toLowerCase();
+  return CLAUDE_NESTED_AGENT_TASK_TYPES.has(normalized) || normalized.endsWith("_agent");
+}
+
+const CLAUDE_NESTED_AGENTS_DRAINED_NUDGE = [
+  "codex-chat notice: every nested agent you launched has finished, but you reported back before their results were in.",
+  "Read each nested agent's output now, verify the work actually landed, finish anything still outstanding yourself, and then send your real final report."
+].join("\n");
+
 function claudeNativeAgents(cfg: ClaudeSubagentConfig): Record<string, ClaudeAgentDefinition> {
   return {
     implementer: {
       description: "Implement a bounded, well-specified coding task: write/edit files and run tests.",
       model: cfg.implementerModel,
       effort: "high",
+      background: false,
       tools: ["Read", "Glob", "Grep", "Bash", "Write", "Edit", "MultiEdit"],
       prompt: [
         "You are a focused coding subagent launched from a codex-chat Claude-backed parent session.",
@@ -106,6 +137,7 @@ function claudeNativeAgents(cfg: ClaudeSubagentConfig): Record<string, ClaudeAge
       description: "Investigate code/repos/logs and report findings; read-only.",
       model: cfg.investigatorModel,
       effort: "medium",
+      background: false,
       tools: ["Read", "Glob", "Grep", "Bash"],
       disallowedTools: ["Write", "Edit", "MultiEdit"],
       prompt: [
@@ -119,6 +151,7 @@ function claudeNativeAgents(cfg: ClaudeSubagentConfig): Record<string, ClaudeAge
       description: "Review code changes for bugs, regressions, missing tests, and operational risks.",
       model: cfg.reviewerModel,
       effort: "high",
+      background: false,
       tools: ["Read", "Glob", "Grep", "Bash"],
       disallowedTools: ["Write", "Edit", "MultiEdit"],
       prompt: [
@@ -138,6 +171,8 @@ export function nativeAgentGuidance(agents: Record<string, ClaudeAgentDefinition
     `Native subagents (Agent tool) available in this session: implementer (${model("implementer")}) — writes code and runs tests; investigator (${model("investigator")}) — read-only research; reviewer (${model("reviewer")}) — read-only code review.`,
     "Delegate substantive coding, repo research, and rote/mechanical execution to these subagents instead of doing it yourself: break the task into bounded briefs, dispatch implementer subagents for changes (parallel when independent) and investigators for research, then review what comes back, follow the leads it surfaces, and iterate until the work meets your standards.",
     "Reserve your own effort for briefs, review judgment, and decisions. Keep one concern per subagent and pass each a complete, self-contained brief.",
+    "Never background a nested agent: always call the Agent tool with run_in_background: false (codex-chat rewrites the call if you forget) and never use isolation: \"remote\". Wait for each nested agent's result before continuing.",
+    "Do not send your final report while any nested agent is still running. Your final message must come after every nested agent has finished, you have read its output, and you have verified the work actually landed — an early report is treated as a failed job.",
     "You remain responsible for the final result reported to your parent."
   ].join("\n")
 }
@@ -458,6 +493,28 @@ class ClaudeAgentSdkSession {
    * must not be killed by a stale grace-settle.
    */
   private sdkActivityGeneration = 0;
+  /**
+   * Live background tasks reported by the SDK's `system/background_tasks_changed`
+   * level signal. The SDK documents REPLACE semantics, so the whole set is
+   * swapped on every payload and a missed edge cannot wedge it. Recorded in
+   * full for observability; only the nested-agent subset gates completion.
+   */
+  private liveBackgroundTasks: Array<{ taskId: string; taskType: string; description: string }> = [];
+  /** The {@link isClaudeNestedAgentTask} subset of {@link liveBackgroundTasks}. */
+  private liveNestedAgentTasks: Array<{ taskId: string; taskType: string; description: string }> = [];
+  /**
+   * A successful turn result was withheld because nested agents were still
+   * live: the parent reported back before they finished, so the job must stay
+   * open until they drain and the parent reports again.
+   */
+  private resultHeldForBackgroundWork = false;
+  /**
+   * Armed once background work has drained while a result is held. If the SDK
+   * stays silent (the parent never woke to write a post-nested report), the
+   * session is nudged once for the real report and settled after that.
+   */
+  private backgroundDrainTimer?: NodeJS.Timeout;
+  private backgroundDrainNudgeSent = false;
   private assistantText = "";
   private partialText = "";
   private finalMessage = "";
@@ -549,6 +606,7 @@ class ClaudeAgentSdkSession {
     this.stopping = true;
     this.killSignal = "SIGTERM";
     this.clearSettleGraceTimer();
+    this.clearBackgroundDrainTimer();
     this.input.job.activeTurnId = undefined;
     this.queue.close();
     await this.appendEvent({ event: "claude_interrupt_requested", at: nowIso(), backend: "claude_agent_sdk", jobId: this.input.job.id, reason });
@@ -564,6 +622,7 @@ class ClaudeAgentSdkSession {
     this.stopping = true;
     this.closed = true;
     this.clearSettleGraceTimer();
+    this.clearBackgroundDrainTimer();
     this.killSignal = signal;
     this.input.job.activeTurnId = undefined;
     this.queue.close();
@@ -640,6 +699,14 @@ class ClaudeAgentSdkSession {
       agents,
       maxTurns: cfg.maxTurns,
       settingSources: cfg.settingSources,
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: CLAUDE_AGENT_TOOL_NAME,
+            hooks: [(hookInput) => this.forceForegroundNestedAgents(hookInput)]
+          }
+        ]
+      },
       strictMcpConfig: true,
       includePartialMessages: true,
       settings,
@@ -737,7 +804,22 @@ class ClaudeAgentSdkSession {
     // settleFromGrace whose timer already fired.
     this.sdkActivityGeneration += 1;
     this.clearSettleGraceTimer();
+    this.clearBackgroundDrainTimer();
     await this.appendEvent({ event: "claude_sdk_message", at: nowIso(), backend: "claude_agent_sdk", raw: message });
+    try {
+      await this.routeSdkMessage(message);
+    } finally {
+      // Re-armed after every message: the drain nudge must only fire once the
+      // parent has actually gone quiet with nothing left to wait for.
+      this.armBackgroundDrainTimerIfIdle();
+    }
+  }
+
+  private async routeSdkMessage(message: ClaudeSdkMessage): Promise<void> {
+    if (message.type === "system" && message.subtype === "background_tasks_changed") {
+      await this.replaceLiveBackgroundTasks(message.tasks ?? []);
+      return;
+    }
     if (message.type === "system" && message.subtype === "init") {
       // SDK 0.3.220 narrowed the apiKeySource union to API-key sources only
       // (OAuth sessions omit the field); compare as plain string so the historic
@@ -766,6 +848,22 @@ class ClaudeAgentSdkSession {
       this.pendingUserTurns = Math.max(0, this.pendingUserTurns - 1);
       if (message.subtype === "success") {
         this.finalMessage = message.result || this.assistantText || this.partialText;
+        if (this.liveNestedAgentTasks.length > 0 && !this.stopping) {
+          // The parent finished a turn while nested agents it launched are
+          // still running: its "final" answer describes work that has not
+          // happened yet. Keep the job running (and steerable) until the
+          // nested work drains and the parent reports again.
+          this.resultHeldForBackgroundWork = true;
+          await this.appendEvent({
+            event: "claude_result_held_for_nested_agents",
+            at: nowIso(),
+            backend: "claude_agent_sdk",
+            jobId: this.input.job.id,
+            pendingUserTurns: this.pendingUserTurns,
+            nestedAgentTasks: this.liveNestedAgentTasks
+          });
+          return;
+        }
         if (this.pendingUserTurns > 0 && !this.stopping) {
           // A steer is still outstanding. Either it was absorbed into the run
           // that just produced this result (no further messages coming — the
@@ -845,8 +943,144 @@ class ClaudeAgentSdkSession {
     this.settled = true;
     this.closed = true;
     this.clearSettleGraceTimer();
+    this.clearBackgroundDrainTimer();
+    this.resultHeldForBackgroundWork = false;
     this.input.job.activeTurnId = undefined;
+    this.input.job.waitingOnNestedAgents = undefined;
     this.resolveFinished(finish);
+  }
+
+  /**
+   * REPLACE semantics per the SDK contract for `background_tasks_changed`:
+   * swap the whole set rather than pairing task_started/task_notification
+   * edges, so a missed bookend cannot wedge a stale "still running" state.
+   */
+  private async replaceLiveBackgroundTasks(
+    tasks: ReadonlyArray<{ task_id: string; task_type: string; description: string }>
+  ): Promise<void> {
+    const previous = this.liveNestedAgentTasks.length;
+    this.liveBackgroundTasks = tasks.map((task) => ({
+      taskId: task.task_id,
+      taskType: task.task_type,
+      description: task.description
+    }));
+    this.liveNestedAgentTasks = this.liveBackgroundTasks.filter((task) => isClaudeNestedAgentTask(task.taskType));
+    await this.appendEvent({
+      event: "claude_background_tasks_changed",
+      at: nowIso(),
+      backend: "claude_agent_sdk",
+      jobId: this.input.job.id,
+      previousNestedAgentCount: previous,
+      backgroundTasks: this.liveBackgroundTasks,
+      nestedAgentTasks: this.liveNestedAgentTasks,
+      resultHeld: this.resultHeldForBackgroundWork
+    });
+    const waiting = this.liveNestedAgentTasks.length > 0 ? this.liveNestedAgentTasks.length : undefined;
+    if (this.input.job.waitingOnNestedAgents === waiting) return;
+    this.input.job.waitingOnNestedAgents = waiting;
+    await this.input.onJobUpdated(this.input.job).catch(() => undefined);
+  }
+
+  private armBackgroundDrainTimerIfIdle(): void {
+    this.clearBackgroundDrainTimer();
+    if (!this.resultHeldForBackgroundWork || this.settled || this.closed || this.stopping) return;
+    if (this.liveNestedAgentTasks.length > 0) return;
+    const graceMs = claudeSubagentConfig(this.config).steerSettleGraceMs;
+    this.backgroundDrainTimer = setTimeout(() => {
+      this.backgroundDrainTimer = undefined;
+      void this.settleOrNudgeAfterBackgroundDrain();
+    }, graceMs);
+    this.backgroundDrainTimer.unref?.();
+  }
+
+  private clearBackgroundDrainTimer(): void {
+    if (!this.backgroundDrainTimer) return;
+    clearTimeout(this.backgroundDrainTimer);
+    this.backgroundDrainTimer = undefined;
+  }
+
+  /**
+   * Background work drained while a result was held and the parent stayed
+   * quiet. Ask it once for the report that accounts for the nested results; if
+   * it cannot be asked (or has already been asked), settle with what we have
+   * rather than holding the job open until its timeout.
+   */
+  private async settleOrNudgeAfterBackgroundDrain(): Promise<void> {
+    if (this.settled || this.closed || this.stopping) return;
+    if (!this.resultHeldForBackgroundWork || this.liveNestedAgentTasks.length > 0) return;
+    const generation = this.sdkActivityGeneration;
+    const abandoned = (): boolean => this.settled || this.closed || this.stopping || this.sdkActivityGeneration !== generation;
+    this.resultHeldForBackgroundWork = false;
+    if (!this.backgroundDrainNudgeSent && this.queue.isOpen() && this.input.job.activeTurnId) {
+      this.backgroundDrainNudgeSent = true;
+      await this.appendEvent({
+        event: "claude_nested_agents_drained_nudge",
+        at: nowIso(),
+        backend: "claude_agent_sdk",
+        jobId: this.input.job.id
+      }).catch(() => undefined);
+      if (abandoned()) return;
+      // Only the push can fail after the counter moves; building the message
+      // must not roll back a turn this call never counted (an outstanding
+      // steer's pending turn would be corrupted).
+      let counted = false;
+      try {
+        const nudge = await this.buildUserMessage(CLAUDE_NESTED_AGENTS_DRAINED_NUDGE, []);
+        if (abandoned()) return;
+        this.pendingUserTurns += 1;
+        counted = true;
+        this.queue.push(nudge);
+        return;
+      } catch (error) {
+        if (counted) this.pendingUserTurns = Math.max(0, this.pendingUserTurns - 1);
+        await this.appendEvent({
+          event: "claude_nested_agents_drained_nudge_failed",
+          at: nowIso(),
+          backend: "claude_agent_sdk",
+          jobId: this.input.job.id,
+          error: this.redactSecrets(error instanceof Error ? error.message : String(error))
+        }).catch(() => undefined);
+      }
+    }
+    if (abandoned()) return;
+    await this.writeFinalMessage(this.finalMessage || this.assistantText || this.partialText).catch(() => undefined);
+    if (abandoned()) return;
+    this.pendingUserTurns = 0;
+    this.input.job.activeTurnId = undefined;
+    this.settle({ code: 0, signal: null });
+    this.queue.close();
+    this.query?.close();
+    await this.input.onJobUpdated(this.input.job).catch(() => undefined);
+  }
+
+  /**
+   * SDK 0.3.220's Agent tool defaults `run_in_background` to true, so a nested
+   * agent returns immediately and the parent can finish its turn while the
+   * real work is still running. Rewrite every Agent call to run in the
+   * foreground; the completion gate above covers anything that slips through
+   * (backgrounded Bash, remote isolation, a hook that does not apply).
+   */
+  private async forceForegroundNestedAgents(hookInput: ClaudeHookInput): Promise<ClaudeHookJsonOutput> {
+    if (hookInput.hook_event_name !== "PreToolUse" || hookInput.tool_name !== CLAUDE_AGENT_TOOL_NAME) return { continue: true };
+    const toolInput = (hookInput.tool_input && typeof hookInput.tool_input === "object"
+      ? hookInput.tool_input
+      : {}) as Record<string, unknown>;
+    if (toolInput.run_in_background === false) return { continue: true };
+    await this.appendEvent({
+      event: "claude_nested_agent_forced_foreground",
+      at: nowIso(),
+      backend: "claude_agent_sdk",
+      jobId: this.input.job.id,
+      subagentType: typeof toolInput.subagent_type === "string" ? toolInput.subagent_type : undefined
+    }).catch(() => undefined);
+    return {
+      continue: true,
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        updatedInput: { ...toolInput, run_in_background: false },
+        additionalContext: "codex-chat runs nested agents in the foreground. Wait for this agent's result before continuing, and never report back while nested work is running."
+      }
+    };
   }
 
   private armSettleGraceTimer(): void {

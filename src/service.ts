@@ -1200,6 +1200,7 @@ export class ServiceSupervisor {
         const ref = this.formatJobCancelRef(j);
         const details = this.formatJobSummaryDetails(j);
         details.push(`cancel: ${inlineCode(`agent kill ${ref}`)}`);
+        if (j.waitingOnNestedAgents) details.push(`waiting on ${j.waitingOnNestedAgents} nested agent${j.waitingOnNestedAgents === 1 ? "" : "s"}`);
         if (j.backend === "codex_app_server" || j.backend === "claude_agent_sdk") details.push(`steer: ${inlineCode(`agent steer ${ref} <text>`)}`);
         this.appendNumberedJobLines(lines, index + 1, ref, this.formatJobHeader(j, formatDurationSeconds(elapsedSec(j.startedAt))), details);
       });

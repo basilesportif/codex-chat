@@ -163,6 +163,8 @@ export interface ActiveSubagentJobSnapshot {
   summary?: string;
   createdAt?: string;
   elapsedSec: number;
+  /** Live nested native agents inside a Claude-backed child session, if any. */
+  waitingOnNestedAgents?: number;
   originChatId?: number;
   originMessageId?: number;
   model?: string;
@@ -958,6 +960,7 @@ export class SubagentManager {
       summary: job.summary,
       createdAt,
       elapsedSec: Number.isFinite(elapsedMs) ? Math.max(0, Math.round(elapsedMs / 1000)) : 0,
+      waitingOnNestedAgents: job.waitingOnNestedAgents,
       originChatId: job.originChatId,
       originMessageId: job.originMessageId,
       model: job.model,

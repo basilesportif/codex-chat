@@ -53,9 +53,19 @@ Every Claude-backed codex-chat child session gets the SDK-native `Agent` tool an
 
 The corresponding environment overrides are `CODEX_CHAT_SUBAGENTS_CLAUDE_IMPLEMENTER_MODEL`, `CODEX_CHAT_SUBAGENTS_CLAUDE_INVESTIGATOR_MODEL`, and `CODEX_CHAT_SUBAGENTS_CLAUDE_REVIEWER_MODEL`. Aliases and full Claude model IDs are passed through to the SDK unchanged.
 
-Before the backend pushes the first user message, it appends generated guidance naming these agents, their configured models, their capabilities, and the preferred implement-review orchestration pattern. The stored `SubagentJob` prompt is not changed, and later steering messages are not augmented.
+Before the backend pushes the first user message, it appends generated guidance naming these agents, their configured models, their capabilities, the preferred implement-review orchestration pattern, and the foreground/no-early-report rules below. The stored `SubagentJob` prompt is not changed, and later steering messages are not augmented.
 
 Native nested agents run **inside** the parent Claude session; they are not separate `SubagentManager` jobs. Cancelling or timing out the parent job interrupts the SDK query and takes its nested agents down with it.
+
+### Nested agents always run in the foreground, and never complete a job early
+
+Agent SDK 0.3.220 defaults the `Agent` tool's `run_in_background` to `true`: a nested agent returns a "running in the background" tool result immediately, so the parent can finish its turn — and codex-chat would settle the job and close the query — while the real work is still running. Three layers prevent that:
+
+1. **Tool-input rewrite (structural).** Every Claude-backed child session installs a `PreToolUse` hook matched to the `Agent` tool that rewrites the call with `run_in_background: false`. Each rewrite is logged to the job's `events.jsonl` as `claude_nested_agent_forced_foreground`. The three agent definitions also declare `background: false`.
+2. **Completion gating (structural).** The session tracks the SDK's `system` / `background_tasks_changed` message, which carries the full set of live background tasks with REPLACE semantics. Only the **nested-agent** subset gates completion: `task_type` in that payload is the raw task-state discriminant, so codex-chat counts `local_agent` (what the `Agent` tool registers), `remote_agent`, `in_process_teammate`, and anything else ending in `_agent`. Backgrounded `Bash` (`local_bash`), `local_workflow`, and `mcp_task` are ignored, so a child that leaves a dev server, watcher, or `tail -f` running still completes normally. The full set is still recorded in the `claude_background_tasks_changed` event for observability.
+
+   If a successful `result` arrives while a nested agent is live, the job is **not** completed: the result is held (`claude_result_held_for_nested_agents`), `activeTurnId` stays set so the job remains running and steerable, and `SubagentJob.waitingOnNestedAgents` is set so `agents` status shows `waiting on N nested agents`. The job settles on the next successful result once no nested agent is live. If the nested agents drain and the parent then stays silent for `[subagents.claude].steerSettleGraceMs`, codex-chat pushes one follow-up user turn (`claude_nested_agents_drained_nudge`) asking for the post-nested report, and settles on that turn's result; a second silent drain settles with whatever result was last recorded. The parent job timeout still applies as the outer bound.
+3. **Prompt guidance.** The generated child preamble forbids backgrounded nested agents and remote isolation, and forbids sending a final report while any nested agent is still running.
 
 ## Fable to GPT-5.5 coding helper evaluation
 

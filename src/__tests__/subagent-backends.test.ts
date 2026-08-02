@@ -176,6 +176,51 @@ function fakeClaudeInitMessage(sessionId = "claude-session", apiKeySource = "oau
   };
 }
 
+/**
+ * Push-driven fake Claude Agent SDK query: the test controls exactly when each
+ * SDK message is emitted, and every user turn pushed into the streaming input
+ * is captured in `prompts`.
+ */
+function pushDrivenSdkStream() {
+  const pending: unknown[] = [];
+  const prompts: unknown[] = [];
+  let wake: (() => void) | undefined;
+  const push = (message: unknown): void => {
+    pending.push(message);
+    wake?.();
+  };
+  const queryMock = vi.fn((params: { prompt: AsyncIterable<unknown>; options: Record<string, unknown> }) => {
+    const iterator = params.prompt[Symbol.asyncIterator]();
+    void (async () => {
+      for (;;) {
+        const next = await iterator.next().catch(() => ({ done: true, value: undefined }));
+        if (next.done) return;
+        prompts.push(next.value);
+      }
+    })();
+    async function* messages() {
+      for (;;) {
+        while (pending.length === 0) {
+          await new Promise<void>((resolve) => {
+            wake = resolve;
+          });
+        }
+        const next = pending.shift();
+        if (next === null) return;
+        yield next;
+      }
+    }
+    return Object.assign(messages(), {
+      initializationResult: vi.fn().mockResolvedValue({
+        account: { apiKeySource: "oauth", apiProvider: "firstParty", tokenSource: "oauth", subscriptionType: "max" }
+      }),
+      interrupt: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn()
+    });
+  });
+  return { queryMock, prompts, push, end: () => push(null) };
+}
+
 describe("app-server subagent backend", () => {
   test("starts regular subagents as ephemeral and does not resume them", async () => {
     vi.resetModules();
@@ -968,6 +1013,294 @@ describe("Claude Agent SDK subagent backend", () => {
     const events = await readFile(join(root, "events.jsonl"), "utf8");
     expect(events).toContain("claude_steer_enqueued");
     expect(events).toContain("claude_turn_result_deferred");
+    await backend.shutdown();
+  });
+
+  test("a result emitted while a nested agent is still live does not complete the job; the post-nested result wins", async () => {
+    vi.resetModules();
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-subagent-claude-"));
+    tempDirs.push(root);
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "oauth-secret-value";
+    const stream = pushDrivenSdkStream();
+    vi.doMock("@anthropic-ai/claude-agent-sdk", () => ({ query: stream.queryMock }));
+
+    const { ClaudeAgentSdkChildAgentBackend } = await import("../subagent-backends.js");
+    const config = enableClaude(testConfig(root));
+    // Long enough that the drain nudge never fires before the real result.
+    config.subagents.claude!.steerSettleGraceMs = 5_000;
+    const backend = new ClaudeAgentSdkChildAgentBackend(config, fakeLogger() as never);
+    const job = subagentJob(root, "job_claudenestedlive0000000000000000");
+    const onJobUpdated = vi.fn().mockResolvedValue(undefined);
+    const started = await backend.start({
+      job,
+      assembledPrompt: "fix the bug",
+      lastMessagePath: join(root, "last-message.md"),
+      stdoutPath: join(root, "events.jsonl"),
+      stderrPath: join(root, "stderr.log"),
+      appServerLogPath: join(root, "app-server.log"),
+      model: "claude-opus-5",
+      effort: "high",
+      serviceTier: "fast",
+      serviceTierMode: "auto",
+      images: [],
+      onJobUpdated
+    });
+
+    stream.push(fakeClaudeInitMessage());
+    stream.push({
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: [
+        { task_id: "task-1", task_type: "local_agent", description: "investigator: find the root cause" },
+        { task_id: "task-2", task_type: "local_bash", description: "npm run dev" }
+      ],
+      uuid: "00000000-0000-4000-8000-000000000051",
+      session_id: "claude-session"
+    });
+    // The parent reports back while the nested investigator is still running.
+    stream.push({
+      type: "result",
+      subtype: "success",
+      result: "spawned an investigator; nothing fixed yet",
+      errors: [],
+      uuid: "00000000-0000-4000-8000-000000000052",
+      session_id: "claude-session"
+    });
+
+    await waitFor(() => job.waitingOnNestedAgents === 1);
+    let settled = false;
+    void started.finished.then(() => {
+      settled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(settled).toBe(false);
+    expect(started.isAlive()).toBe(true);
+    expect(job.activeTurnId).toBe("claude-agent-sdk-stream");
+    await expect(readFile(join(root, "last-message.md"), "utf8").catch(() => "")).resolves.toBe("");
+
+    // The nested agent finishes; the backgrounded dev server is still running
+    // and must not keep holding the job.
+    stream.push({
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: [{ task_id: "task-2", task_type: "local_bash", description: "npm run dev" }],
+      uuid: "00000000-0000-4000-8000-000000000053",
+      session_id: "claude-session"
+    });
+    stream.push({
+      type: "result",
+      subtype: "success",
+      result: "investigator finished; bug fixed and tests pass",
+      errors: [],
+      uuid: "00000000-0000-4000-8000-000000000054",
+      session_id: "claude-session"
+    });
+
+    await expect(started.finished).resolves.toMatchObject({ code: 0, signal: null });
+    await expect(readFile(join(root, "last-message.md"), "utf8")).resolves.toBe("investigator finished; bug fixed and tests pass");
+    expect(job.waitingOnNestedAgents).toBeUndefined();
+    const events = await readFile(join(root, "events.jsonl"), "utf8");
+    expect(events).toContain("claude_result_held_for_nested_agents");
+    expect(events).toContain("claude_background_tasks_changed");
+    stream.end();
+    await backend.shutdown();
+  });
+
+  test("a live backgrounded Bash task does not hold a successful result", async () => {
+    vi.resetModules();
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-subagent-claude-"));
+    tempDirs.push(root);
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "oauth-secret-value";
+    const stream = pushDrivenSdkStream();
+    vi.doMock("@anthropic-ai/claude-agent-sdk", () => ({ query: stream.queryMock }));
+
+    const { ClaudeAgentSdkChildAgentBackend } = await import("../subagent-backends.js");
+    const backend = new ClaudeAgentSdkChildAgentBackend(enableClaude(testConfig(root)), fakeLogger() as never);
+    const job = subagentJob(root, "job_claudebashbackground000000000000");
+    const started = await backend.start({
+      job,
+      assembledPrompt: "start the dev server and verify the fix",
+      lastMessagePath: join(root, "last-message.md"),
+      stdoutPath: join(root, "events.jsonl"),
+      stderrPath: join(root, "stderr.log"),
+      appServerLogPath: join(root, "app-server.log"),
+      model: "claude-opus-5",
+      effort: "high",
+      serviceTier: "fast",
+      serviceTierMode: "auto",
+      images: [],
+      onJobUpdated: vi.fn().mockResolvedValue(undefined)
+    });
+
+    stream.push(fakeClaudeInitMessage());
+    stream.push({
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: [
+        { task_id: "task-1", task_type: "local_bash", description: "npm run dev" },
+        { task_id: "task-2", task_type: "local_workflow", description: "spec" }
+      ],
+      uuid: "00000000-0000-4000-8000-000000000071",
+      session_id: "claude-session"
+    });
+    stream.push({
+      type: "result",
+      subtype: "success",
+      result: "fix verified against the dev server",
+      errors: [],
+      uuid: "00000000-0000-4000-8000-000000000072",
+      session_id: "claude-session"
+    });
+
+    await expect(started.finished).resolves.toMatchObject({ code: 0, signal: null });
+    await expect(readFile(join(root, "last-message.md"), "utf8")).resolves.toBe("fix verified against the dev server");
+    expect(job.waitingOnNestedAgents).toBeUndefined();
+    const events = await readFile(join(root, "events.jsonl"), "utf8");
+    expect(events).toContain("claude_background_tasks_changed");
+    expect(events).not.toContain("claude_result_held_for_nested_agents");
+    stream.end();
+    await backend.shutdown();
+  });
+
+  test("a parent that stays quiet after its nested agents drain is nudged for the post-nested report", async () => {
+    vi.resetModules();
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-subagent-claude-"));
+    tempDirs.push(root);
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "oauth-secret-value";
+    const stream = pushDrivenSdkStream();
+    vi.doMock("@anthropic-ai/claude-agent-sdk", () => ({ query: stream.queryMock }));
+
+    const { ClaudeAgentSdkChildAgentBackend } = await import("../subagent-backends.js");
+    const config = enableClaude(testConfig(root));
+    config.subagents.claude!.steerSettleGraceMs = 30;
+    const backend = new ClaudeAgentSdkChildAgentBackend(config, fakeLogger() as never);
+    const job = subagentJob(root, "job_claudenesteddrain000000000000000");
+    const started = await backend.start({
+      job,
+      assembledPrompt: "fix the bug",
+      lastMessagePath: join(root, "last-message.md"),
+      stdoutPath: join(root, "events.jsonl"),
+      stderrPath: join(root, "stderr.log"),
+      appServerLogPath: join(root, "app-server.log"),
+      model: "claude-opus-5",
+      effort: "high",
+      serviceTier: "fast",
+      serviceTierMode: "auto",
+      images: [],
+      onJobUpdated: vi.fn().mockResolvedValue(undefined)
+    });
+
+    stream.push(fakeClaudeInitMessage());
+    stream.push({
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: [{ task_id: "task-1", task_type: "local_agent", description: "implementer: apply the fix" }],
+      uuid: "00000000-0000-4000-8000-000000000061",
+      session_id: "claude-session"
+    });
+    stream.push({
+      type: "result",
+      subtype: "success",
+      result: "dispatched an implementer",
+      errors: [],
+      uuid: "00000000-0000-4000-8000-000000000062",
+      session_id: "claude-session"
+    });
+    await waitFor(() => job.waitingOnNestedAgents === 1);
+    stream.push({
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: [],
+      uuid: "00000000-0000-4000-8000-000000000063",
+      session_id: "claude-session"
+    });
+
+    // The parent never woke on its own; the drain timer nudges it.
+    await waitFor(() => stream.prompts.length === 2, 200);
+    expect(stream.prompts[1]).toMatchObject({
+      type: "user",
+      message: { role: "user", content: [{ type: "text", text: expect.stringContaining("every nested agent you launched has finished") }] }
+    });
+
+    stream.push({
+      type: "result",
+      subtype: "success",
+      result: "implementer's fix reviewed; tests pass",
+      errors: [],
+      uuid: "00000000-0000-4000-8000-000000000064",
+      session_id: "claude-session"
+    });
+
+    await expect(started.finished).resolves.toMatchObject({ code: 0, signal: null });
+    await expect(readFile(join(root, "last-message.md"), "utf8")).resolves.toBe("implementer's fix reviewed; tests pass");
+    const events = await readFile(join(root, "events.jsonl"), "utf8");
+    expect(events).toContain("claude_nested_agents_drained_nudge");
+    stream.end();
+    await backend.shutdown();
+  });
+
+  test("rewrites nested Agent tool calls to run in the foreground", async () => {
+    vi.resetModules();
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-subagent-claude-"));
+    tempDirs.push(root);
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "oauth-secret-value";
+    const stream = pushDrivenSdkStream();
+    vi.doMock("@anthropic-ai/claude-agent-sdk", () => ({ query: stream.queryMock }));
+
+    const { ClaudeAgentSdkChildAgentBackend } = await import("../subagent-backends.js");
+    const backend = new ClaudeAgentSdkChildAgentBackend(enableClaude(testConfig(root)), fakeLogger() as never);
+    const job = subagentJob(root, "job_claudeforeground0000000000000000");
+    const started = await backend.start({
+      job,
+      assembledPrompt: "fix the bug",
+      lastMessagePath: join(root, "last-message.md"),
+      stdoutPath: join(root, "events.jsonl"),
+      stderrPath: join(root, "stderr.log"),
+      appServerLogPath: join(root, "app-server.log"),
+      model: "claude-opus-5",
+      effort: "high",
+      serviceTier: "fast",
+      serviceTierMode: "auto",
+      images: [],
+      onJobUpdated: vi.fn().mockResolvedValue(undefined)
+    });
+
+    const options = stream.queryMock.mock.calls[0]?.[0].options as {
+      hooks?: { PreToolUse?: Array<{ matcher?: string; hooks: Array<(input: unknown, id?: string, opts?: unknown) => Promise<unknown>> }> };
+    };
+    const matcher = options.hooks?.PreToolUse?.[0];
+    expect(matcher?.matcher).toBe("Agent");
+    const hook = matcher?.hooks[0];
+    const agentDecision = await hook?.({
+      hook_event_name: "PreToolUse",
+      tool_name: "Agent",
+      tool_use_id: "toolu_1",
+      tool_input: { prompt: "investigate", subagent_type: "investigator", run_in_background: true }
+    });
+    expect(agentDecision).toMatchObject({
+      continue: true,
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        updatedInput: { prompt: "investigate", subagent_type: "investigator", run_in_background: false }
+      }
+    });
+    const bashDecision = await hook?.({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_use_id: "toolu_2",
+      tool_input: { command: "ls", run_in_background: true }
+    });
+    expect(bashDecision).toEqual({ continue: true });
+
+    // The child preamble also forbids backgrounded nested agents.
+    const initialPrompt = (stream.prompts[0] as { message: { content: Array<{ text: string }> } }).message.content[0]?.text ?? "";
+    expect(initialPrompt).toContain("run_in_background: false");
+    expect(initialPrompt).toContain("Do not send your final report while any nested agent is still running");
+
+    const events = await readFile(join(root, "events.jsonl"), "utf8");
+    expect(events).toContain("claude_nested_agent_forced_foreground");
+    stream.end();
+    await started.kill("SIGTERM");
     await backend.shutdown();
   });
 

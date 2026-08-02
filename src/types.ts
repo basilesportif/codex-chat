@@ -408,6 +408,8 @@ export interface SubagentJob {
   interruptRequestedAt?: string;
   lastSteeredAt?: string;
   steerCount?: number;
+  /** Live nested/background agents inside a Claude-backed child session; the job cannot complete while this is set. */
+  waitingOnNestedAgents?: number;
 }
 
 export type EmployeeStatus = "disabled" | "idle" | "proposal_pending" | "running" | "stopped" | "error";

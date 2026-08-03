@@ -147,12 +147,27 @@ export function collectFindings(payload, options = {}) {
 
   for (const check of payload.results) {
     if (["http", "vastStatus", "vastDrift"].includes(check.key)) continue;
+    if (isSkippedCheck(check)) continue;
     if (Number(check.exitCode) !== 0) {
       findings.push(`${check.label || check.key || "Check"} failed: ${preview(check.stderr || check.stdout)}`);
     }
   }
 
   return findings;
+}
+
+/**
+ * A check the remote health runner deliberately skipped (for example when vast.ai DNS
+ * cannot be resolved, so the Vast API is unreachable for reasons outside our control).
+ * Skipped checks are informational, never actionable, and must not raise an alert.
+ */
+export function isSkippedCheck(check) {
+  if (!check) return false;
+  return (
+    check.status === "skipped" ||
+    check.parsed?.skipped === true ||
+    check.parsed?.status === "skipped"
+  );
 }
 
 function collectHttpFindings(check, findings) {
@@ -182,6 +197,8 @@ function collectVastStatusFindings(check, findings, lowBalanceThreshold) {
     return;
   }
 
+  if (isSkippedCheck(check)) return;
+
   if (!check.parsed) {
     if (Number(check.exitCode) !== 0) {
       findings.push(`Vast status failed: ${preview(check.stderr || check.stdout)}`);
@@ -208,10 +225,14 @@ function collectVastStatusFindings(check, findings, lowBalanceThreshold) {
 function collectVastBalanceFallbackFindings(payload, checks, findings, lowBalanceThreshold) {
   if (findings.some((finding) => finding.startsWith("Vast balance low:"))) return;
 
+  // When the Vast status check was skipped (Vast API unreachable) any balance figure we
+  // still have lying around is stale, so do not synthesize a low-balance alert from it.
+  if (isSkippedCheck(checks.get("vastStatus"))) return;
+
   const candidates = [
     payload.vastAi,
     checks.get("http")?.parsed?.vastAi,
-    ...payload.results.map((result) => result.parsed?.vastAi),
+    ...payload.results.filter((result) => !isSkippedCheck(result)).map((result) => result.parsed?.vastAi),
   ];
   for (const candidate of candidates) {
     const lowBalance = formatLowBalanceFinding(candidate, lowBalanceThreshold);
@@ -238,6 +259,8 @@ function collectVastDriftFindings(check, findings) {
     findings.push("Vast drift check did not run.");
     return;
   }
+
+  if (isSkippedCheck(check)) return;
 
   if (!check.parsed) {
     if (Number(check.exitCode) !== 0) {

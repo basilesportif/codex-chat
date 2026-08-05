@@ -232,6 +232,21 @@ export interface TelegramSameChatReplyContext {
   messageThreadId?: number;
   sender?: TelegramReplySenderSummary;
   snippet?: string;
+  /** Full text of the replied-to message when it can be hydrated from our own outbound store. */
+  fullText?: string;
+  /**
+   * True only when `fullText` came from this service's own outbound message store —
+   * i.e. proof that we sent the replied-to message. Do not infer authorship from
+   * `fullText` alone; a future hydration source would make that inference lie.
+   */
+  hydratedFromOurStore?: boolean;
+  /**
+   * True when the body below is a partial view of the original, in either sense:
+   * no `fullText` was recoverable and the Telegram `snippet` was cut at 280 chars, or
+   * `fullText` was recovered but itself capped at `REPLY_FULL_TEXT_MAX_CHARS`.
+   * Which one applies is determined by whether `fullText` is set.
+   */
+  snippetTruncated?: boolean;
   contentType?: string;
 }
 

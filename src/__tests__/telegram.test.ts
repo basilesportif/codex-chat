@@ -83,8 +83,11 @@ describe("Telegram reply context extraction", () => {
     expect(onUserEvent.mock.calls[0]?.[0].text).toContain("[Verified emoji follow-up]");
     expect(onUserEvent.mock.calls[0]?.[0].text).toContain('"Should I archive this file?"');
 
+    const lookupsAfterReply = findOutboundMessage.mock.calls.length;
     await (gateway as unknown as { handleMessage(ctx: Context): Promise<void> }).handleMessage(messageContext(22));
     expect(onUserEvent.mock.calls[1]?.[0].text).toBe("✅");
+    // Only replies pay the store IO: a non-reply message must not hit findOutboundMessage.
+    expect(findOutboundMessage.mock.calls.length).toBe(lookupsAfterReply);
   });
 
   test("accepts one attributable Telegram reaction addition on a persisted bot message", async () => {
@@ -191,6 +194,329 @@ describe("Telegram reply context extraction", () => {
         chat: expect.objectContaining({ id: -100, title: "Release Notes" })
       })
     }));
+  });
+
+  test("flags a truncated replied-to snippet and leaves short ones unflagged", () => {
+    const repliedTo = (text: string) => extractTelegramReplyContext({
+      message_id: 20,
+      date: 1_700_000_100,
+      chat: { id: 100, type: "private", first_name: "Tim" },
+      from: { id: 9, is_bot: false, first_name: "Tim" },
+      text: "print this out",
+      reply_to_message: {
+        message_id: 10,
+        date: 1_700_000_000,
+        chat: { id: 100, type: "private", first_name: "Tim" },
+        from: { id: 7, is_bot: true, first_name: "Bot" },
+        text
+      }
+    } as Message);
+
+    expect(repliedTo(`long report ${"y".repeat(400)}`)?.replyToMessage?.snippetTruncated).toBe(true);
+    expect(repliedTo("short report")?.replyToMessage?.snippetTruncated).toBeUndefined();
+    expect(repliedTo("x".repeat(280))?.replyToMessage?.snippetTruncated).toBeUndefined();
+  });
+
+  test("keeps reply context for a replied-to media message with no text or caption", () => {
+    const context = extractTelegramReplyContext({
+      message_id: 20,
+      date: 1_700_000_100,
+      chat: { id: 100, type: "private", first_name: "Tim" },
+      from: { id: 9, is_bot: false, first_name: "Tim" },
+      text: "transcribe this",
+      reply_to_message: {
+        message_id: 10,
+        date: 1_700_000_000,
+        chat: { id: 100, type: "private", first_name: "Tim" },
+        from: { id: 7, is_bot: false, first_name: "Alice" },
+        voice: { file_id: "file", file_unique_id: "unique", duration: 12 }
+      }
+    } as Message);
+
+    expect(context?.replyToMessage).toEqual(expect.objectContaining({
+      chatId: 100,
+      messageId: 10,
+      contentType: "voice"
+    }));
+    expect(context?.replyToMessage?.snippet).toBeUndefined();
+    expect(context?.replyToMessage?.fullText).toBeUndefined();
+    expect(context?.replyToMessage?.snippetTruncated).toBeUndefined();
+  });
+
+  test("hydrates replied-to full text from the outbound store onto state and the user event", async () => {
+    const recordMessage = vi.fn().mockResolvedValue(undefined);
+    const onUserEvent = vi.fn().mockResolvedValue(undefined);
+    // Telegram hands us one (truncatable) rendering; the store holds a textually distinct
+    // original, so an assertion on fullText can only pass if hydration really used the store.
+    const telegramText = `Daily report as Telegram delivered it\n${"z".repeat(600)}\ntelegram tail`;
+    const storedReport = `Daily report as this service stored it\n${"q".repeat(600)}\nSTORED-ONLY-TAIL-MARKER`;
+    const findOutboundMessage = vi.fn().mockResolvedValue({
+      platform: "telegram", chatId: "100", messageId: "20", content: storedReport, sentAt: "now"
+    });
+    const gateway = new TelegramGateway(
+      { telegram: { allowlist: { userIds: [9], chatIds: [100], adminUserIds: [] } } } as AppConfig,
+      {
+        listTelegramUsers: vi.fn().mockResolvedValue([]),
+        listTelegramChats: vi.fn().mockResolvedValue([]),
+        recordMessage,
+        findOutboundMessage
+      } as unknown as StateStore,
+      {} as FileStore,
+      {} as Transcriber,
+      createLogger("silent"),
+      { onUserEvent }
+    );
+    vi.spyOn(gateway, "sendReaction").mockResolvedValue(undefined);
+    vi.spyOn(gateway, "sendChatAction").mockResolvedValue(undefined);
+
+    await (gateway as unknown as { handleMessage(ctx: Context): Promise<void> }).handleMessage({
+      chat: { id: 100, type: "private", first_name: "Tim" },
+      from: { id: 9, is_bot: false, first_name: "Tim", username: "tim" },
+      message: {
+        message_id: 21,
+        date: 1_700_000_100,
+        chat: { id: 100, type: "private", first_name: "Tim" },
+        from: { id: 9, is_bot: false, first_name: "Tim", username: "tim" },
+        text: "Could you find this and print it out for me?",
+        reply_to_message: {
+          message_id: 20,
+          date: 1_700_000_000,
+          chat: { id: 100, type: "private", first_name: "Tim" },
+          from: { id: 7, is_bot: true, first_name: "Bot" },
+          text: telegramText
+        }
+      }
+    } as Context);
+
+    expect(findOutboundMessage).toHaveBeenCalledWith("telegram", "100", "20");
+    const expected = expect.objectContaining({
+      replyToMessage: expect.objectContaining({
+        chatId: 100,
+        messageId: 20,
+        fullText: storedReport,
+        snippetTruncated: undefined
+      })
+    });
+    expect(recordMessage).toHaveBeenCalledWith(expect.objectContaining({ reply: expected }));
+    expect(onUserEvent).toHaveBeenCalledWith(expect.objectContaining({ reply: expected }));
+    const hydrated = onUserEvent.mock.calls[0]?.[0].reply?.replyToMessage;
+    expect(hydrated?.fullText).toContain("STORED-ONLY-TAIL-MARKER");
+    expect(hydrated?.fullText).not.toContain("telegram tail");
+    expect(hydrated?.snippet).toContain("Daily report as Telegram delivered it");
+  });
+
+  test("falls back to the Telegram snippet when no outbound record exists for the replied-to message", async () => {
+    const recordMessage = vi.fn().mockResolvedValue(undefined);
+    const onUserEvent = vi.fn().mockResolvedValue(undefined);
+    // The common group case: someone else's message, so our outbound store has no record.
+    const findOutboundMessage = vi.fn().mockResolvedValue(undefined);
+    const gateway = new TelegramGateway(
+      { telegram: { allowlist: { userIds: [9], chatIds: [100], adminUserIds: [] } } } as AppConfig,
+      {
+        listTelegramUsers: vi.fn().mockResolvedValue([]),
+        listTelegramChats: vi.fn().mockResolvedValue([]),
+        recordMessage,
+        findOutboundMessage
+      } as unknown as StateStore,
+      {} as FileStore,
+      {} as Transcriber,
+      createLogger("silent"),
+      { onUserEvent }
+    );
+    vi.spyOn(gateway, "sendReaction").mockResolvedValue(undefined);
+    vi.spyOn(gateway, "sendChatAction").mockResolvedValue(undefined);
+
+    await (gateway as unknown as { handleMessage(ctx: Context): Promise<void> }).handleMessage({
+      chat: { id: 100, type: "private", first_name: "Tim" },
+      from: { id: 9, is_bot: false, first_name: "Tim", username: "tim" },
+      message: {
+        message_id: 23,
+        date: 1_700_000_100,
+        chat: { id: 100, type: "private", first_name: "Tim" },
+        from: { id: 9, is_bot: false, first_name: "Tim", username: "tim" },
+        text: "what do you make of this?",
+        reply_to_message: {
+          message_id: 20,
+          date: 1_700_000_000,
+          chat: { id: 100, type: "private", first_name: "Tim" },
+          from: { id: 8, is_bot: false, first_name: "Alice" },
+          text: `Alice wrote a long thing ${"y".repeat(400)}`
+        }
+      }
+    } as Context);
+
+    expect(findOutboundMessage).toHaveBeenCalledWith("telegram", "100", "20");
+    const replied = onUserEvent.mock.calls[0]?.[0].reply?.replyToMessage;
+    expect(replied?.fullText).toBeUndefined();
+    expect(replied?.snippet).toContain("Alice wrote a long thing");
+    expect(replied?.snippetTruncated).toBe(true);
+    expect(recordMessage).toHaveBeenCalledWith(expect.objectContaining({
+      reply: expect.objectContaining({
+        replyToMessage: expect.objectContaining({ snippetTruncated: true })
+      })
+    }));
+  });
+
+  test("keeps reply context intact when outbound hydration fails", async () => {
+    const recordMessage = vi.fn().mockResolvedValue(undefined);
+    const onUserEvent = vi.fn().mockResolvedValue(undefined);
+    const findOutboundMessage = vi.fn().mockRejectedValue(new Error("state read failed"));
+    const gateway = new TelegramGateway(
+      { telegram: { allowlist: { userIds: [9], chatIds: [100], adminUserIds: [] } } } as AppConfig,
+      {
+        listTelegramUsers: vi.fn().mockResolvedValue([]),
+        listTelegramChats: vi.fn().mockResolvedValue([]),
+        recordMessage,
+        findOutboundMessage
+      } as unknown as StateStore,
+      {} as FileStore,
+      {} as Transcriber,
+      createLogger("silent"),
+      { onUserEvent }
+    );
+    vi.spyOn(gateway, "sendReaction").mockResolvedValue(undefined);
+    vi.spyOn(gateway, "sendChatAction").mockResolvedValue(undefined);
+
+    await (gateway as unknown as { handleMessage(ctx: Context): Promise<void> }).handleMessage({
+      chat: { id: 100, type: "private", first_name: "Tim" },
+      from: { id: 9, is_bot: false, first_name: "Tim", username: "tim" },
+      message: {
+        message_id: 22,
+        date: 1_700_000_100,
+        chat: { id: 100, type: "private", first_name: "Tim" },
+        from: { id: 9, is_bot: false, first_name: "Tim", username: "tim" },
+        text: "print this out",
+        reply_to_message: {
+          message_id: 20,
+          date: 1_700_000_000,
+          chat: { id: 100, type: "private", first_name: "Tim" },
+          from: { id: 7, is_bot: true, first_name: "Bot" },
+          text: `long report ${"y".repeat(400)}`
+        }
+      }
+    } as Context);
+
+    expect(findOutboundMessage).toHaveBeenCalledTimes(1);
+    const event = onUserEvent.mock.calls[0]?.[0];
+    expect(event.reply?.replyToMessage).toEqual(expect.objectContaining({
+      chatId: 100,
+      messageId: 20,
+      snippetTruncated: true
+    }));
+    expect(event.reply?.replyToMessage?.snippet).toContain("long report");
+    expect(event.reply?.replyToMessage?.fullText).toBeUndefined();
+    expect(recordMessage).toHaveBeenCalledWith(expect.objectContaining({
+      reply: expect.objectContaining({ replyToMessage: expect.objectContaining({ snippetTruncated: true }) })
+    }));
+  });
+
+  test("does not hydrate when the replied-to message belongs to a different chat", async () => {
+    // The store lookup is keyed by the current chat while the id comes from
+    // `reply_to_message`. Bot API says those always agree; if they ever did not, the
+    // record we found would be an unrelated message of ours, and rendering it as the
+    // replied-to body (labelled as ours) would invent a referent out of nothing.
+    const recordMessage = vi.fn().mockResolvedValue(undefined);
+    const onUserEvent = vi.fn().mockResolvedValue(undefined);
+    const findOutboundMessage = vi.fn().mockResolvedValue({
+      platform: "telegram", chatId: "100", messageId: "20", content: "an unrelated message we sent in chat 100", sentAt: "now"
+    });
+    const gateway = new TelegramGateway(
+      { telegram: { allowlist: { userIds: [9], chatIds: [100], adminUserIds: [] } } } as AppConfig,
+      {
+        listTelegramUsers: vi.fn().mockResolvedValue([]),
+        listTelegramChats: vi.fn().mockResolvedValue([]),
+        recordMessage,
+        findOutboundMessage
+      } as unknown as StateStore,
+      {} as FileStore,
+      {} as Transcriber,
+      createLogger("silent"),
+      { onUserEvent }
+    );
+    vi.spyOn(gateway, "sendReaction").mockResolvedValue(undefined);
+    vi.spyOn(gateway, "sendChatAction").mockResolvedValue(undefined);
+
+    await (gateway as unknown as { handleMessage(ctx: Context): Promise<void> }).handleMessage({
+      chat: { id: 100, type: "private", first_name: "Tim" },
+      from: { id: 9, is_bot: false, first_name: "Tim", username: "tim" },
+      message: {
+        message_id: 25,
+        date: 1_700_000_100,
+        chat: { id: 100, type: "private", first_name: "Tim" },
+        from: { id: 9, is_bot: false, first_name: "Tim", username: "tim" },
+        text: "print this out",
+        reply_to_message: {
+          message_id: 20,
+          date: 1_700_000_000,
+          chat: { id: 999, type: "supergroup", title: "Elsewhere" },
+          from: { id: 8, is_bot: false, first_name: "Alice" },
+          text: "Alice wrote this somewhere else"
+        }
+      }
+    } as Context);
+
+    const replied = onUserEvent.mock.calls[0]?.[0].reply?.replyToMessage;
+    expect(replied?.chatId).toBe(999);
+    expect(replied?.fullText).toBeUndefined();
+    expect(replied?.hydratedFromOurStore).toBeUndefined();
+    expect(replied?.snippet).toBe("Alice wrote this somewhere else");
+  });
+
+  test("delivers an emoji-only reply as a plain turn when the store lookup throws", async () => {
+    // The lookup used to live inside the emoji branch, so a store failure propagated to
+    // `bot.catch` and the whole message was dropped. It is now swallowed: the user's
+    // reaction still reaches the model as a bare emoji with snippet-only reply context,
+    // and — because no reference was found — no follow-up claim is burned for it.
+    const recordMessage = vi.fn().mockResolvedValue(undefined);
+    const onUserEvent = vi.fn().mockResolvedValue(undefined);
+    const findOutboundMessage = vi.fn().mockRejectedValue(new Error("state read failed"));
+    const claimEmojiFollowup = vi.fn().mockResolvedValue(true);
+    const gateway = new TelegramGateway(
+      { telegram: { allowlist: { userIds: [9], chatIds: [100], adminUserIds: [] } } } as AppConfig,
+      {
+        listTelegramUsers: vi.fn().mockResolvedValue([]),
+        listTelegramChats: vi.fn().mockResolvedValue([]),
+        recordMessage,
+        findOutboundMessage,
+        claimEmojiFollowup
+      } as unknown as StateStore,
+      {} as FileStore,
+      {} as Transcriber,
+      createLogger("silent"),
+      { onUserEvent }
+    );
+    vi.spyOn(gateway, "sendReaction").mockResolvedValue(undefined);
+    vi.spyOn(gateway, "sendChatAction").mockResolvedValue(undefined);
+
+    await expect((gateway as unknown as { handleMessage(ctx: Context): Promise<void> }).handleMessage({
+      chat: { id: 100, type: "private", first_name: "Tim" },
+      from: { id: 9, is_bot: false, first_name: "Tim", username: "tim" },
+      message: {
+        message_id: 24,
+        date: 1_700_000_100,
+        chat: { id: 100, type: "private", first_name: "Tim" },
+        from: { id: 9, is_bot: false, first_name: "Tim", username: "tim" },
+        text: "👍",
+        reply_to_message: {
+          message_id: 20,
+          date: 1_700_000_000,
+          chat: { id: 100, type: "private", first_name: "Tim" },
+          from: { id: 7, is_bot: true, first_name: "Bot" },
+          text: "Should I archive this file?"
+        }
+      }
+    } as Context)).resolves.toBeUndefined();
+
+    expect(findOutboundMessage).toHaveBeenCalledTimes(1);
+    expect(claimEmojiFollowup).not.toHaveBeenCalled();
+    expect(onUserEvent).toHaveBeenCalledTimes(1);
+    const event = onUserEvent.mock.calls[0]?.[0];
+    expect(event.text).toBe("👍");
+    expect(event.text).not.toContain("[Verified emoji follow-up]");
+    expect(event.metadata?.emojiFollowup).toBeUndefined();
+    expect(event.reply?.replyToMessage?.snippet).toBe("Should I archive this file?");
+    expect(event.reply?.replyToMessage?.fullText).toBeUndefined();
+    expect(recordMessage).toHaveBeenCalled();
   });
 
   test("audio transcription decision uses caption, reply, and previous context", () => {

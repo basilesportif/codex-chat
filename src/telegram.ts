@@ -13,6 +13,14 @@ import { renderTelegramMarkdown } from "./telegram-format.js";
 import { formatEmojiFollowupInput, singleEmoji } from "./emoji-followup.js";
 
 const REPLY_SNIPPET_MAX_CHARS = 280;
+/**
+ * Cap on replied-to text hydrated from our own outbound store before it enters a prompt.
+ *
+ * `sendText` chunks outbound messages at 3200 chars (see below), so a stored record is
+ * normally <= 3200 and this cap is a safety net that never fires. Raising the chunk size
+ * past 4000 would silently start truncating hydrated replies — bump this too if that happens.
+ */
+export const REPLY_FULL_TEXT_MAX_CHARS = 4000;
 const REPLY_LABEL_MAX_CHARS = 120;
 const TRANSCRIPTION_CONTEXT_MAX_CHARS = 280;
 const TELEGRAM_CONTENT_FIELDS = [
@@ -103,6 +111,30 @@ function compactTelegramText(value: unknown, maxChars: number): string | undefin
   const chars = Array.from(compact);
   if (chars.length <= maxChars) return compact;
   return `${chars.slice(0, maxChars).join("")}...`;
+}
+
+/** True when compacting `value` to `maxChars` would drop content (i.e. the snippet is a partial view). */
+function isTelegramTextTruncated(value: unknown, maxChars: number): boolean {
+  if (typeof value !== "string") return false;
+  const compact = compactTelegramText(value, Number.MAX_SAFE_INTEGER);
+  if (!compact) return false;
+  return Array.from(compact).length > maxChars;
+}
+
+/**
+ * Normalizes a stored outbound message body for use as reply `fullText`.
+ * Unlike `compactTelegramText` this preserves line structure (long bot reports are
+ * unreadable once newlines collapse) and only strips control characters.
+ */
+function normalizeReplyFullText(value: unknown, maxChars: number): { text: string; truncated: boolean } | undefined {
+  if (typeof value !== "string") return undefined;
+  // \u0085 (NEL) is scrubbed with the other control characters: it is invisible here but
+  // a model may read it as a line break, which would defeat the "| " fence downstream.
+  const cleaned = value.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u0085]/g, " ").trim();
+  if (!cleaned) return undefined;
+  const chars = Array.from(cleaned);
+  if (chars.length <= maxChars) return { text: cleaned, truncated: false };
+  return { text: `${chars.slice(0, maxChars).join("")}...`, truncated: true };
 }
 
 export function detectTelegramAudioRequest(text?: string): TelegramAudioRequestKind | undefined {
@@ -242,13 +274,16 @@ export function extractTelegramReplyContext(message: Message): TelegramReplyCont
 
   if (message.reply_to_message) {
     const replied = message.reply_to_message;
-    const snippet = compactTelegramText(replied.text ?? replied.caption, REPLY_SNIPPET_MAX_CHARS);
+    const repliedSource = replied.text ?? replied.caption;
+    const snippet = compactTelegramText(repliedSource, REPLY_SNIPPET_MAX_CHARS);
     context.replyToMessage = {
       chatId: replied.chat.id,
       messageId: replied.message_id,
       messageThreadId: replied.message_thread_id,
       sender: summarizeTelegramMessageSender(replied),
       snippet,
+      // Telegram gives us only a snippet here; hydration in handleMessage may clear this.
+      snippetTruncated: isTelegramTextTruncated(repliedSource, REPLY_SNIPPET_MAX_CHARS) ? true : undefined,
       contentType: detectTelegramContentType(replied as unknown as Record<string, unknown>)
     };
   }
@@ -556,8 +591,48 @@ export class TelegramGateway {
 
     const replyEmoji = singleEmoji(text);
     const repliedMessageId = reply?.replyToMessage?.messageId;
+    // Hydrate the replied-to message body from our own outbound store. Telegram only
+    // hands us a 280-char snippet, so without this the model silently sees a truncated
+    // view of its own long reports. Never let a store failure drop the reply context.
+    //
+    // The store is keyed by the *current* chat, while the replied-to id comes from
+    // `reply_to_message`. Bot API says that field is same-chat-only, so these agree in
+    // practice — but if that invariant ever fails we would fetch an unrelated outbound
+    // message of ours and render it as the replied-to body, labelled as ours. That is a
+    // fabricated referent, so only hydrate when the chat ids actually match. The emoji
+    // follow-up path below keeps its original unconditional lookup.
+    const sameChatReply = reply?.replyToMessage?.chatId === ctx.chat.id;
+    let repliedOutbound: Awaited<ReturnType<StateStore["findOutboundMessage"]>>;
+    if (repliedMessageId !== undefined) {
+      try {
+        repliedOutbound = await this.state.findOutboundMessage("telegram", String(ctx.chat.id), String(repliedMessageId));
+        const hydrated = sameChatReply ? normalizeReplyFullText(repliedOutbound?.content, REPLY_FULL_TEXT_MAX_CHARS) : undefined;
+        if (hydrated && reply?.replyToMessage) {
+          reply.replyToMessage.fullText = hydrated.text;
+          // Provenance is recorded explicitly: this body came out of our own outbound
+          // store, which is the only proof that we authored the replied-to message.
+          reply.replyToMessage.hydratedFromOurStore = true;
+          reply.replyToMessage.snippetTruncated = hydrated.truncated ? true : undefined;
+        }
+      } catch (error) {
+        // For a plain reply this lookup is best-effort (we still have the snippet), but for
+        // an emoji-only follow-up it is functionally required: without the referenced message
+        // the turn degrades to a bare "👍" with no referent and no idempotency claim.
+        const details = {
+          component: "telegram",
+          event: "reply_context_hydration_failed",
+          chatId: ctx.chat.id,
+          messageId: message.message_id,
+          repliedMessageId,
+          emojiFollowup: Boolean(replyEmoji),
+          error
+        };
+        if (replyEmoji) this.logger.error(details, "emoji follow-up reference lookup failed");
+        else this.logger.warn(details, "reply context hydration failed");
+      }
+    }
     if (replyEmoji && repliedMessageId !== undefined) {
-      const outbound = await this.state.findOutboundMessage("telegram", String(ctx.chat.id), String(repliedMessageId));
+      const outbound = repliedOutbound;
       if (outbound) {
         const claimKey = `telegram:reply:${ctx.chat.id}:${message.message_id}`;
         if (!await this.state.claimEmojiFollowup(claimKey)) return;

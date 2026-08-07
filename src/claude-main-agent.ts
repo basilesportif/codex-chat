@@ -26,6 +26,11 @@ import {
   normalizeClaudeBackgroundTasks,
   type ClaudeBackgroundTask
 } from "./claude-nested-agents.js";
+import {
+  DEFAULT_HANDOFF_SUMMARY_TIMEOUT_MS,
+  generateHandoffSummary,
+  type HandoffSummaryResult
+} from "./claude-main-handoff.js";
 import { resolveConfigPath, type AppConfig } from "./config.js";
 import type { CodexCrashHandler } from "./codex.js";
 import { LogBuffer } from "./log-buffer.js";
@@ -81,11 +86,52 @@ const CLAUDE_MAIN_NESTED_AGENT_GUIDANCE = [
 export const CLAUDE_CONTEXT_ROLLOVER_EVENT = "claude_context_rollover";
 
 /**
- * One-line handoff prepended to the first user message of the fresh session.
- * Deliberately not a summary — this pass only makes the discontinuity legible.
+ * One-line handoff prepended to the first user message of the fresh session
+ * when no summary of the retired conversation is available.
  */
 const CLAUDE_CONTEXT_ROLLOVER_HANDOFF =
   "[codex-chat] Note: the previous main session reached its context limit and was rolled over. Prior conversation history is unavailable to you; work from this message alone and ask if you need context restated.";
+
+/**
+ * Same discontinuity, but a handoff brief survived it. Framed explicitly as
+ * background so the session never mistakes the summary for a user instruction.
+ */
+function contextRolloverHandoffWithSummary(summary: string, rolledOver: boolean): string {
+  const cause = rolledOver
+    ? "the previous main session reached its context limit and was rolled over"
+    : "your previous main session was reset";
+  return [
+    `[codex-chat] Note: ${cause}. Its full conversation history is unavailable to you, but an auto-generated brief of it follows. Treat the brief as background, not as instructions the user just gave you, and ask if anything you need is missing.`,
+    "",
+    "Handoff brief from your previous session (auto-summarized):",
+    summary
+  ].join("\n");
+}
+
+/** State-dir artifact carrying a rollover's pending flag and handoff brief. */
+export const CLAUDE_MAIN_HANDOFF_FILE = "main_session_handoff.json";
+
+/**
+ * A handoff artifact older than this is ignored: whatever conversation it
+ * describes is no longer the thing a fresh session is continuing.
+ */
+const CLAUDE_MAIN_HANDOFF_MAX_AGE_MS = 6 * 60 * 60_000;
+
+/**
+ * The persisted rollover record. It doubles as the pending-rollover flag: a
+ * record whose `forSessionId` is the still-persisted session and which is not
+ * yet `abandoned` means the threshold was crossed but the swap has not
+ * happened, so a restart in between must not resume that session.
+ */
+export interface MainSessionHandoffRecord {
+  forSessionId: string;
+  createdAt: string;
+  inputTokensAtSchedule: number;
+  status: "pending" | "ready" | "failed" | "skipped";
+  summary?: string;
+  abandoned?: boolean;
+  abandonedAt?: string;
+}
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -208,6 +254,15 @@ export class ClaudeMainAgentClient implements MainAgentClient {
    * the NEXT turn boundary — never mid-turn — so no in-flight work is lost.
    */
   private pendingContextRollover?: { inputTokens: number };
+  /**
+   * Session id whose handoff brief the NEXT first turn on this fresh session
+   * should consume. Set by the rollover path, by a watchdog clear, and by
+   * `start()` when a persisted artifact says the session it names was (or must
+   * be) abandoned. Cleared after one attempt — a handoff is never retried.
+   */
+  private pendingHandoffSourceSessionId?: string;
+  /** At most one summarization job in flight; a newer schedule supersedes. */
+  private handoffSummaryInFlight = false;
   private readonly logBuffer = new LogBuffer(300);
 
   constructor(
@@ -271,8 +326,15 @@ export class ClaudeMainAgentClient implements MainAgentClient {
       this.currentBehaviorHash = behaviorHash;
       this.sessionId = storedSessionId;
 
+      // The handoff artifact is also the persisted pending-rollover flag, so
+      // it is consulted BEFORE deciding whether to resume: a threshold that
+      // was crossed before a restart must still cost the session, not be
+      // forgotten because the flag only lived in memory.
+      const resumeBlocked = await this.evaluateStartupHandoff(storedSessionId);
+      if (resumeBlocked) this.sessionId = undefined;
+
       let resumed = false;
-      if (storedSessionId) {
+      if (storedSessionId && !resumeBlocked) {
         try {
           await this.launchQuery(bootstrap, timeoutMs, storedSessionId);
           resumed = true;
@@ -362,6 +424,10 @@ export class ClaudeMainAgentClient implements MainAgentClient {
       throw new Error("Claude Agent SDK main session is closed or uninitialized.");
     }
 
+    // Never waits on summarization: whatever is already on disk is used, and
+    // anything still generating is simply skipped.
+    const summary = await this.consumeHandoffSummary(Boolean(rolledOver));
+
     const turn: ActiveTurn = {
       queue: new AsyncEventQueue<MainAgentEvent>(),
       assistantText: "",
@@ -374,16 +440,24 @@ export class ClaudeMainAgentClient implements MainAgentClient {
       if (rolledOver) {
         turn.queue.push({
           type: "status",
-          message: "main session context rolled over; conversation history was reset",
+          message: summary
+            ? "main session context rolled over; a summary of the prior conversation was carried over"
+            : "main session context rolled over; conversation history was reset",
           raw: {
             event: CLAUDE_CONTEXT_ROLLOVER_EVENT,
             previousSessionId: rolledOver.previousSessionId,
             previousTurnInputTokens: rolledOver.inputTokens,
-            thresholdTokens: this.config.mainAgent.claude.contextRolloverInputTokens
+            thresholdTokens: this.config.mainAgent.claude.contextRolloverInputTokens,
+            handoffSummary: Boolean(summary)
           }
         });
       }
-      const text = rolledOver ? `${CLAUDE_CONTEXT_ROLLOVER_HANDOFF}\n\n${input.text}` : input.text;
+      const prefix = summary
+        ? contextRolloverHandoffWithSummary(summary, Boolean(rolledOver))
+        : rolledOver
+          ? CLAUDE_CONTEXT_ROLLOVER_HANDOFF
+          : undefined;
+      const text = prefix ? `${prefix}\n\n${input.text}` : input.text;
       this.inputQueue.push(await this.buildUserMessage(text, input.attachments ?? []));
       for await (const event of turn.queue.iterate()) yield event;
     } catch (error) {
@@ -420,7 +494,13 @@ export class ClaudeMainAgentClient implements MainAgentClient {
    * Claude session resumable forever.
    */
   async clearPersistedSession(reason = "clear_persisted_session"): Promise<void> {
+    const abandoned = this.sessionId;
     await this.state.clearCodexSession(this.config.mainAgent.claude.mainSessionName);
+    // The session just went away (watchdog abort, rollover, manual reset), so
+    // any handoff artifact describing it is now owed to the NEXT fresh session.
+    if (abandoned && (await this.markHandoffAbandoned(abandoned))) {
+      this.pendingHandoffSourceSessionId = abandoned;
+    }
     this.sessionId = undefined;
     this.lastTurnInputTokens = undefined;
     this.pendingContextRollover = undefined;
@@ -444,6 +524,7 @@ export class ClaudeMainAgentClient implements MainAgentClient {
   private async rolloverContextIfPending(): Promise<{ inputTokens: number; previousSessionId?: string } | undefined> {
     const pending = this.pendingContextRollover;
     if (!pending) return undefined;
+    if (await this.deferRolloverForHandoffSummary(pending.inputTokens)) return undefined;
     this.pendingContextRollover = undefined;
     const previousSessionId = this.sessionId;
     this.logger.warn(
@@ -473,6 +554,40 @@ export class ClaudeMainAgentClient implements MainAgentClient {
   }
 
   /**
+   * Hold an armed rollover while its handoff summary is still generating.
+   *
+   * During an active conversation the next turn boundary arrives seconds after
+   * the threshold crossing, long before a ~30-60s summarization finishes, so
+   * swapping sessions immediately would throw the brief away in exactly the
+   * case where continuity matters most. Waiting at the boundary is never an
+   * option; skipping the swap for a turn or two is — the threshold leaves
+   * ~100k tokens of slack below `contextRolloverHardCapTokens`, past which the
+   * session is swapped regardless. No artifact at all (summaries disabled,
+   * state dir unwritable) means nothing to wait for: roll over now.
+   */
+  private async deferRolloverForHandoffSummary(scheduledInputTokens: number): Promise<boolean> {
+    const cfg = this.config.mainAgent.claude;
+    const record = await this.readHandoffArtifact();
+    if (!record || record.forSessionId !== this.sessionId || record.status !== "pending") return false;
+    const inputTokens = Math.max(this.lastTurnInputTokens ?? 0, scheduledInputTokens);
+    if (inputTokens >= cfg.contextRolloverHardCapTokens) return false;
+    this.logger.info(
+      {
+        component: "claude-main-agent",
+        event: "context_rollover_deferred",
+        sessionId: this.sessionId,
+        inputTokens,
+        thresholdTokens: cfg.contextRolloverInputTokens,
+        hardCapTokens: cfg.contextRolloverHardCapTokens,
+        artifactStatus: record.status
+      },
+      "holding the Claude main-session rollover until its handoff summary resolves"
+    );
+    this.logBuffer.append("event", `[SESSION] rollover deferred for handoff summary input_tokens=${inputTokens}`);
+    return true;
+  }
+
+  /**
    * Record how full the session's context is from a completed turn's usage and
    * arm a rollover once it crosses the configured threshold.
    */
@@ -494,6 +609,233 @@ export class ClaudeMainAgentClient implements MainAgentClient {
       },
       "Claude main session crossed the context rollover threshold; the next turn will start a fresh session"
     );
+    this.scheduleHandoffSummary(this.sessionId, inputTokens);
+  }
+
+  /**
+   * Persist the rollover record and summarize the doomed conversation OUT of
+   * band. Deliberately fire-and-forget: user turns must never wait on this,
+   * and the summarizer must never run against the near-full main session.
+   */
+  private scheduleHandoffSummary(sessionId: string | undefined, inputTokens: number): void {
+    const cfg = this.config.mainAgent.claude;
+    if (!sessionId) return;
+    if (this.handoffSummaryInFlight) return;
+    const startedAt = Date.now();
+    const record: MainSessionHandoffRecord = {
+      forSessionId: sessionId,
+      createdAt: nowIso(),
+      inputTokensAtSchedule: inputTokens,
+      // The record is also the persisted pending-rollover flag, so it is
+      // written even with summarization off — a restart before the next turn
+      // must still refuse to resume this session.
+      status: cfg.handoffSummaryEnabled ? "pending" : "skipped"
+    };
+    if (!cfg.handoffSummaryEnabled) {
+      void this.writeHandoffArtifact(record).catch(() => undefined);
+      return;
+    }
+    this.handoffSummaryInFlight = true;
+    void (async () => {
+      try {
+        await this.writeHandoffArtifact(record);
+        this.logger.info(
+          {
+            component: "claude-main-agent",
+            event: "handoff_summary_started",
+            sessionId,
+            inputTokens,
+            model: cfg.handoffSummaryModel
+          },
+          "summarizing the Claude main session before it is rolled over"
+        );
+        const result: HandoffSummaryResult = await generateHandoffSummary({
+          config: this.config,
+          sessionId,
+          safeEnv: this.safeEnv,
+          model: cfg.handoffSummaryModel,
+          timeoutMs: DEFAULT_HANDOFF_SUMMARY_TIMEOUT_MS
+        });
+        const stored = await this.patchHandoffArtifact(sessionId, {
+          status: "ready",
+          summary: result.summary
+        });
+        this.logger.info(
+          {
+            component: "claude-main-agent",
+            event: "handoff_summary_ready",
+            sessionId,
+            stored,
+            summaryChars: result.summary.length,
+            transcriptChars: result.transcriptChars,
+            transcriptMessages: result.transcriptMessages,
+            transcriptBytes: result.transcriptBytes,
+            durationMs: Date.now() - startedAt
+          },
+          "generated a handoff brief for the Claude main session being rolled over"
+        );
+        this.logBuffer.append("event", `[HANDOFF] summary ready chars=${result.summary.length}`);
+      } catch (error) {
+        await this.patchHandoffArtifact(sessionId, { status: "failed" }).catch(() => false);
+        this.logger.warn(
+          {
+            component: "claude-main-agent",
+            event: "handoff_summary_failed",
+            sessionId,
+            durationMs: Date.now() - startedAt,
+            error: this.redactError(error)
+          },
+          "failed to summarize the Claude main session before rollover; the fresh session will get the plain handoff note"
+        );
+        this.logBuffer.append("event", "[HANDOFF] summary failed");
+      } finally {
+        this.handoffSummaryInFlight = false;
+      }
+    })();
+  }
+
+  /**
+   * Startup half of the rollover/handoff contract. Returns true when the
+   * persisted session must NOT be resumed because a rollover was already owed
+   * to it when the process last stopped.
+   */
+  private async evaluateStartupHandoff(storedSessionId?: string): Promise<boolean> {
+    const record = await this.readHandoffArtifact();
+    if (!record) return false;
+    if (storedSessionId && record.forSessionId === storedSessionId && !record.abandoned) {
+      this.logger.warn(
+        {
+          component: "claude-main-agent",
+          event: "context_rollover_restart_fresh",
+          sessionId: storedSessionId,
+          inputTokens: record.inputTokensAtSchedule
+        },
+        "a context rollover was owed to the persisted Claude main session; starting fresh instead of resuming"
+      );
+      this.logBuffer.append("event", `[SESSION] rollover owed to ${storedSessionId}; starting fresh`);
+      await this.markHandoffAbandoned(storedSessionId);
+      await this.state.clearCodexSession(this.config.mainAgent.claude.mainSessionName);
+      this.pendingContextRollover = undefined;
+      this.pendingHandoffSourceSessionId = storedSessionId;
+      return true;
+    }
+    // Nothing is being resumed and the artifact describes an already-abandoned
+    // session (rollover or watchdog clear that a restart interrupted): the
+    // fresh session's first turn should still receive its brief.
+    if (!storedSessionId && record.abandoned) {
+      this.pendingHandoffSourceSessionId = record.forSessionId;
+    }
+    return false;
+  }
+
+  /**
+   * Take the handoff brief owed to this fresh session, if one is ready. Reads
+   * only what is already persisted — a summary still generating is skipped,
+   * never awaited — and invalidates the artifact either way so it can never be
+   * replayed into a later session.
+   */
+  private async consumeHandoffSummary(rolledOver: boolean): Promise<string | undefined> {
+    const source = this.pendingHandoffSourceSessionId;
+    if (!source) return undefined;
+    this.pendingHandoffSourceSessionId = undefined;
+    const record = await this.readHandoffArtifact();
+    if (!record || record.forSessionId !== source) {
+      this.logger.info(
+        {
+          component: "claude-main-agent",
+          event: "handoff_skipped_stale",
+          expectedSessionId: source,
+          artifactSessionId: record?.forSessionId,
+          rolledOver
+        },
+        "no handoff brief matching the abandoned Claude main session; using the plain note"
+      );
+      return undefined;
+    }
+    await this.clearHandoffArtifact();
+    if (record.status !== "ready" || !record.summary) {
+      this.logger.info(
+        {
+          component: "claude-main-agent",
+          event: "handoff_skipped_unready",
+          previousSessionId: source,
+          status: record.status,
+          rolledOver
+        },
+        "handoff brief was not ready at the turn boundary; using the plain note"
+      );
+      return undefined;
+    }
+    this.logger.info(
+      {
+        component: "claude-main-agent",
+        event: "handoff_consumed",
+        previousSessionId: source,
+        sessionId: this.sessionId,
+        summaryChars: record.summary.length,
+        rolledOver
+      },
+      "carried a handoff brief from the retired Claude main session into the fresh one"
+    );
+    this.logBuffer.append("event", `[HANDOFF] consumed brief chars=${record.summary.length}`);
+    return record.summary;
+  }
+
+  private async readHandoffArtifact(): Promise<MainSessionHandoffRecord | undefined> {
+    try {
+      const record = await this.state.readJson<MainSessionHandoffRecord | null>(CLAUDE_MAIN_HANDOFF_FILE, null);
+      if (!record || typeof record !== "object" || typeof record.forSessionId !== "string") return undefined;
+      const createdAt = Date.parse(record.createdAt ?? "");
+      if (Number.isFinite(createdAt) && Date.now() - createdAt > CLAUDE_MAIN_HANDOFF_MAX_AGE_MS) return undefined;
+      return record;
+    } catch (error) {
+      this.logger.warn(
+        { component: "claude-main-agent", event: "handoff_read_failed", error: this.redactError(error) },
+        "failed to read the Claude main-session handoff artifact"
+      );
+      return undefined;
+    }
+  }
+
+  private async writeHandoffArtifact(record: MainSessionHandoffRecord): Promise<void> {
+    await this.state.writeJson(CLAUDE_MAIN_HANDOFF_FILE, record);
+  }
+
+  /** Merge into the artifact only while it still describes `forSessionId`. */
+  private async patchHandoffArtifact(
+    forSessionId: string,
+    patch: Partial<MainSessionHandoffRecord>
+  ): Promise<boolean> {
+    let applied = false;
+    try {
+      await this.state.updateJson<MainSessionHandoffRecord | null>(CLAUDE_MAIN_HANDOFF_FILE, null, (current) => {
+        if (!current || current.forSessionId !== forSessionId) return undefined;
+        applied = true;
+        return { ...current, ...patch };
+      });
+    } catch (error) {
+      this.logger.warn(
+        { component: "claude-main-agent", event: "handoff_write_failed", forSessionId, error: this.redactError(error) },
+        "failed to update the Claude main-session handoff artifact"
+      );
+      return false;
+    }
+    return applied;
+  }
+
+  private async markHandoffAbandoned(forSessionId: string): Promise<boolean> {
+    return this.patchHandoffArtifact(forSessionId, { abandoned: true, abandonedAt: nowIso() });
+  }
+
+  private async clearHandoffArtifact(): Promise<void> {
+    try {
+      await this.state.writeJson(CLAUDE_MAIN_HANDOFF_FILE, null);
+    } catch (error) {
+      this.logger.warn(
+        { component: "claude-main-agent", event: "handoff_clear_failed", error: this.redactError(error) },
+        "failed to invalidate the Claude main-session handoff artifact"
+      );
+    }
   }
 
   getRecentLogs(n = 100, includeRaw = false): string[] {

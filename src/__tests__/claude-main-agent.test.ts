@@ -1,3 +1,6 @@
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { BehaviorPack } from "../behavior.js";
 import type { AppConfig } from "../config.js";
@@ -115,7 +118,13 @@ function fakeSdk(plans: FakeQueryPlan[] = [{}]) {
   return { query, instances };
 }
 
-function testConfig(nested?: { settleGraceMs?: number; holdMaxMs?: number; contextRolloverInputTokens?: number }): AppConfig {
+function testConfig(nested?: {
+  settleGraceMs?: number;
+  holdMaxMs?: number;
+  contextRolloverInputTokens?: number;
+  contextRolloverHardCapTokens?: number;
+  handoffSummaryEnabled?: boolean;
+}): AppConfig {
   return {
     rootDir: "/tmp/codex-chat-test",
     service: {
@@ -138,18 +147,32 @@ function testConfig(nested?: { settleGraceMs?: number; holdMaxMs?: number; conte
         startupTimeoutSec: 2,
         nestedAgentSettleGraceMs: nested?.settleGraceMs ?? 5_000,
         nestedAgentHoldMaxMs: nested?.holdMaxMs ?? 55_000,
-        contextRolloverInputTokens: nested?.contextRolloverInputTokens ?? 800_000
+        contextRolloverInputTokens: nested?.contextRolloverInputTokens ?? 800_000,
+        contextRolloverHardCapTokens: nested?.contextRolloverHardCapTokens ?? 900_000,
+        handoffSummaryEnabled: nested?.handoffSummaryEnabled ?? true,
+        handoffSummaryModel: "claude-sonnet-5"
       }
     },
     codex: { providerApiKeyEnvNames: ["OPENROUTER_API_KEY"] }
   } as unknown as AppConfig;
 }
 
-function fakeState(initial?: { sessionId: string; behaviorHash?: string }) {
+function fakeState(initial?: { sessionId: string; behaviorHash?: string }, files?: Record<string, unknown>) {
   const sessions = new Map<string, Record<string, unknown>>();
   if (initial) sessions.set("codex-chat-main-claude", { ...initial });
+  const jsonFiles = new Map<string, unknown>(Object.entries(files ?? {}));
   const state = {
     root: "/tmp",
+    readJson: vi.fn(async (rel: string, fallback: unknown) =>
+      jsonFiles.has(rel) ? jsonFiles.get(rel) : fallback
+    ),
+    writeJson: vi.fn(async (rel: string, value: unknown) => {
+      jsonFiles.set(rel, value);
+    }),
+    updateJson: vi.fn(async (rel: string, fallback: unknown, fn: (current: unknown) => unknown) => {
+      const next = fn(jsonFiles.has(rel) ? jsonFiles.get(rel) : fallback);
+      if (next !== undefined) jsonFiles.set(rel, next);
+    }),
     getCodexSession: vi.fn(async (name: string) => sessions.get(name)?.sessionId as string | undefined),
     getCodexSessionBehaviorHash: vi.fn(async (name: string) => sessions.get(name)?.behaviorHash as string | undefined),
     setCodexSession: vi.fn(async (name: string, value: Record<string, unknown>) => {
@@ -159,7 +182,13 @@ function fakeState(initial?: { sessionId: string; behaviorHash?: string }) {
       sessions.delete(name);
     })
   } as unknown as StateStore;
-  return { state, sessions };
+  return { state, sessions, jsonFiles };
+}
+
+const HANDOFF_FILE = "main_session_handoff.json";
+
+function handoffRecord(jsonFiles: Map<string, unknown>): Record<string, unknown> | null {
+  return (jsonFiles.get(HANDOFF_FILE) as Record<string, unknown> | null | undefined) ?? null;
 }
 
 function fakeBehavior(hash = "behavior-hash", bootstrap = "behavior bootstrap") {
@@ -183,10 +212,19 @@ async function loadClient(
   state = fakeState().state,
   behavior = fakeBehavior(),
   onCrash = vi.fn(),
-  config = testConfig()
+  config = testConfig(),
+  // The summarizer is the only boundary that would otherwise reach the real
+  // transcript on disk and a second SDK query; tests stub it here.
+  generateHandoffSummary?: ReturnType<typeof vi.fn>
 ) {
   vi.resetModules();
   vi.doMock("@anthropic-ai/claude-agent-sdk", () => ({ query: sdk.query }));
+  if (generateHandoffSummary) {
+    vi.doMock("../claude-main-handoff.js", async () => ({
+      ...(await vi.importActual<Record<string, unknown>>("../claude-main-handoff.js")),
+      generateHandoffSummary
+    }));
+  }
   const { ClaudeMainAgentClient } = await import("../claude-main-agent.js");
   return new ClaudeMainAgentClient(config, state, behavior, fakeLogger() as never, onCrash);
 }
@@ -242,6 +280,7 @@ beforeEach(() => {
 afterEach(() => {
   process.env = { ...originalEnv };
   vi.doUnmock("@anthropic-ai/claude-agent-sdk");
+  vi.doUnmock("../claude-main-handoff.js");
   vi.restoreAllMocks();
 });
 
@@ -781,7 +820,13 @@ describe("ClaudeMainAgentClient", () => {
   test("a turn ending over the context threshold rolls the next turn onto a fresh session", async () => {
     const sdk = fakeSdk([{ sessionId: "full-session" }, { sessionId: "rolled-session" }]);
     const { state, sessions } = fakeState({ sessionId: "full-session", behaviorHash: "behavior-hash" });
-    const client = await loadClient(sdk, state, fakeBehavior(), vi.fn(), testConfig({ contextRolloverInputTokens: 1_000 }));
+    const client = await loadClient(
+      sdk,
+      state,
+      fakeBehavior(),
+      vi.fn(),
+      testConfig({ contextRolloverInputTokens: 1_000, handoffSummaryEnabled: false })
+    );
     await client.start();
     expect(sdk.instances[0]?.options.resume).toBe("full-session");
 
@@ -814,6 +859,384 @@ describe("ClaudeMainAgentClient", () => {
     expect(client.contextStats()).toMatchObject({ rolloverPending: false, lastTurnInputTokens: undefined });
     await waitFor(() => sessions.get("codex-chat-main-claude")?.sessionId === "rolled-session");
     await client.stop();
+  });
+
+  test("summarizes the doomed session out of band and hands the brief to the fresh one", async () => {
+    const sdk = fakeSdk([{ sessionId: "full-session" }, { sessionId: "rolled-session" }]);
+    const { state, jsonFiles } = fakeState({ sessionId: "full-session", behaviorHash: "behavior-hash" });
+    const summarize = vi.fn().mockResolvedValue({
+      summary: "Ongoing: ship the handoff brief.",
+      transcriptChars: 1_234,
+      transcriptMessages: 12,
+      transcriptBytes: 4_567
+    });
+    const client = await loadClient(
+      sdk,
+      state,
+      fakeBehavior(),
+      vi.fn(),
+      testConfig({ contextRolloverInputTokens: 1_000 }),
+      summarize
+    );
+    await client.start();
+
+    const first = collect(client.sendTurn({ text: "one" }));
+    await sdk.instances[0]!.input.next();
+    sdk.instances[0]!.sdk.push({
+      ...successResult("full-session", "first answer"),
+      usage: { input_tokens: 1_100, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+    });
+    await first;
+
+    // Summarization is scheduled off the hot path against the doomed session
+    // and never resumes it.
+    await waitFor(() => handoffRecord(jsonFiles)?.status === "ready");
+    expect(summarize).toHaveBeenCalledTimes(1);
+    expect(summarize.mock.calls[0]?.[0]).toMatchObject({ sessionId: "full-session", model: "claude-sonnet-5" });
+    expect(handoffRecord(jsonFiles)).toMatchObject({
+      forSessionId: "full-session",
+      inputTokensAtSchedule: 1_100,
+      summary: "Ongoing: ship the handoff brief."
+    });
+    expect(sdk.query).toHaveBeenCalledTimes(1);
+
+    const second = collect(client.sendTurn({ text: "two" }));
+    await waitFor(() => sdk.instances.length === 2);
+    const rolledMessage = await sdk.instances[1]!.input.next();
+    sdk.instances[1]!.sdk.push(fakeClaudeInitMessage("rolled-session"));
+    sdk.instances[1]!.sdk.push(successResult("rolled-session", "fresh answer"));
+    const events = await second;
+
+    expect(events[0]).toMatchObject({
+      type: "status",
+      raw: { event: "claude_context_rollover", handoffSummary: true }
+    });
+    const text = userMessageText(rolledMessage.value);
+    expect(text).toContain("Handoff brief from your previous session (auto-summarized):");
+    expect(text).toContain("Ongoing: ship the handoff brief.");
+    expect(text).toContain("two");
+    // Consumed exactly once: the artifact is invalidated at the boundary.
+    expect(handoffRecord(jsonFiles)).toBeNull();
+    await client.stop();
+  });
+
+  test("a summarizer failure still rolls over, with the plain handoff note", async () => {
+    const sdk = fakeSdk([{ sessionId: "full-session" }, { sessionId: "rolled-session" }]);
+    const { state, jsonFiles } = fakeState({ sessionId: "full-session", behaviorHash: "behavior-hash" });
+    const summarize = vi.fn().mockRejectedValue(new Error("transcript missing"));
+    const client = await loadClient(
+      sdk,
+      state,
+      fakeBehavior(),
+      vi.fn(),
+      testConfig({ contextRolloverInputTokens: 1_000 }),
+      summarize
+    );
+    await client.start();
+
+    const first = collect(client.sendTurn({ text: "one" }));
+    await sdk.instances[0]!.input.next();
+    sdk.instances[0]!.sdk.push({
+      ...successResult("full-session", "first answer"),
+      usage: { input_tokens: 1_100, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+    });
+    await first;
+    await waitFor(() => handoffRecord(jsonFiles)?.status === "failed");
+
+    const second = collect(client.sendTurn({ text: "two" }));
+    await waitFor(() => sdk.instances.length === 2);
+    const rolledMessage = await sdk.instances[1]!.input.next();
+    sdk.instances[1]!.sdk.push(fakeClaudeInitMessage("rolled-session"));
+    sdk.instances[1]!.sdk.push(successResult("rolled-session", "fresh answer"));
+    const events = await second;
+
+    expect(events[0]).toMatchObject({
+      type: "status",
+      raw: { event: "claude_context_rollover", handoffSummary: false }
+    });
+    const text = userMessageText(rolledMessage.value);
+    expect(text).toContain("previous main session reached its context limit");
+    expect(text).not.toContain("Handoff brief");
+    expect(handoffRecord(jsonFiles)).toBeNull();
+    await client.stop();
+  });
+
+  test("a handoff artifact for a different session is neither resumed around nor carried", async () => {
+    const sdk = fakeSdk([{ sessionId: "live-session" }, { sessionId: "next-session" }]);
+    const stale = {
+      forSessionId: "some-other-session",
+      createdAt: new Date().toISOString(),
+      inputTokensAtSchedule: 900_000,
+      status: "ready",
+      summary: "STALE BRIEF"
+    };
+    const { state, jsonFiles } = fakeState({ sessionId: "live-session", behaviorHash: "behavior-hash" }, {
+      "main_session_handoff.json": stale
+    });
+    const client = await loadClient(sdk, state, fakeBehavior(), vi.fn(), testConfig(), vi.fn());
+    await client.start();
+    // The artifact names a session that is not the persisted one, so the
+    // resume decision is untouched.
+    expect(sdk.instances[0]?.options.resume).toBe("live-session");
+
+    const first = collect(client.sendTurn({ text: "one" }));
+    const firstMessage = await sdk.instances[0]!.input.next();
+    sdk.instances[0]!.sdk.push(successResult("live-session", "first answer"));
+    await first;
+    expect(userMessageText(firstMessage.value)).toBe("one");
+
+    // Watchdog clear of a session the artifact does not describe: nothing is
+    // owed to the fresh session, and the foreign brief is left alone.
+    await client.clearPersistedSession("watchdog_abort");
+    await client.stop();
+    await client.start();
+
+    const second = collect(client.sendTurn({ text: "two" }));
+    const secondMessage = await sdk.instances[1]!.input.next();
+    sdk.instances[1]!.sdk.push(fakeClaudeInitMessage("next-session"));
+    sdk.instances[1]!.sdk.push(successResult("next-session", "second answer"));
+    await second;
+
+    expect(userMessageText(secondMessage.value)).toBe("two");
+    expect(handoffRecord(jsonFiles)).toMatchObject({ forSessionId: "some-other-session", summary: "STALE BRIEF" });
+    await client.stop();
+  });
+
+  test("an armed rollover waits for its summary instead of burning it at the next turn", async () => {
+    const sdk = fakeSdk([{ sessionId: "full-session" }, { sessionId: "rolled-session" }]);
+    const { state, jsonFiles } = fakeState({ sessionId: "full-session", behaviorHash: "behavior-hash" });
+    let resolveSummary!: (value: unknown) => void;
+    const summarize = vi.fn().mockImplementation(() => new Promise((resolve) => {
+      resolveSummary = resolve;
+    }));
+    const client = await loadClient(
+      sdk,
+      state,
+      fakeBehavior(),
+      vi.fn(),
+      testConfig({ contextRolloverInputTokens: 1_000 }),
+      summarize
+    );
+    await client.start();
+
+    const first = collect(client.sendTurn({ text: "one" }));
+    await sdk.instances[0]!.input.next();
+    sdk.instances[0]!.sdk.push({
+      ...successResult("full-session", "first answer"),
+      usage: { input_tokens: 1_100, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+    });
+    await first;
+    await waitFor(() => handoffRecord(jsonFiles)?.status === "pending");
+
+    // Summary still generating and well under the hard cap: the turn resumes
+    // the existing session rather than throwing the brief away.
+    const second = collect(client.sendTurn({ text: "two" }));
+    const secondMessage = await sdk.instances[0]!.input.next();
+    sdk.instances[0]!.sdk.push({
+      ...successResult("full-session", "second answer"),
+      usage: { input_tokens: 1_200, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+    });
+    const secondEvents = await second;
+
+    expect(sdk.query).toHaveBeenCalledTimes(1);
+    expect(userMessageText(secondMessage.value)).toBe("two");
+    expect(secondEvents).toEqual([{ type: "final", text: "second answer" }]);
+    // Still armed, and not re-scheduled while it waits.
+    expect(client.contextStats()).toMatchObject({ rolloverPending: true });
+    expect(summarize).toHaveBeenCalledTimes(1);
+
+    resolveSummary({ summary: "Ongoing: the deferred brief.", transcriptChars: 1, transcriptMessages: 1, transcriptBytes: 1 });
+    await waitFor(() => handoffRecord(jsonFiles)?.status === "ready");
+
+    // Resolved: the next boundary rolls over and carries the brief.
+    const third = collect(client.sendTurn({ text: "three" }));
+    await waitFor(() => sdk.instances.length === 2);
+    const rolledMessage = await sdk.instances[1]!.input.next();
+    sdk.instances[1]!.sdk.push(fakeClaudeInitMessage("rolled-session"));
+    sdk.instances[1]!.sdk.push(successResult("rolled-session", "fresh answer"));
+    const events = await third;
+
+    expect(events[0]).toMatchObject({ type: "status", raw: { event: "claude_context_rollover", handoffSummary: true } });
+    const text = userMessageText(rolledMessage.value);
+    expect(text).toContain("Ongoing: the deferred brief.");
+    expect(text).toContain("three");
+    expect(handoffRecord(jsonFiles)).toBeNull();
+    await client.stop();
+  });
+
+  test("a deferred rollover stops waiting at the hard cap and uses the plain note", async () => {
+    const sdk = fakeSdk([{ sessionId: "full-session" }, { sessionId: "rolled-session" }]);
+    const { state, jsonFiles } = fakeState({ sessionId: "full-session", behaviorHash: "behavior-hash" });
+    // Never resolves: the summary is still generating when the cap is hit.
+    const summarize = vi.fn().mockImplementation(() => new Promise(() => undefined));
+    const client = await loadClient(
+      sdk,
+      state,
+      fakeBehavior(),
+      vi.fn(),
+      testConfig({ contextRolloverInputTokens: 1_000, contextRolloverHardCapTokens: 1_500 }),
+      summarize
+    );
+    await client.start();
+
+    const first = collect(client.sendTurn({ text: "one" }));
+    await sdk.instances[0]!.input.next();
+    sdk.instances[0]!.sdk.push({
+      ...successResult("full-session", "first answer"),
+      usage: { input_tokens: 1_100, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+    });
+    await first;
+    await waitFor(() => handoffRecord(jsonFiles)?.status === "pending");
+
+    // Under the cap: deferred, and this turn pushes the session over it.
+    const second = collect(client.sendTurn({ text: "two" }));
+    await sdk.instances[0]!.input.next();
+    sdk.instances[0]!.sdk.push({
+      ...successResult("full-session", "second answer"),
+      usage: { input_tokens: 1_600, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+    });
+    await second;
+    expect(sdk.query).toHaveBeenCalledTimes(1);
+
+    const third = collect(client.sendTurn({ text: "three" }));
+    await waitFor(() => sdk.instances.length === 2);
+    const rolledMessage = await sdk.instances[1]!.input.next();
+    sdk.instances[1]!.sdk.push(fakeClaudeInitMessage("rolled-session"));
+    sdk.instances[1]!.sdk.push(successResult("rolled-session", "fresh answer"));
+    const events = await third;
+
+    expect(events[0]).toMatchObject({ type: "status", raw: { event: "claude_context_rollover", handoffSummary: false } });
+    const text = userMessageText(rolledMessage.value);
+    expect(text).toContain("previous main session reached its context limit");
+    expect(text).not.toContain("Handoff brief");
+    await client.stop();
+  });
+
+  test("a watchdog clear hands the brief to the next fresh session", async () => {
+    const sdk = fakeSdk([{ sessionId: "wedged-session" }, { sessionId: "recovered-session" }]);
+    const { state, jsonFiles } = fakeState({ sessionId: "wedged-session", behaviorHash: "behavior-hash" });
+    const summarize = vi.fn().mockResolvedValue({
+      summary: "Ongoing: recover from the wedge.",
+      transcriptChars: 10,
+      transcriptMessages: 1,
+      transcriptBytes: 10
+    });
+    const client = await loadClient(
+      sdk,
+      state,
+      fakeBehavior(),
+      vi.fn(),
+      testConfig({ contextRolloverInputTokens: 1_000 }),
+      summarize
+    );
+    await client.start();
+
+    const first = collect(client.sendTurn({ text: "one" }));
+    await sdk.instances[0]!.input.next();
+    sdk.instances[0]!.sdk.push({
+      ...successResult("wedged-session", "first answer"),
+      usage: { input_tokens: 1_100, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+    });
+    await first;
+    await waitFor(() => handoffRecord(jsonFiles)?.status === "ready");
+
+    // Watchdog recovery: clear the persisted session, then restart clean.
+    await client.clearPersistedSession("watchdog_abort");
+    expect(handoffRecord(jsonFiles)).toMatchObject({ abandoned: true });
+    await client.stop();
+    await client.start();
+
+    const turn = collect(client.sendTurn({ text: "after the wedge" }));
+    const message = await sdk.instances[1]!.input.next();
+    sdk.instances[1]!.sdk.push(fakeClaudeInitMessage("recovered-session"));
+    sdk.instances[1]!.sdk.push(successResult("recovered-session", "recovered answer"));
+    const events = await turn;
+
+    expect(sdk.instances[1]?.options.resume).toBeUndefined();
+    const text = userMessageText(message.value);
+    expect(text).toContain("your previous main session was reset");
+    expect(text).toContain("Ongoing: recover from the wedge.");
+    expect(text).toContain("after the wedge");
+    // No rollover happened at this boundary, so no rollover status event.
+    expect(events.every((event) => event.type !== "status")).toBe(true);
+    expect(handoffRecord(jsonFiles)).toBeNull();
+    await client.stop();
+  });
+
+  test("a rollover owed across a restart starts fresh instead of resuming the oversized session", async () => {
+    const sdk = fakeSdk([{ sessionId: "restarted-session" }]);
+    const pending = {
+      forSessionId: "full-session",
+      createdAt: new Date().toISOString(),
+      inputTokensAtSchedule: 934_000,
+      status: "ready",
+      summary: "Ongoing: survive the restart."
+    };
+    const { state, sessions, jsonFiles } = fakeState({ sessionId: "full-session", behaviorHash: "behavior-hash" }, {
+      "main_session_handoff.json": pending
+    });
+    const client = await loadClient(
+      sdk,
+      state,
+      fakeBehavior(),
+      vi.fn(),
+      testConfig({ contextRolloverInputTokens: 1_000 }),
+      vi.fn()
+    );
+
+    await client.start();
+
+    // The pending-rollover flag survived the restart: no resume, and the
+    // oversized session id is dropped from state.
+    expect(sdk.instances[0]?.options.resume).toBeUndefined();
+    expect(sessions.get("codex-chat-main-claude")).toBeUndefined();
+
+    const turn = collect(client.sendTurn({ text: "after restart" }));
+    const message = await sdk.instances[0]!.input.next();
+    sdk.instances[0]!.sdk.push(fakeClaudeInitMessage("restarted-session"));
+    sdk.instances[0]!.sdk.push(successResult("restarted-session", "answer"));
+    await turn;
+
+    const text = userMessageText(message.value);
+    expect(text).toContain("Ongoing: survive the restart.");
+    expect(text).toContain("after restart");
+    expect(handoffRecord(jsonFiles)).toBeNull();
+    await client.stop();
+  });
+
+  test("extracts only user/assistant text from a session transcript, tail-first", async () => {
+    const { claudeTranscriptPath, readTranscriptExcerpt } = await import("../claude-main-handoff.js");
+    const home = await mkdtemp(join(tmpdir(), "codex-chat-handoff-"));
+    const path = claudeTranscriptPath("/home/tim/pkg/tim/codex-chat", "sess-1", home);
+    expect(path).toBe(join(home, ".claude", "projects", "-home-tim-pkg-tim-codex-chat", "sess-1.jsonl"));
+    await mkdir(dirname(path), { recursive: true });
+    const lines = [
+      JSON.stringify({ type: "custom-title", customTitle: "codex-chat main" }),
+      JSON.stringify({ type: "queue-operation", operation: "enqueue" }),
+      JSON.stringify({ type: "user", isSidechain: false, message: { role: "user", content: [{ type: "text", text: "old question" }] } }),
+      JSON.stringify({
+        type: "assistant",
+        isSidechain: false,
+        message: { role: "assistant", content: [{ type: "thinking", thinking: "hmm" }, { type: "text", text: "old answer" }, { type: "tool_use", name: "Bash", input: { command: "ls" } }] }
+      }),
+      JSON.stringify({ type: "user", isSidechain: false, message: { role: "user", content: [{ type: "tool_result", content: "huge tool output" }] } }),
+      JSON.stringify({ type: "assistant", isSidechain: true, message: { role: "assistant", content: [{ type: "text", text: "subagent chatter" }] } }),
+      "{ not json",
+      JSON.stringify({ type: "user", isSidechain: false, message: { role: "user", content: "recent question" } })
+    ];
+    await writeFile(path, `${lines.join("\n")}\n`, "utf8");
+
+    const excerpt = await readTranscriptExcerpt(path);
+    expect(excerpt.text).toBe("USER: old question\n\nASSISTANT: old answer\n\nUSER: recent question");
+    expect(excerpt.messages).toBe(3);
+    expect(excerpt.text).not.toContain("huge tool output");
+    expect(excerpt.text).not.toContain("subagent chatter");
+    expect(excerpt.text).not.toContain("hmm");
+
+    // Budget spends from the tail backwards.
+    const tail = await readTranscriptExcerpt(path, 40);
+    expect(tail.text).toBe("USER: recent question");
+    await rm(home, { recursive: true, force: true });
   });
 
   test("rejects initialization when the SDK reports a non-first-party provider", async () => {

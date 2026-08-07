@@ -953,6 +953,38 @@ describe("service supervisor", () => {
     expect(notifyOps).toHaveBeenCalledWith(expect.stringContaining("Main session context rolled over"));
   });
 
+  test("a rollover that carried a handoff brief says so instead of 'history is gone'", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = makeService(config, logger);
+    await service.state.init();
+    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+    const notifyOps = vi.spyOn(service.telegram, "notifyOps").mockResolvedValue();
+    vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
+      yield {
+        type: "status",
+        message: "main session context rolled over; a summary of the prior conversation was carried over",
+        raw: {
+          event: "claude_context_rollover",
+          previousSessionId: "full-session",
+          previousTurnInputTokens: 934_000,
+          handoffSummary: true
+        }
+      };
+      yield { type: "final", text: "answering with a brief" };
+    });
+
+    await service.enqueueUserEvent(userEvent(84, "hello"));
+    await vi.waitFor(() => expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("answering with a brief"), 84));
+
+    expect(sendText).toHaveBeenCalledWith(
+      253768951,
+      expect.stringContaining("A summary of the prior conversation was carried over"),
+      84
+    );
+    expect(notifyOps).toHaveBeenCalledWith(expect.stringContaining("with a handoff brief of the prior conversation"));
+  });
+
   test("restartCodex retries with backoff and notifies ops on exhaustion without draining queue", async () => {
     const config = await loadTestConfig();
     // Tighten retry knobs so the test runs fast.

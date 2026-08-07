@@ -160,6 +160,23 @@ const claudeMainAgentSchema = z.object({
   // of headroom for the next turn's prompt, tool output and an effort=high
   // response, which is the window the wedge actually consumed.
   contextRolloverInputTokens: z.number().int().positive().default(800_000),
+  // "Roll over even without a summary" bound. Once the threshold above is
+  // crossed the rollover waits for the out-of-band handoff summary to resolve
+  // (~30-60s) rather than burning it by swapping sessions seconds later —
+  // during an active conversation the next turn boundary arrives long before
+  // the summarizer finishes, which is exactly when continuity matters most.
+  // Past this cap the swap happens regardless, with the plain handoff note.
+  // 900k stays under the ~934k wedge point observed on 2026-08-07 while still
+  // leaving the threshold ~100k of slack for the turns spent waiting.
+  contextRolloverHardCapTokens: z.number().int().positive().default(900_000),
+  // When a rollover is scheduled, summarize the doomed session's on-disk
+  // transcript out of band and hand the brief to the fresh session's first
+  // turn. Off means the fresh session gets only the one-line "history
+  // unavailable" note. Never runs in the turn hot path either way.
+  handoffSummaryEnabled: z.boolean().default(true),
+  // Cheap and fast on purpose: the summarizer is a throwaway one-shot session
+  // with no tools, and nothing waits on it.
+  handoffSummaryModel: z.string().default("claude-sonnet-5"),
 }).prefault({});
 
 export type ClaudeSubagentConfig = z.infer<typeof claudeSubagentSchema>;

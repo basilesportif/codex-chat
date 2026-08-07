@@ -98,6 +98,8 @@ const CONTEXT_RESET_USER_MESSAGE =
   "⚠️ Codex crashed mid-turn and was restarted. The conversation context was reset — please resend your last message and re-establish any context you need.";
 const CONTEXT_ROLLOVER_USER_MESSAGE =
   "♻️ My main session reached its context limit, so this message started a fresh one. Earlier conversation history is no longer in context — please re-state anything I still need.";
+const CONTEXT_ROLLOVER_WITH_SUMMARY_USER_MESSAGE =
+  "♻️ My main session reached its context limit, so this message started a fresh one. A summary of the prior conversation was carried over, but the full history is gone — please re-state anything important that I get wrong.";
 const CONTEXT_RESET_OPS_NOTE =
   "Note: conversation context was reset due to the crash. Active users have been notified.";
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60_000;
@@ -1872,15 +1874,19 @@ export class ServiceSupervisor {
    * before it, which the user has to be told about explicitly.
    */
   private async handleMainAgentStatusEvent(statusEvent: MainAgentEvent & { type: "status" }, event: UserEvent, turnId: string): Promise<void> {
-    const raw = statusEvent.raw as { event?: unknown } | undefined;
+    const raw = statusEvent.raw as { event?: unknown; handoffSummary?: unknown } | undefined;
     if (!raw || typeof raw !== "object" || raw.event !== CLAUDE_CONTEXT_ROLLOVER_EVENT) return;
+    const carriedSummary = raw.handoffSummary === true;
     this.logger.warn(
       { component: "service", event: "main_context_rollover", turnId, chatId: event.chatId, detail: statusEvent.raw },
       "main session context rolled over; conversation history was reset"
     );
     try {
       if (this.canSendTextToOutputTarget(event.outputTarget)) {
-        await this.sendTextToOutputTarget(event.outputTarget, CONTEXT_ROLLOVER_USER_MESSAGE);
+        await this.sendTextToOutputTarget(
+          event.outputTarget,
+          carriedSummary ? CONTEXT_ROLLOVER_WITH_SUMMARY_USER_MESSAGE : CONTEXT_ROLLOVER_USER_MESSAGE
+        );
       }
     } catch (sendError) {
       this.logger.error(
@@ -1889,7 +1895,7 @@ export class ServiceSupervisor {
       );
     }
     await this.telegram.notifyOps(
-      `♻️ Main session context rolled over (chat=${event.chatId ?? "n/a"}); a fresh session is now serving turns.`
+      `♻️ Main session context rolled over (chat=${event.chatId ?? "n/a"}); a fresh session is now serving turns${carriedSummary ? " with a handoff brief of the prior conversation" : " with no prior-conversation summary"}.`
     ).catch(() => undefined);
   }
 

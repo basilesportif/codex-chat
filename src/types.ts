@@ -329,6 +329,16 @@ export interface MainAgentHealth {
   provider?: MainAgentProvider;
 }
 
+/** Context-window telemetry for a provider's persisted main session. */
+export interface MainAgentContextStats {
+  /** Effective input tokens (input + cache read + cache creation) on the last completed turn. */
+  lastTurnInputTokens?: number;
+  /** Turn input size at or above which the next turn starts a fresh session. */
+  rolloverThresholdTokens?: number;
+  /** True once a rollover is queued and waiting for the next turn boundary. */
+  rolloverPending?: boolean;
+}
+
 export interface MainAgentClient {
   start(): Promise<void>;
   stop(): Promise<void>;
@@ -336,6 +346,14 @@ export interface MainAgentClient {
   sendTurn(input: MainAgentTurnInput): AsyncIterable<MainAgentEvent>;
   /** Drop the current main thread/session and create a fresh one. */
   resetSession?(reason?: string): Promise<MainAgentHealth>;
+  /**
+   * Delete this provider's persisted main-session record without restarting.
+   * The watchdog uses it so recovery always clears the ACTIVE provider's key
+   * rather than a hardcoded one.
+   */
+  clearPersistedSession?(reason?: string): Promise<void>;
+  /** Optional: last observed context size of this provider's main session. */
+  contextStats?(): MainAgentContextStats | undefined;
   /** Optional — clients may expose recent app-server output for introspection. */
   getRecentLogs?(n?: number, includeRaw?: boolean): string[];
   /** Optional: bootstrap text queued when the behavior pack changed since the session last saw it. */

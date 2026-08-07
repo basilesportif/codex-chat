@@ -14,7 +14,7 @@ import type { CodexEvent, SubagentJob, UserEvent } from "../types.js";
 const tempDirs: string[] = [];
 const services: ServiceSupervisor[] = [];
 
-async function loadTestConfig(transport = "app-server") {
+async function loadTestConfig(transport = "app-server", extraToml = "") {
   delete process.env.CODEX_CHAT_SUBAGENTS_SERVICE_TIER_MODE;
   delete process.env.CODEX_CHAT_SUBAGENTS_DEFAULT_MODEL;
   delete process.env.CODEX_CHAT_CODEX_MODEL;
@@ -60,6 +60,7 @@ enabled = false
 
 [brain]
 storePath = "${brainStorePath}"
+${extraToml}
 `);
   return loadConfig(join(configDir, "codex-chat.toml"));
 }
@@ -855,6 +856,34 @@ describe("service supervisor", () => {
     blockedTurn.resolve();
   });
 
+  test("watchdog clears the Claude main session key when Claude is the active provider", async () => {
+    // Regression for the 2026-08-01 hang loop: the Claude main session grew
+    // past its context window, every turn stalled, and the watchdog cleared
+    // the Codex key ("codex-chat-main") — which does not exist in Claude mode —
+    // so the poisoned "codex-chat-main-claude" session was resumed forever.
+    const config = await loadTestConfig("app-server", "\n[mainAgent]\nprovider = \"claude_agent_sdk\"\n");
+    const logger = createLogger("silent");
+    const service = makeService(config, logger);
+    await service.state.init();
+    vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+    vi.spyOn(service.telegram, "notifyOps").mockResolvedValue();
+    vi.spyOn(service as unknown as { restartCodex(reason: string): Promise<void> }, "restartCodex").mockResolvedValue();
+    const blockedTurn = deferred();
+    vi.spyOn(service as unknown as { processEvent(event: UserEvent): Promise<void> }, "processEvent").mockReturnValue(blockedTurn.promise);
+
+    await service.state.setCodexSession("codex-chat-main-claude", { sessionId: "wedged-claude-session", provider: "claude_agent_sdk" });
+    const sessionsPath = join(config.rootDir, "state", "codex_sessions.json");
+    expect(Object.keys(JSON.parse(await readFile(sessionsPath, "utf8")) as Record<string, unknown>)).toEqual(["codex-chat-main-claude"]);
+
+    await service.enqueueUserEvent(userEvent(82));
+    (service as unknown as { turnStartedAt: Date }).turnStartedAt = new Date(Date.now() - 80_001);
+    await (service as unknown as { checkTurnTimeout(): Promise<void> }).checkTurnTimeout();
+
+    expect(await service.state.getCodexSession("codex-chat-main-claude")).toBeUndefined();
+    expect(JSON.parse(await readFile(sessionsPath, "utf8"))).toEqual({});
+    blockedTurn.resolve();
+  });
+
   test("watchdog abort ignores late directives from the stale Codex turn", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
@@ -895,6 +924,33 @@ describe("service supervisor", () => {
     const turn = JSON.parse(await readFile(join(config.rootDir, "state", "turns", files[0] as string), "utf8")) as { status: string; outputText?: string };
     expect(turn.status).toBe("aborted");
     expect(turn.outputText).toBeUndefined();
+  });
+
+  test("a main-session context rollover tells the user their history was reset", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = makeService(config, logger);
+    await service.state.init();
+    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+    const notifyOps = vi.spyOn(service.telegram, "notifyOps").mockResolvedValue();
+    vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
+      yield {
+        type: "status",
+        message: "main session context rolled over; conversation history was reset",
+        raw: { event: "claude_context_rollover", previousSessionId: "full-session", previousTurnInputTokens: 934_000 }
+      };
+      yield { type: "final", text: "answering on a fresh session" };
+    });
+
+    await service.enqueueUserEvent(userEvent(83, "hello"));
+    await vi.waitFor(() => expect(sendText).toHaveBeenCalledWith(253768951, expect.stringContaining("answering on a fresh session"), 83));
+
+    expect(sendText).toHaveBeenCalledWith(
+      253768951,
+      "♻️ My main session reached its context limit, so this message started a fresh one. Earlier conversation history is no longer in context — please re-state anything I still need.",
+      83
+    );
+    expect(notifyOps).toHaveBeenCalledWith(expect.stringContaining("Main session context rolled over"));
   });
 
   test("restartCodex retries with backoff and notifies ops on exhaustion without draining queue", async () => {

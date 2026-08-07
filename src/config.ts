@@ -150,6 +150,16 @@ const claudeMainAgentSchema = z.object({
   // aborts any main turn older than 80s (TURN_ABORT_MS) and tells the user it
   // timed out, so the hold must always release before that.
   nestedAgentHoldMaxMs: z.number().int().positive().default(55_000),
+  // Effective input size of one completed turn (input + cache-read +
+  // cache-creation tokens) above which the NEXT turn abandons the persisted
+  // session and starts a fresh one. The main session is resumed forever, so
+  // nothing else bounds its growth: on 2026-08-07 it reached ~934k tokens
+  // against sonnet-5's 1M window and the next turn stalled silently — no SDK
+  // error, no stderr, just a blocked child that the 80s watchdog had to kill,
+  // and every later turn resumed the same poisoned session. 800k leaves ~200k
+  // of headroom for the next turn's prompt, tool output and an effort=high
+  // response, which is the window the wedge actually consumed.
+  contextRolloverInputTokens: z.number().int().positive().default(800_000),
 }).prefault({});
 
 export type ClaudeSubagentConfig = z.infer<typeof claudeSubagentSchema>;

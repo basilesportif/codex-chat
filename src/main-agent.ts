@@ -6,6 +6,7 @@ import { AppServerCodexClient, type CodexCrashHandler } from "./codex.js";
 import type { StateStore } from "./state.js";
 import type {
   MainAgentClient,
+  MainAgentContextStats,
   MainAgentEvent,
   MainAgentHealth,
   MainAgentProvider,
@@ -141,6 +142,23 @@ export class MainAgentSwitcher implements MainAgentClient {
       }
       return { ...await this.inner.resetSession(reason), provider: this.activeProvider };
     });
+  }
+
+  /**
+   * Clear the ACTIVE provider's persisted main session without restarting.
+   * Recovery paths must route through here rather than naming a session key,
+   * so a provider switch can never leave them clearing the wrong one.
+   */
+  async clearPersistedSession(reason?: string): Promise<void> {
+    const client = await this.withLock(async () => this.inner);
+    if (!client.clearPersistedSession) {
+      throw new Error(`Main provider ${this.activeProvider} does not support clearing its persisted session`);
+    }
+    await client.clearPersistedSession(reason);
+  }
+
+  contextStats(): MainAgentContextStats | undefined {
+    return this.inner.contextStats?.();
   }
 
   getRecentLogs(n?: number, includeRaw?: boolean): string[] {

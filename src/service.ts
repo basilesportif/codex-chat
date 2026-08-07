@@ -11,6 +11,7 @@ import { RuntimeEventLog } from "./runtime-events.js";
 import { BehaviorPack } from "./behavior.js";
 import { CAPABILITY_DENIED_MESSAGE, OUTSIDE_BRAIN_SCOPE_REASON, assertBrainCapabilitySourceAvailable, authorize, authorizeOutput, brainCapabilityStorePath, capabilityGrantFromDecision, formatBrainSubjectManifestBlock, loadBrainCapabilityStore, outOfScopeAllowedDecision, requirementForInboundEvent, resolveSubjectManifest, type BrainCapabilityStore } from "./capabilities.js";
 import { capabilityRegistry, registryVersion, type CapabilityId } from "./capability-registry.js";
+import { CLAUDE_CONTEXT_ROLLOVER_EVENT } from "./claude-main-agent.js";
 import { AppServerCodexClient, CodexCrashInfo } from "./codex.js";
 import { createMainAgentSwitcher, type MainAgentProviderStatus, MainAgentSwitcher } from "./main-agent.js";
 import {
@@ -68,7 +69,7 @@ import {
 } from "./slack-telemetry.js";
 import { REPLY_FULL_TEXT_MAX_CHARS, TelegramGateway } from "./telegram.js";
 import { formatTemporalAnchorBlock, temporalAnchorForEvent } from "./temporal.js";
-import { ActorContext, CapabilityDecision, JsonRecord, MainAgentProvider, StoredAction, SubagentBackendKind, SubagentJob, SubagentOwnerType, SubagentResultTarget, TelegramReplyContext, TelegramReplySenderSummary, UserEvent } from "./types.js";
+import { ActorContext, CapabilityDecision, JsonRecord, MainAgentEvent, MainAgentProvider, StoredAction, SubagentBackendKind, SubagentJob, SubagentOwnerType, SubagentResultTarget, TelegramReplyContext, TelegramReplySenderSummary, UserEvent } from "./types.js";
 import { compactText, inlineCode, makeId, nowIso } from "./util.js";
 
 export const INJECT_TELEGRAM_USER_ID = 253768951;
@@ -95,6 +96,8 @@ const TURN_ABORTED_MESSAGE =
   "⚠️ Your previous request timed out after 80 seconds. Please resend your message.";
 const CONTEXT_RESET_USER_MESSAGE =
   "⚠️ Codex crashed mid-turn and was restarted. The conversation context was reset — please resend your last message and re-establish any context you need.";
+const CONTEXT_ROLLOVER_USER_MESSAGE =
+  "♻️ My main session reached its context limit, so this message started a fresh one. Earlier conversation history is no longer in context — please re-state anything I still need.";
 const CONTEXT_RESET_OPS_NOTE =
   "Note: conversation context was reset due to the crash. Active users have been notified.";
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60_000;
@@ -1851,6 +1854,7 @@ export class ServiceSupervisor {
           });
         }
       }
+      if (codexEvent.type === "status") await this.handleMainAgentStatusEvent(codexEvent, event, turnId);
       if (codexEvent.type === "final" && codexEvent.text.trim()) output = codexEvent.text;
       if (codexEvent.type === "error") {
         hadError = true;
@@ -1860,6 +1864,33 @@ export class ServiceSupervisor {
       }
     }
     return { stale: false, output, hadError, errorMessage, errorRaw };
+  }
+
+  /**
+   * Main-agent status events are informational, with one exception: a context
+   * rollover means the session answering this turn has no memory of anything
+   * before it, which the user has to be told about explicitly.
+   */
+  private async handleMainAgentStatusEvent(statusEvent: MainAgentEvent & { type: "status" }, event: UserEvent, turnId: string): Promise<void> {
+    const raw = statusEvent.raw as { event?: unknown } | undefined;
+    if (!raw || typeof raw !== "object" || raw.event !== CLAUDE_CONTEXT_ROLLOVER_EVENT) return;
+    this.logger.warn(
+      { component: "service", event: "main_context_rollover", turnId, chatId: event.chatId, detail: statusEvent.raw },
+      "main session context rolled over; conversation history was reset"
+    );
+    try {
+      if (this.canSendTextToOutputTarget(event.outputTarget)) {
+        await this.sendTextToOutputTarget(event.outputTarget, CONTEXT_ROLLOVER_USER_MESSAGE);
+      }
+    } catch (sendError) {
+      this.logger.error(
+        { component: "service", event: "main_context_rollover_notice_failed", turnId, sendError },
+        "failed to tell the user their main-session history was rolled over"
+      );
+    }
+    await this.telegram.notifyOps(
+      `♻️ Main session context rolled over (chat=${event.chatId ?? "n/a"}); a fresh session is now serving turns.`
+    ).catch(() => undefined);
   }
 
   /**
@@ -3004,8 +3035,22 @@ export class ServiceSupervisor {
     const event = this.activeTurnEvent;
     const startedAt = this.turnStartedAt?.toISOString();
     const ageMs = this.turnStartedAt ? Date.now() - this.turnStartedAt.getTime() : undefined;
+    // Context size of the last completed turn distinguishes a context-window
+    // wedge (the session silently stops responding once it is nearly full)
+    // from any other stall; without it both look like an 80s timeout.
+    const contextStats = this.mainSwitcher.contextStats?.();
     this.logger.error(
-      { component: "service", event: "turn_force_abort", chatId: event?.chatId, startedAt, ageMs },
+      {
+        component: "service",
+        event: "turn_force_abort",
+        chatId: event?.chatId,
+        startedAt,
+        ageMs,
+        provider: this.mainSwitcher.provider,
+        lastTurnInputTokens: contextStats?.lastTurnInputTokens,
+        contextRolloverThresholdTokens: contextStats?.rolloverThresholdTokens,
+        contextRolloverPending: contextStats?.rolloverPending
+      },
       `Force-aborting stuck turn after ${TURN_ABORT_MS}ms — something below sendTurn never resolved`
     );
     // Clear watchdog state synchronously and mark restart-in-progress before
@@ -3040,22 +3085,38 @@ export class ServiceSupervisor {
     });
   }
 
+  /**
+   * Every watchdog abort clears the persisted main session, so the restart
+   * that follows starts clean rather than resuming whatever wedged the turn.
+   * It must clear the ACTIVE provider's key: the Claude provider persists
+   * under `mainAgent.claude.mainSessionName`, and clearing the Codex key while
+   * Claude was live (the pre-2026-08 behavior) deleted nothing — the poisoned
+   * session survived every abort and every restart.
+   */
   private async resetPersistedMainSessionAfterWatchdogAbort(): Promise<void> {
+    const provider = this.mainSwitcher.provider;
+    const sessionName = this.mainSessionNameForProvider(provider);
     try {
-      await this.state.clearCodexSession(this.config.codex.mainSessionName);
+      await this.mainSwitcher.clearPersistedSession("watchdog_abort");
       this.logger.warn(
-        { component: "codex", event: "watchdog_cleared_main_session", sessionName: this.config.codex.mainSessionName },
-        "cleared persisted Codex main session after watchdog abort"
+        { component: "codex", event: "watchdog_cleared_main_session", provider, sessionName },
+        "cleared persisted main session after watchdog abort"
       );
     } catch (error) {
       this.logger.error(
-        { component: "codex", event: "watchdog_clear_main_session_failed", error },
-        "failed to clear persisted Codex main session after watchdog abort"
+        { component: "codex", event: "watchdog_clear_main_session_failed", provider, sessionName, error },
+        "failed to clear persisted main session after watchdog abort"
       );
       await this.telegram.notifyOps(
-        `⚠️ Watchdog aborted a stuck turn, but failed to clear the persisted Codex session: ${error instanceof Error ? error.message : String(error)}`
+        `⚠️ Watchdog aborted a stuck turn, but failed to clear the persisted ${provider} session: ${error instanceof Error ? error.message : String(error)}`
       ).catch(() => undefined);
     }
+  }
+
+  private mainSessionNameForProvider(provider: MainAgentProvider): string {
+    return provider === "claude_agent_sdk"
+      ? this.config.mainAgent.claude.mainSessionName
+      : this.config.codex.mainSessionName;
   }
 
   private async markActiveTurnAborted(event?: UserEvent): Promise<void> {

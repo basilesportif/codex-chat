@@ -21,7 +21,7 @@ Set the provider in TOML and restart the service:
 provider = "claude_agent_sdk"
 ```
 
-You can instead set `CODEX_CHAT_MAIN_PROVIDER=claude_agent_sdk`. Model, effort, permission mode, tool lists, executable path, session name, startup timeout, and the nested-agent hold windows (`nestedAgentSettleGraceMs`, `nestedAgentHoldMaxMs`) live under `[mainAgent.claude]`; the model accepts either an alias or a full model ID. Environment overrides are listed in `.env.example`. Configuration changes take effect after restart unless a persisted runtime provider override is active.
+You can instead set `CODEX_CHAT_MAIN_PROVIDER=claude_agent_sdk`. Model, effort, permission mode, tool lists, executable path, session name, startup timeout, the nested-agent hold windows (`nestedAgentSettleGraceMs`, `nestedAgentHoldMaxMs`), and the context-rollover threshold (`contextRolloverInputTokens`) live under `[mainAgent.claude]`; the model accepts either an alias or a full model ID. Environment overrides are listed in `.env.example`. Configuration changes take effect after restart unless a persisted runtime provider override is active.
 
 ## Runtime behavior
 
@@ -48,6 +48,15 @@ Interaction with the turn queue and provider switching:
 - `main provider <other>` allows in-flight turns only `MAIN_AGENT_SWITCH_GRACE_MS` (15s) before calling `stop()` on the old client. `stop()` now flushes a held result as the turn's `final` before closing the event queue, so a switch during a hold costs the user a stale-but-real reply rather than silence. The same flush runs when the SDK query dies mid-hold, ahead of the error event.
 
 Claude sessions are stored under the separate `mainAgent.claude.mainSessionName` key. Restarting with the same provider resumes that session. Switching providers does not transfer conversation continuity: the Claude and Codex histories remain separate. Durable Employees are currently unsupported with the Claude main loop and configuration startup fails if both are enabled.
+
+### Session lifecycle and context rollover
+
+One SDK session is resumed forever, so without a bound its context grows monotonically. On 2026-08-01 the main session reached ~934k effective input tokens against sonnet-5's 1M window and the next turn stalled with no SDK error and no stderr — the CLI child simply blocked until the 80s watchdog (`TURN_ABORT_MS`) killed the turn, and every later turn resumed the same oversized session and hung identically. Two mechanisms now prevent that hang loop:
+
+- **Proactive rollover.** Every `result` message carries `usage` (`input_tokens` + `cache_read_input_tokens` + `cache_creation_input_tokens`; `modelUsage` is the fallback). The client records that total as the session's effective context size and exposes it via `contextStats()`. When a completed turn is at or above `[mainAgent.claude].contextRolloverInputTokens` (default 800000), a rollover is armed and executed at the **next turn boundary** — never mid-turn: the query is stopped, the persisted session key is cleared, and a fresh session starts. The new session's first user message is prefixed with a one-line handoff note saying prior history is unavailable (no summarization — that is deliberately out of scope). The client logs `context_rollover_scheduled` then `context_rollover`, and emits a `status` event whose `raw.event` is `claude_context_rollover`; the service turns that into a user-facing "history was reset" reply plus an ops notification. The default leaves ~200k of headroom for the next turn's prompt, tool output, and an effort=high response. Agent SDK 0.3.220 exposes no imperative compaction control on `Query` (only the `autoCompactEnabled` / `autoCompactWindow` settings and the `PreCompact` / `PostCompact` hooks), which is why rollover, not compaction, is the mechanism.
+- **Provider-aware watchdog recovery.** Every watchdog force-abort clears the persisted main session so the restart that follows starts clean. It now clears the **active** provider's key through `MainAgentSwitcher.clearPersistedSession()` rather than the hardcoded Codex key; the old behavior deleted `codex-chat-main`, which does not exist in Claude mode, so the wedged Claude session survived every abort and restart. The `turn_force_abort` log line also carries `provider`, `lastTurnInputTokens`, and `contextRolloverThresholdTokens`, so a context-exhaustion stall is distinguishable from any other stall.
+
+`resetSession()` (used by the terminal-stream-disconnect recovery path) performs the same clear-and-restart on demand.
 
 ## Dynamic switching and recovery
 

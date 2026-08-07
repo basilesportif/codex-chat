@@ -115,7 +115,7 @@ function fakeSdk(plans: FakeQueryPlan[] = [{}]) {
   return { query, instances };
 }
 
-function testConfig(nested?: { settleGraceMs?: number; holdMaxMs?: number }): AppConfig {
+function testConfig(nested?: { settleGraceMs?: number; holdMaxMs?: number; contextRolloverInputTokens?: number }): AppConfig {
   return {
     rootDir: "/tmp/codex-chat-test",
     service: {
@@ -137,7 +137,8 @@ function testConfig(nested?: { settleGraceMs?: number; holdMaxMs?: number }): Ap
         mainSessionName: "codex-chat-main-claude",
         startupTimeoutSec: 2,
         nestedAgentSettleGraceMs: nested?.settleGraceMs ?? 5_000,
-        nestedAgentHoldMaxMs: nested?.holdMaxMs ?? 55_000
+        nestedAgentHoldMaxMs: nested?.holdMaxMs ?? 55_000,
+        contextRolloverInputTokens: nested?.contextRolloverInputTokens ?? 800_000
       }
     },
     codex: { providerApiKeyEnvNames: ["OPENROUTER_API_KEY"] }
@@ -205,6 +206,11 @@ function backgroundTasksMessage(
 
 function successResult(sessionId: string, result: string, uuid = `result-${Math.random()}`) {
   return { type: "result", subtype: "success", result, errors: [], uuid, session_id: sessionId };
+}
+
+function userMessageText(message: unknown): string {
+  const content = (message as { message?: { content?: Array<{ type: string; text?: string }> } }).message?.content ?? [];
+  return content.filter((block) => block.type === "text").map((block) => block.text ?? "").join("");
 }
 
 async function collect(stream: AsyncIterable<MainAgentEvent>): Promise<MainAgentEvent[]> {
@@ -719,6 +725,94 @@ describe("ClaudeMainAgentClient", () => {
       })
     ).resolves.toEqual({ continue: true });
     expect(client.getRecentLogs(50).join("\n")).toContain("forced foreground subagent_type=investigator");
+    await client.stop();
+  });
+
+  test("clearPersistedSession drops the Claude session key without restarting", async () => {
+    const sdk = fakeSdk([{ sessionId: "kept-alive" }]);
+    const { state, sessions } = fakeState({ sessionId: "kept-alive", behaviorHash: "behavior-hash" });
+    const client = await loadClient(sdk, state);
+    await client.start();
+
+    await client.clearPersistedSession("watchdog_abort");
+
+    expect((state.clearCodexSession as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith("codex-chat-main-claude");
+    expect(sessions.get("codex-chat-main-claude")).toBeUndefined();
+    expect(sdk.query).toHaveBeenCalledTimes(1);
+    expect(sdk.instances[0]?.close).not.toHaveBeenCalled();
+    await client.stop();
+  });
+
+  test("tracks effective input tokens from result usage and stays on the session below the threshold", async () => {
+    const sdk = fakeSdk([{ sessionId: "usage-session" }]);
+    const { state } = fakeState({ sessionId: "usage-session", behaviorHash: "behavior-hash" });
+    const client = await loadClient(sdk, state, fakeBehavior(), vi.fn(), testConfig({ contextRolloverInputTokens: 1_000 }));
+    await client.start();
+
+    const first = collect(client.sendTurn({ text: "one" }));
+    await sdk.instances[0]!.input.next();
+    sdk.instances[0]!.sdk.push({
+      ...successResult("usage-session", "first answer"),
+      usage: { input_tokens: 100, cache_read_input_tokens: 400, cache_creation_input_tokens: 90 }
+    });
+    await expect(first).resolves.toEqual([{ type: "final", text: "first answer" }]);
+    expect(client.contextStats()).toEqual({
+      lastTurnInputTokens: 590,
+      rolloverThresholdTokens: 1_000,
+      rolloverPending: false
+    });
+
+    const second = collect(client.sendTurn({ text: "two" }));
+    const secondMessage = await sdk.instances[0]!.input.next();
+    sdk.instances[0]!.sdk.push({
+      ...successResult("usage-session", "second answer"),
+      usage: { input_tokens: 700, cache_read_input_tokens: 100, cache_creation_input_tokens: 0 }
+    });
+    const secondEvents = await second;
+
+    // Under the threshold: same SDK query, no rollover notice, no handoff note.
+    expect(sdk.query).toHaveBeenCalledTimes(1);
+    expect(secondEvents).toEqual([{ type: "final", text: "second answer" }]);
+    expect(userMessageText(secondMessage.value)).toBe("two");
+    expect(client.contextStats()).toMatchObject({ lastTurnInputTokens: 800, rolloverPending: false });
+    await client.stop();
+  });
+
+  test("a turn ending over the context threshold rolls the next turn onto a fresh session", async () => {
+    const sdk = fakeSdk([{ sessionId: "full-session" }, { sessionId: "rolled-session" }]);
+    const { state, sessions } = fakeState({ sessionId: "full-session", behaviorHash: "behavior-hash" });
+    const client = await loadClient(sdk, state, fakeBehavior(), vi.fn(), testConfig({ contextRolloverInputTokens: 1_000 }));
+    await client.start();
+    expect(sdk.instances[0]?.options.resume).toBe("full-session");
+
+    const first = collect(client.sendTurn({ text: "one" }));
+    await sdk.instances[0]!.input.next();
+    sdk.instances[0]!.sdk.push({
+      ...successResult("full-session", "first answer"),
+      usage: { input_tokens: 900, cache_read_input_tokens: 200, cache_creation_input_tokens: 5 }
+    });
+    await first;
+    // Armed, but the running turn is never disturbed mid-flight.
+    expect(client.contextStats()).toMatchObject({ lastTurnInputTokens: 1_105, rolloverPending: true });
+    expect(sdk.query).toHaveBeenCalledTimes(1);
+
+    const second = collect(client.sendTurn({ text: "two" }));
+    await waitFor(() => sdk.instances.length === 2);
+    const rolledMessage = await sdk.instances[1]!.input.next();
+    sdk.instances[1]!.sdk.push(fakeClaudeInitMessage("rolled-session"));
+    sdk.instances[1]!.sdk.push(successResult("rolled-session", "fresh answer"));
+    const events = await second;
+
+    expect(sdk.instances[1]?.options.resume).toBeUndefined();
+    expect(events[0]).toMatchObject({
+      type: "status",
+      raw: { event: "claude_context_rollover", previousSessionId: "full-session", previousTurnInputTokens: 1_105 }
+    });
+    expect(events.at(-1)).toEqual({ type: "final", text: "fresh answer" });
+    expect(userMessageText(rolledMessage.value)).toContain("previous main session reached its context limit");
+    expect(userMessageText(rolledMessage.value)).toContain("two");
+    expect(client.contextStats()).toMatchObject({ rolloverPending: false, lastTurnInputTokens: undefined });
+    await waitFor(() => sessions.get("codex-chat-main-claude")?.sessionId === "rolled-session");
     await client.stop();
   });
 

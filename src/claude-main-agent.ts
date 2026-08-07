@@ -30,7 +30,14 @@ import { resolveConfigPath, type AppConfig } from "./config.js";
 import type { CodexCrashHandler } from "./codex.js";
 import { LogBuffer } from "./log-buffer.js";
 import type { StateStore } from "./state.js";
-import type { Attachment, MainAgentClient, MainAgentEvent, MainAgentHealth, MainAgentTurnInput } from "./types.js";
+import type {
+  Attachment,
+  MainAgentClient,
+  MainAgentContextStats,
+  MainAgentEvent,
+  MainAgentHealth,
+  MainAgentTurnInput
+} from "./types.js";
 import { nowIso } from "./util.js";
 
 type ClaudeErrorKind = "auth" | "rate_limit" | "closed" | "other";
@@ -65,6 +72,20 @@ const CLAUDE_MAIN_NESTED_AGENT_GUIDANCE = [
   ...claudeNestedAgentPromptRules("bug"),
   "If you have nothing to report yet because nested work is still running, keep working instead of ending your turn: the user only sees your final message."
 ].join("\n");
+
+/**
+ * `raw.event` marker on the status event emitted when a turn starts on a fresh
+ * session because the previous one outgrew the context window. The service
+ * matches on it to tell the user their history is gone.
+ */
+export const CLAUDE_CONTEXT_ROLLOVER_EVENT = "claude_context_rollover";
+
+/**
+ * One-line handoff prepended to the first user message of the fresh session.
+ * Deliberately not a summary — this pass only makes the discontinuity legible.
+ */
+const CLAUDE_CONTEXT_ROLLOVER_HANDOFF =
+  "[codex-chat] Note: the previous main session reached its context limit and was rolled over. Prior conversation history is unavailable to you; work from this message alone and ask if you need context restated.";
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -176,6 +197,17 @@ export class ClaudeMainAgentClient implements MainAgentClient {
    * that is making progress.
    */
   private sdkActivityGeneration = 0;
+  /**
+   * Effective input size (input + cache read + cache creation tokens) of the
+   * last completed turn, straight off the SDK result message. This is the only
+   * signal codex-chat gets about how full the resumed session's context is.
+   */
+  private lastTurnInputTokens?: number;
+  /**
+   * Set when a completed turn crossed `contextRolloverInputTokens`. Acted on at
+   * the NEXT turn boundary — never mid-turn — so no in-flight work is lost.
+   */
+  private pendingContextRollover?: { inputTokens: number };
   private readonly logBuffer = new LogBuffer(300);
 
   constructor(
@@ -321,11 +353,13 @@ export class ClaudeMainAgentClient implements MainAgentClient {
   }
 
   async *sendTurn(input: MainAgentTurnInput): AsyncIterable<MainAgentEvent> {
-    if (!this.alive || !this.query || !this.inputQueue) {
-      throw new Error("Claude Agent SDK main session is closed or uninitialized.");
-    }
     if (this.activeTurn) {
       throw new Error("Claude Agent SDK main session already has an active turn.");
+    }
+    // Turn boundary: the only safe place to swap the underlying session.
+    const rolledOver = await this.rolloverContextIfPending();
+    if (!this.alive || !this.query || !this.inputQueue) {
+      throw new Error("Claude Agent SDK main session is closed or uninitialized.");
     }
 
     const turn: ActiveTurn = {
@@ -337,7 +371,20 @@ export class ClaudeMainAgentClient implements MainAgentClient {
     this.activeTurn = turn;
     this.logBuffer.append("event", `[TURN START] session_id=${this.sessionId ?? "?"}`);
     try {
-      this.inputQueue.push(await this.buildUserMessage(input.text, input.attachments ?? []));
+      if (rolledOver) {
+        turn.queue.push({
+          type: "status",
+          message: "main session context rolled over; conversation history was reset",
+          raw: {
+            event: CLAUDE_CONTEXT_ROLLOVER_EVENT,
+            previousSessionId: rolledOver.previousSessionId,
+            previousTurnInputTokens: rolledOver.inputTokens,
+            thresholdTokens: this.config.mainAgent.claude.contextRolloverInputTokens
+          }
+        });
+      }
+      const text = rolledOver ? `${CLAUDE_CONTEXT_ROLLOVER_HANDOFF}\n\n${input.text}` : input.text;
+      this.inputQueue.push(await this.buildUserMessage(text, input.attachments ?? []));
       for await (const event of turn.queue.iterate()) yield event;
     } catch (error) {
       if (this.activeTurn === turn) {
@@ -359,11 +406,94 @@ export class ClaudeMainAgentClient implements MainAgentClient {
       "resetting Claude Agent SDK main session"
     );
     await this.stop();
-    await this.state.clearCodexSession(this.config.mainAgent.claude.mainSessionName);
-    this.sessionId = undefined;
+    await this.clearPersistedSession(reason);
     this.pendingBehaviorRefresh = undefined;
     await this.start();
     return this.health();
+  }
+
+  /**
+   * Drop the persisted Claude main-session record (and the in-memory id that
+   * would otherwise be re-persisted) without restarting. The watchdog calls
+   * this through the switcher so recovery clears the ACTIVE provider's key —
+   * before this existed it always cleared the Codex key, which left a wedged
+   * Claude session resumable forever.
+   */
+  async clearPersistedSession(reason = "clear_persisted_session"): Promise<void> {
+    await this.state.clearCodexSession(this.config.mainAgent.claude.mainSessionName);
+    this.sessionId = undefined;
+    this.lastTurnInputTokens = undefined;
+    this.pendingContextRollover = undefined;
+    this.logBuffer.append("event", `[SESSION] cleared persisted session reason=${reason}`);
+  }
+
+  contextStats(): MainAgentContextStats {
+    return {
+      lastTurnInputTokens: this.lastTurnInputTokens,
+      rolloverThresholdTokens: this.config.mainAgent.claude.contextRolloverInputTokens,
+      rolloverPending: this.pendingContextRollover !== undefined
+    };
+  }
+
+  /**
+   * SDK 0.3.220 exposes no imperative compaction control on `Query` (only the
+   * `autoCompactEnabled` setting and PreCompact/PostCompact hooks), so growth
+   * is bounded by starting a fresh session instead. Runs at a turn boundary
+   * only; returns the pre-rollover facts when one happened.
+   */
+  private async rolloverContextIfPending(): Promise<{ inputTokens: number; previousSessionId?: string } | undefined> {
+    const pending = this.pendingContextRollover;
+    if (!pending) return undefined;
+    this.pendingContextRollover = undefined;
+    const previousSessionId = this.sessionId;
+    this.logger.warn(
+      {
+        component: "claude-main-agent",
+        event: "context_rollover",
+        previousSessionId,
+        inputTokens: pending.inputTokens,
+        thresholdTokens: this.config.mainAgent.claude.contextRolloverInputTokens
+      },
+      "rolling the Claude main session over to a fresh one before it exhausts its context window"
+    );
+    this.logBuffer.append("event", `[SESSION] context rollover input_tokens=${pending.inputTokens}`);
+    try {
+      await this.stop();
+      await this.clearPersistedSession("context_rollover");
+      this.pendingBehaviorRefresh = undefined;
+      await this.start();
+    } catch (error) {
+      this.logger.error(
+        { component: "claude-main-agent", event: "context_rollover_failed", error: this.redactError(error) },
+        "failed to roll the Claude main session over to a fresh session"
+      );
+      throw error;
+    }
+    return { inputTokens: pending.inputTokens, previousSessionId };
+  }
+
+  /**
+   * Record how full the session's context is from a completed turn's usage and
+   * arm a rollover once it crosses the configured threshold.
+   */
+  private recordTurnUsage(message: Extract<ClaudeSdkMessage, { type: "result" }>): void {
+    const inputTokens = effectiveInputTokens(message);
+    if (inputTokens === undefined) return;
+    this.lastTurnInputTokens = inputTokens;
+    const threshold = this.config.mainAgent.claude.contextRolloverInputTokens;
+    this.logBuffer.append("event", `[USAGE] input_tokens=${inputTokens} rollover_threshold=${threshold}`, true);
+    if (inputTokens < threshold || this.pendingContextRollover) return;
+    this.pendingContextRollover = { inputTokens };
+    this.logger.warn(
+      {
+        component: "claude-main-agent",
+        event: "context_rollover_scheduled",
+        sessionId: this.sessionId,
+        inputTokens,
+        thresholdTokens: threshold
+      },
+      "Claude main session crossed the context rollover threshold; the next turn will start a fresh session"
+    );
   }
 
   getRecentLogs(n = 100, includeRaw = false): string[] {
@@ -534,6 +664,10 @@ export class ClaudeMainAgentClient implements MainAgentClient {
       });
       return;
     }
+
+    // Usage is recorded before the active-turn guard: a result that arrives
+    // with no open turn still describes the session's context size.
+    if (message.type === "result") this.recordTurnUsage(message);
 
     const turn = this.activeTurn;
     if (!turn) return;
@@ -910,6 +1044,43 @@ function deferred<T>(): Deferred<T> {
       rejectPromise(error);
     }
   };
+}
+
+/**
+ * Effective context size of the API call that produced this result: fresh
+ * input plus everything served from (or written to) the prompt cache. Cached
+ * tokens still occupy the context window, so they must be counted.
+ *
+ * `SDKResultSuccess.usage` (NonNullableUsage) is the last request's usage and
+ * is the authoritative figure. `modelUsage` (Record<string, ModelUsage>) is
+ * summed across every request in the turn, so it is only a fallback for older
+ * shapes — the largest single model entry is the closest available proxy.
+ */
+function effectiveInputTokens(message: Extract<ClaudeSdkMessage, { type: "result" }>): number | undefined {
+  const record = message as unknown as Record<string, unknown>;
+  const usage = record.usage as Record<string, unknown> | undefined;
+  const fromUsage =
+    numberOrZero(usage?.input_tokens) +
+    numberOrZero(usage?.cache_read_input_tokens) +
+    numberOrZero(usage?.cache_creation_input_tokens);
+  if (fromUsage > 0) return fromUsage;
+
+  const modelUsage = record.modelUsage as Record<string, Record<string, unknown>> | undefined;
+  if (!modelUsage || typeof modelUsage !== "object") return undefined;
+  let largest = 0;
+  for (const entry of Object.values(modelUsage)) {
+    if (!entry || typeof entry !== "object") continue;
+    const total =
+      numberOrZero(entry.inputTokens) +
+      numberOrZero(entry.cacheReadInputTokens) +
+      numberOrZero(entry.cacheCreationInputTokens);
+    if (total > largest) largest = total;
+  }
+  return largest > 0 ? largest : undefined;
+}
+
+function numberOrZero(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
 function extractClaudeAssistantText(message: Extract<ClaudeSdkMessage, { type: "assistant" }>): string {

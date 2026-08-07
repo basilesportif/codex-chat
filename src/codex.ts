@@ -318,6 +318,15 @@ export class AppServerCodexClient implements CodexClient, EmployeeRuntimeClient 
     return this.health();
   }
 
+  /**
+   * Drop the persisted main-thread record without touching the live
+   * connection; the caller (the watchdog) restarts separately, and the
+   * restart's ensureThread then creates a fresh thread.
+   */
+  async clearPersistedSession(): Promise<void> {
+    await this.state.clearCodexSession(this.config.codex.mainSessionName);
+  }
+
 
   async *sendTurn(input: CodexTurnInput): AsyncIterable<CodexEvent> {
     this.assertConnected();

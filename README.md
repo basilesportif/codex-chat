@@ -249,6 +249,60 @@ session and does not affect top-level codex-chat subagent dispatch/routing. The
 native reviewer is pinned to `claude-opus-4-8`, uses Claude `high` effort, and
 is restricted to read/search/shell inspection tools for code review.
 
+## Dispatch profiles vs. SDK-native subagents
+
+Two different things in this repo are called "subagents". They live at different
+layers and are configured in completely different places.
+
+**Dispatch profiles** are the prose documents in `behavior/subagents/`:
+`researcher.md`, `implementer.md`, `reviewer.md`, `operator.md`, `debugger.md`.
+They define codex-chat's own `dispatch_subagent` profile labels. `BehaviorPack`
+lists the available profiles in the main-loop bootstrap prompt
+(`src/behavior.ts`), and when a job starts, the selected profile's markdown is
+read and prepended to the assembled child prompt (`src/subagents.ts`,
+`startJob`) for every backend, Claude included. Each file states routing
+defaults in Codex terms — `gpt-5.6-luna`/xhigh for `researcher` and `operator`,
+`gpt-5.6-sol`/high for `implementer`, `reviewer`, and `debugger` — but those are
+documentation, not enforcement: `behavior/AGENTS.md` requires the main loop to
+pick `model`, `effort`, and `serviceTier` explicitly per dispatch rather than
+inheriting a profile default. These files are not Claude Agent SDK agent
+definitions, and this repo has no `.claude/agents/` directory.
+
+**SDK-native subagents** are `implementer`, `investigator`, and `reviewer`,
+built programmatically by `claudeNativeAgents()` in `src/subagent-backends.ts`
+as a `Record<string, AgentDefinition>` passed to the Claude Agent SDK. Each one
+carries its own effort level, tool allowlist, and system prompt, and its model
+comes from `[subagents.claude]` in `config/codex-chat.toml` (schema
+`claudeSubagentSchema` in `src/config.ts`; template in
+`config/codex-chat.example.toml`):
+
+- `implementerModel` = `claude-opus-5`
+- `investigatorModel` = `sonnet`
+- `reviewerModel` = `claude-opus-5`
+
+Each can be overridden per-process with
+`CODEX_CHAT_SUBAGENTS_CLAUDE_IMPLEMENTER_MODEL`,
+`CODEX_CHAT_SUBAGENTS_CLAUDE_INVESTIGATOR_MODEL`, and
+`CODEX_CHAT_SUBAGENTS_CLAUDE_REVIEWER_MODEL`.
+
+These three exist only inside dispatched child jobs running on the
+`claude_agent_sdk` backend. The primary Claude main-loop session intentionally
+passes no `agents` option (`buildOptions()` in `src/claude-main-agent.ts`), so
+whatever agent types its `Agent` tool exposes come from the SDK and from
+filesystem agent definitions loaded via `settingSources` — none of which
+codex-chat can annotate, which is why the main loop forces foreground execution
+with a `PreToolUse` hook instead.
+
+The models are pinned explicitly on purpose. Per the SDK's
+`AgentDefinition.model` doc comment, the field takes a "model alias ... or full
+model ID" and "if omitted or 'inherit', uses the main model". Leaving it unset
+would make a Fable- or Sonnet-backed orchestrator's native subagents inherit the
+parent's model; pinning keeps them at opus/sonnet/opus regardless of what the
+parent job runs.
+
+See `docs/claude-agent-sdk-subagents.md` for the deep dive on the native nested
+agents, their foreground/completion guards, and Claude model string guidance.
+
 ## Durable Employees
 
 `[employees]` is a disabled-by-default feature flag for durable Employees: named,

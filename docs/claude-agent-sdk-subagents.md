@@ -45,6 +45,8 @@ Anthropic's current model-ID convention for Claude 4.6 and later uses dateless p
 
 ## Native nested agents
 
+These are distinct from the `behavior/subagents/*.md` dispatch profiles; see "Dispatch profiles vs. SDK-native subagents" in the top-level `README.md` for the layer split.
+
 Every Claude-backed codex-chat child session gets the SDK-native `Agent` tool and three programmatic agent definitions:
 
 - `implementer` writes and edits code, runs relevant tests/builds, and uses `high` effort. Its model comes from `[subagents.claude].implementerModel` (default `sonnet`).

@@ -243,11 +243,12 @@ Codex `serviceTier` has no Claude equivalent, so it is recorded on launch and
 otherwise ignored except that Fast requests apply Claude Code `fastMode`
 settings when the installed SDK supports them.
 
-Claude-backed jobs also receive the Claude SDK native `Agent` tool and a
-programmatic `reviewer` agent definition. This is nested inside the Claude SDK
-session and does not affect top-level codex-chat subagent dispatch/routing. The
-native reviewer is pinned to `claude-opus-4-8`, uses Claude `high` effort, and
-is restricted to read/search/shell inspection tools for code review.
+Claude-backed jobs also receive the Claude SDK native `Agent` tool and three
+programmatic agent definitions (`implementer`, `investigator`, `reviewer`).
+These are nested inside the Claude SDK session and do not affect top-level
+codex-chat subagent dispatch/routing. See
+[Dispatch profiles vs. SDK-native subagents](#dispatch-profiles-vs-sdk-native-subagents)
+below for their models, effort levels, and tool restrictions.
 
 ## Dispatch profiles vs. SDK-native subagents
 

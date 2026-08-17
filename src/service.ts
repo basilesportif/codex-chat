@@ -69,7 +69,7 @@ import {
 } from "./slack-telemetry.js";
 import { REPLY_FULL_TEXT_MAX_CHARS, TelegramGateway } from "./telegram.js";
 import { formatTemporalAnchorBlock, temporalAnchorForEvent } from "./temporal.js";
-import { ActorContext, CapabilityDecision, JsonRecord, MainAgentEvent, MainAgentProvider, StoredAction, SubagentBackendKind, SubagentJob, SubagentOwnerType, SubagentResultTarget, TelegramReplyContext, TelegramReplySenderSummary, UserEvent } from "./types.js";
+import { ActorContext, CapabilityDecision, JsonRecord, MainAgentContextStats, MainAgentEvent, MainAgentProvider, StoredAction, SubagentBackendKind, SubagentJob, SubagentOwnerType, SubagentResultTarget, TelegramReplyContext, TelegramReplySenderSummary, UserEvent } from "./types.js";
 import { compactText, inlineCode, makeId, nowIso } from "./util.js";
 
 export const INJECT_TELEGRAM_USER_ID = 253768951;
@@ -83,17 +83,54 @@ const QUEUE_OVERFLOW_MESSAGE = "⚠️ I dropped an older queued message because
 const MAX_QUEUE_PER_KEY = 50;
 const TURN_RESPONSE_WARN_MS = 45_000;
 /**
- * Hard cap on how long a single turn may keep `turnRunning = true`. If we
+ * Wall-clock cap on how long a single turn may keep `turnRunning = true`, used
+ * by main providers that cannot report per-turn liveness (today: Codex). If we
  * detect a turn pinning the supervisor for longer than this we force-abort
  * it (clearing turnRunning, draining the queue, telling the user) so the
  * service does not become permanently wedged when something below us stops
  * responding without rejecting. This is a watchdog of last resort — the
  * primary fix lives in codex.ts where dead WebSockets now fail in-flight
  * sendTurn iterators rather than letting them hang.
+ *
+ * Providers that DO report liveness (`turnWatchdogState()`) are timed on
+ * inactivity instead — see `evaluateTurnWatchdog`. A wall clock cannot tell a
+ * 4-minute agentic task from a wedged session, and killing the former is how
+ * ten healthy turns were destroyed in the fortnight to 2026-08-17.
  */
 const TURN_ABORT_MS = 80_000;
 const TURN_ABORTED_MESSAGE =
   "⚠️ Your previous request timed out after 80 seconds. Please resend your message.";
+const TURN_ABORTED_CONTEXT_KEPT_MESSAGE =
+  "⚠️ Your previous request was aborted because it stopped making progress. Our conversation context was kept — please resend your message.";
+const TURN_ABORTED_CONTEXT_RESET_MESSAGE =
+  "⚠️ Your previous request was aborted and my main session looked wedged, so it was reset. Earlier conversation history is no longer in context — please resend your message and re-state anything I still need.";
+/**
+ * Why the watchdog is aborting, and the evidence behind it. `wall_clock` is the
+ * historical age-based abort, kept for providers that report no liveness;
+ * `inactivity` means the turn produced nothing for the silence budget;
+ * `absolute` means it kept producing events past the runaway ceiling.
+ */
+interface TurnAbortDecision {
+  kind: "wall_clock" | "inactivity" | "absolute";
+  ageMs: number;
+  inactiveMs: number;
+  /** Events observed for this turn; 0 is what escalates toward a session reset. */
+  activityEvents: number;
+  limitMs: number;
+}
+
+/** `provider:sessionId` evidence key; the session half may be empty. */
+function splitEvidenceKey(key: string): [string, string] {
+  const separator = key.indexOf(":");
+  return separator < 0 ? [key, ""] : [key.slice(0, separator), key.slice(separator + 1)];
+}
+
+/** Abort notices tell the user whether their conversation survived. */
+function abortNoticeText(decision: TurnAbortDecision, sessionCleared: boolean): string {
+  if (decision.kind === "wall_clock") return TURN_ABORTED_MESSAGE;
+  return sessionCleared ? TURN_ABORTED_CONTEXT_RESET_MESSAGE : TURN_ABORTED_CONTEXT_KEPT_MESSAGE;
+}
+
 const CONTEXT_RESET_USER_MESSAGE =
   "⚠️ Codex crashed mid-turn and was restarted. The conversation context was reset — please resend your last message and re-establish any context you need.";
 const CONTEXT_ROLLOVER_USER_MESSAGE =
@@ -476,6 +513,43 @@ export class ServiceSupervisor {
   private turnRunning = false;
   /** Wall-clock time the currently-running turn started; cleared in runTurn's finally. */
   private turnStartedAt?: Date;
+  /**
+   * Last sign of life from the running turn as seen at the SUPERVISOR level:
+   * every main-agent event the turn streams bumps it. Combined with the
+   * provider's own `turnWatchdogState()` (which sees traffic that never
+   * becomes a supervisor event, e.g. a nested agent's tool calls) this is what
+   * the inactivity deadline is measured against.
+   */
+  private turnLastActivityAt?: Date;
+  /** Supervisor-visible events for the running turn; 0 means it was silent. */
+  private turnActivityEvents = 0;
+  /**
+   * Consecutive force-aborts of turns that produced no activity at all. A
+   * single silent abort is not evidence of a wedge; a run of them is the
+   * 2026-08-07 signature, and is one of the things that will reset the main
+   * session. Any turn that completes normally clears it.
+   */
+  private consecutiveSilentTurnAborts = 0;
+  /**
+   * Same idea for the runaway ceiling. One absolute abort is a turn that went
+   * too long; a run of them with nothing completing in between means the
+   * session is looping rather than working, and the loop is otherwise
+   * unbreakable — an absolute abort never clears a session on its own.
+   */
+  private consecutiveAbsoluteTurnAborts = 0;
+  /**
+   * Aborts of any kind on this session with no completed turn between them.
+   * The two typed counters above reset each other, so this is the backstop
+   * that makes recovery terminate for every mixed sequence.
+   */
+  private consecutiveTurnAborts = 0;
+  /**
+   * Which provider+session the two counters above were gathered against.
+   * Evidence is about one conversation: when the session changes (rollover,
+   * clear, provider switch, restart) it must not carry over and condemn the
+   * replacement.
+   */
+  private turnAbortEvidenceKey?: string;
   /** The event currently being processed; used for chat-level crash/timeout notifications. */
   private activeTurnEvent?: UserEvent;
   private sideEffectEvent?: UserEvent;
@@ -1835,6 +1909,9 @@ export class ServiceSupervisor {
     const fenceScanner = new FenceCloseScanner();
     for await (const codexEvent of this.codex.sendTurn({ text: prompt, attachments: event.attachments, source: event.source, turnId })) {
       if (this.isStaleTurnToken(turnToken)) return { stale: true, output, hadError, errorMessage, errorRaw };
+      // Any event at all is progress: the turn is alive, so the watchdog's
+      // inactivity budget restarts here.
+      this.noteTurnActivity(turnToken);
       if (codexEvent.type === "delta") {
         output += codexEvent.text;
         // Incremental directive execution: scan for newly-complete fences
@@ -2521,11 +2598,19 @@ export class ServiceSupervisor {
     this.turnRunning = true;
     const token = ++this.activeTurnToken;
     this.turnStartedAt = new Date();
+    this.turnLastActivityAt = this.turnStartedAt;
+    this.turnActivityEvents = 0;
     this.activeTurnEvent = event;
     void this.processEventSafe(event, token).finally(() => {
       if (this.activeTurnToken !== token) return;
+      // Reaching here means the turn ended on its own terms rather than being
+      // force-aborted, so the wedge-escalation counters start over.
+      this.consecutiveSilentTurnAborts = 0;
+      this.consecutiveAbsoluteTurnAborts = 0;
+      this.consecutiveTurnAborts = 0;
       this.turnRunning = false;
       this.turnStartedAt = undefined;
+      this.turnLastActivityAt = undefined;
       this.activeTurnEvent = undefined;
       this.drainQueue();
     });
@@ -2987,16 +3072,67 @@ export class ServiceSupervisor {
     }
   }
 
+  /** Record supervisor-visible progress on the running turn. */
+  private noteTurnActivity(turnToken: number): void {
+    if (!this.turnRunning || this.activeTurnToken !== turnToken) return;
+    this.turnLastActivityAt = new Date();
+    this.turnActivityEvents += 1;
+  }
+
+  /**
+   * Decide whether the running turn has to be force-aborted, and on which
+   * ground.
+   *
+   * Providers that report `turnWatchdogState()` are judged on SILENCE, not on
+   * age: a turn that is streaming, calling tools, or running nested agents is
+   * making progress and must never be killed, however long it takes. Two
+   * bounds remain — `turnInactivityAbortMs` since the last sign of life, and
+   * `turnAbsoluteAbortMs` since the turn began, the latter purely as a
+   * runaway backstop. The deadline is suspended while the provider is doing
+   * bounded silent work it told us about (a context-rollover session restart,
+   * which may take the full 90s startup timeout).
+   *
+   * Providers that do not report liveness keep the historical wall clock.
+   */
+  private evaluateTurnWatchdog(now = Date.now()): TurnAbortDecision | undefined {
+    if (!this.turnStartedAt) return undefined;
+    const ageMs = now - this.turnStartedAt.getTime();
+    const providerState = this.mainSwitcher.turnWatchdogState?.();
+    if (!providerState) {
+      return ageMs > TURN_ABORT_MS
+        ? { kind: "wall_clock", ageMs, inactiveMs: ageMs, activityEvents: 0, limitMs: TURN_ABORT_MS }
+        : undefined;
+    }
+
+    const activityEvents = this.turnActivityEvents + providerState.activityEvents;
+    const lastActivityAt = Math.max(
+      this.turnStartedAt.getTime(),
+      this.turnLastActivityAt?.getTime() ?? 0,
+      providerState.lastActivityAt ?? 0
+    );
+    const inactiveMs = now - lastActivityAt;
+    const absoluteLimitMs = this.config.service.turnAbsoluteAbortMs;
+    if (ageMs > absoluteLimitMs) {
+      return { kind: "absolute", ageMs, inactiveMs, activityEvents, limitMs: absoluteLimitMs };
+    }
+    if (providerState.suspended) return undefined;
+    const inactivityLimitMs = this.config.service.turnInactivityAbortMs;
+    if (inactiveMs > inactivityLimitMs) {
+      return { kind: "inactivity", ageMs, inactiveMs, activityEvents, limitMs: inactivityLimitMs };
+    }
+    return undefined;
+  }
+
   private async checkTurnTimeout(): Promise<void> {
     if (!this.turnRunning) return;
 
-    // Hard abort: if a turn has been running longer than TURN_ABORT_MS,
-    // something below us (sendTurn iterator, codex process, websocket) has
-    // failed to terminate even though we expect it to. Mark the turn stale,
-    // notify the user, restart Codex to cancel the underlying app-server work,
-    // then drain the queue after restart recovery.
-    if (this.turnStartedAt && Date.now() - this.turnStartedAt.getTime() > TURN_ABORT_MS) {
-      await this.forceAbortStuckTurn();
+    // Hard abort: the turn is either silent (nothing below us has produced a
+    // single event in the inactivity budget) or runaway. Either way mark the
+    // turn stale, notify the user, restart the main agent to cancel the
+    // underlying work, then drain the queue after restart recovery.
+    const decision = this.evaluateTurnWatchdog();
+    if (decision) {
+      await this.forceAbortStuckTurn(decision);
       return;
     }
 
@@ -3037,14 +3173,124 @@ export class ServiceSupervisor {
     }
   }
 
-  private async forceAbortStuckTurn(): Promise<void> {
+  /**
+   * Decide whether this abort should also destroy the main session.
+   *
+   * Default: it must NOT. Clearing the session throws away the whole
+   * conversation, and for a turn that was merely slow that is a far worse
+   * outcome than the abort itself. It is done only against evidence that the
+   * session — not the turn — is the problem:
+   *
+   *  - context occupancy at or above the rollover threshold, or a rollover
+   *    already armed: the 2026-08-07 wedge, where a session near the end of
+   *    its window stops responding with no error at all; or
+   *  - `turnSilentAbortsBeforeSessionReset` consecutive aborts of turns that
+   *    produced ZERO events. One silent abort can be a slow tool; a run of
+   *    them means nothing is getting through to the session any more.
+   *
+   * Providers with no liveness reporting keep the old unconditional clear, so
+   * the Codex path is unchanged.
+   */
+  private decideSessionClearOnAbort(decision: TurnAbortDecision, contextStats?: MainAgentContextStats): {
+    clear: boolean;
+    reason: string;
+  } {
+    if (decision.kind === "wall_clock") return { clear: true, reason: "wall_clock_abort_no_liveness_signal" };
+
+    // Evidence is per-conversation. A new session inherits none of the
+    // suspicion earned by the one it replaced. A session id that was merely
+    // not known yet (fresh sessions are captured lazily, on their first turn)
+    // is NOT a session change: adopt the id rather than forgetting evidence.
+    if (this.adoptTurnAbortEvidenceKey(contextStats?.sessionId)) {
+      this.consecutiveSilentTurnAborts = 0;
+      this.consecutiveAbsoluteTurnAborts = 0;
+      this.consecutiveTurnAborts = 0;
+    }
+    this.consecutiveTurnAborts += 1;
+
+    if (contextStats?.rolloverPending) return { clear: true, reason: "context_rollover_pending" };
+    const occupancy = contextStats?.lastTurnInputTokens;
+    const threshold = contextStats?.rolloverThresholdTokens;
+    if (occupancy !== undefined && threshold !== undefined && occupancy >= threshold) {
+      return { clear: true, reason: "context_occupancy_at_rollover_threshold" };
+    }
+
+    // Termination guarantee. The two counters below each reset the other, so
+    // an alternating sequence (silent, active-runaway, silent, ...) could
+    // otherwise ping-pong forever without either reaching its bound — an
+    // abort→resume loop that never recovers, which is precisely what this
+    // whole mechanism exists to make impossible. Whatever the shape, a session
+    // that cannot complete a single turn across this many aborts is done.
+    const abortBudget =
+      this.config.service.turnSilentAbortsBeforeSessionReset + this.config.service.turnRunawayAbortsBeforeSessionReset;
+    if (this.consecutiveTurnAborts >= abortBudget) {
+      return { clear: true, reason: "consecutive_aborts_without_a_completed_turn" };
+    }
+
+    if (decision.kind === "absolute") {
+      // A turn that was demonstrably alive proves the session is not wedged,
+      // so it also clears the silent-abort suspicion rather than sitting
+      // between two silent aborts and letting them add up.
+      if (decision.activityEvents > 0) this.consecutiveSilentTurnAborts = 0;
+      this.consecutiveAbsoluteTurnAborts += 1;
+      if (this.consecutiveAbsoluteTurnAborts >= this.config.service.turnRunawayAbortsBeforeSessionReset) {
+        return { clear: true, reason: "consecutive_absolute_aborts" };
+      }
+      return { clear: false, reason: "runaway_turn_session_healthy" };
+    }
+
+    this.consecutiveAbsoluteTurnAborts = 0;
+    if (decision.activityEvents === 0) {
+      this.consecutiveSilentTurnAborts += 1;
+      if (this.consecutiveSilentTurnAborts >= this.config.service.turnSilentAbortsBeforeSessionReset) {
+        return { clear: true, reason: "consecutive_silent_aborts" };
+      }
+      return { clear: false, reason: "first_silent_abort_awaiting_confirmation" };
+    }
+    this.consecutiveSilentTurnAborts = 0;
+    return { clear: false, reason: "turn_was_active_before_stalling" };
+  }
+
+  /**
+   * Adopt the session these counters describe. Returns true when the evidence
+   * must be discarded because it belongs to a genuinely different session.
+   *
+   * An unknown id matches anything: a fresh Claude session has no id until its
+   * first turn reports one, and treating that undefined → defined transition
+   * as a session change would silently reset the counters between exactly the
+   * consecutive aborts they exist to add up.
+   */
+  private adoptTurnAbortEvidenceKey(sessionId?: string): boolean {
+    const provider = this.mainSwitcher.provider;
+    const previous = this.turnAbortEvidenceKey;
+    const key = `${provider}:${sessionId ?? ""}`;
+    if (!previous) {
+      this.turnAbortEvidenceKey = key;
+      return false;
+    }
+    const [previousProvider, previousSessionId] = splitEvidenceKey(previous);
+    if (previousProvider !== provider) {
+      this.turnAbortEvidenceKey = key;
+      return true;
+    }
+    if (!previousSessionId || !sessionId || previousSessionId === sessionId) {
+      // Same conversation, possibly just better identified than before.
+      this.turnAbortEvidenceKey = sessionId ? key : previous;
+      return false;
+    }
+    this.turnAbortEvidenceKey = key;
+    return true;
+  }
+
+  private async forceAbortStuckTurn(decision: TurnAbortDecision): Promise<void> {
     const event = this.activeTurnEvent;
     const startedAt = this.turnStartedAt?.toISOString();
     const ageMs = this.turnStartedAt ? Date.now() - this.turnStartedAt.getTime() : undefined;
     // Context size of the last completed turn distinguishes a context-window
     // wedge (the session silently stops responding once it is nearly full)
-    // from any other stall; without it both look like an 80s timeout.
+    // from any other stall; without it both look like a timeout.
     const contextStats = this.mainSwitcher.contextStats?.();
+    const sessionDecision = this.decideSessionClearOnAbort(decision, contextStats);
     this.logger.error(
       {
         component: "service",
@@ -3052,12 +3298,26 @@ export class ServiceSupervisor {
         chatId: event?.chatId,
         startedAt,
         ageMs,
+        abortKind: decision.kind,
+        inactiveMs: decision.inactiveMs,
+        limitMs: decision.limitMs,
+        activityEvents: decision.activityEvents,
+        consecutiveSilentAborts: this.consecutiveSilentTurnAborts,
+        consecutiveAbsoluteAborts: this.consecutiveAbsoluteTurnAborts,
+        consecutiveAborts: this.consecutiveTurnAborts,
+        sessionCleared: sessionDecision.clear,
+        sessionClearReason: sessionDecision.reason,
         provider: this.mainSwitcher.provider,
         lastTurnInputTokens: contextStats?.lastTurnInputTokens,
+        contextWindowTokens: contextStats?.contextWindowTokens,
         contextRolloverThresholdTokens: contextStats?.rolloverThresholdTokens,
         contextRolloverPending: contextStats?.rolloverPending
       },
-      `Force-aborting stuck turn after ${TURN_ABORT_MS}ms — something below sendTurn never resolved`
+      decision.kind === "inactivity"
+        ? `Force-aborting a turn that produced nothing for ${decision.inactiveMs}ms (limit ${decision.limitMs}ms)`
+        : decision.kind === "absolute"
+          ? `Force-aborting a runaway turn after ${decision.ageMs}ms (limit ${decision.limitMs}ms)`
+          : `Force-aborting stuck turn after ${TURN_ABORT_MS}ms — something below sendTurn never resolved`
     );
     // Clear watchdog state synchronously and mark restart-in-progress before
     // any awaits. This prevents queued Telegram messages from starting a new
@@ -3066,12 +3326,13 @@ export class ServiceSupervisor {
     this.activeTurnToken++;
     this.restartingCodex = true;
     this.turnStartedAt = undefined;
+    this.turnLastActivityAt = undefined;
     this.activeTurnEvent = undefined;
     await this.markActiveTurnAborted(event);
     const abortNoticeTarget = event?.outputTarget;
     if (this.canSendTextToOutputTarget(abortNoticeTarget)) {
       try {
-        await this.sendTextToOutputTarget(abortNoticeTarget, TURN_ABORTED_MESSAGE);
+        await this.sendTextToOutputTarget(abortNoticeTarget, abortNoticeText(decision, sessionDecision.clear));
       } catch (sendError) {
         this.logger.error(
           { component: "service", event: "turn_abort_notice_failed", chatId: event?.chatId, outputTarget: event?.outputTarget?.id, sendError },
@@ -3079,10 +3340,34 @@ export class ServiceSupervisor {
         );
       }
     }
-    await this.telegram.notifyOps(
-      `Watchdog: aborted a turn that had been running for ${ageMs ?? "?"}ms (chat=${event?.chatId ?? "n/a"}, source=${event?.source ?? "n/a"}).`
-    ).catch(() => undefined);
-    await this.resetPersistedMainSessionAfterWatchdogAbort();
+    // The wall-clock path (providers with no liveness signal, i.e. Codex) keeps
+    // its original ops text verbatim; the extra fields describe evidence that
+    // path does not gather.
+    const opsNotice =
+      decision.kind === "wall_clock"
+        ? `Watchdog: aborted a turn that had been running for ${ageMs ?? "?"}ms (chat=${event?.chatId ?? "n/a"}, source=${event?.source ?? "n/a"}).`
+        : `Watchdog: aborted a turn that had been running for ${ageMs ?? "?"}ms (chat=${event?.chatId ?? "n/a"}, source=${event?.source ?? "n/a"}, cause=${decision.kind}, silent_for=${decision.inactiveMs}ms, events=${decision.activityEvents}, session=${sessionDecision.clear ? `cleared (${sessionDecision.reason})` : `kept (${sessionDecision.reason})`}).`;
+    await this.telegram.notifyOps(opsNotice).catch(() => undefined);
+    if (sessionDecision.clear) {
+      this.consecutiveSilentTurnAborts = 0;
+      this.consecutiveAbsoluteTurnAborts = 0;
+      this.consecutiveTurnAborts = 0;
+      this.turnAbortEvidenceKey = undefined;
+      await this.resetPersistedMainSessionAfterWatchdogAbort(sessionDecision.reason);
+    } else {
+      this.logger.warn(
+        {
+          component: "codex",
+          event: "watchdog_kept_main_session",
+          provider: this.mainSwitcher.provider,
+          sessionName: this.mainSessionNameForProvider(this.mainSwitcher.provider),
+          reason: sessionDecision.reason,
+          activityEvents: decision.activityEvents,
+          consecutiveSilentAborts: this.consecutiveSilentTurnAborts
+        },
+        "kept the persisted main session after a watchdog abort; no evidence the session itself is wedged"
+      );
+    }
     this.restartingCodex = false;
     await this.restartCodex(
       `Watchdog force-aborted a stuck turn after ${ageMs ?? TURN_ABORT_MS}ms; restarting Codex before draining queued work.`
@@ -3092,20 +3377,24 @@ export class ServiceSupervisor {
   }
 
   /**
-   * Every watchdog abort clears the persisted main session, so the restart
-   * that follows starts clean rather than resuming whatever wedged the turn.
+   * Destroy the persisted main session so the restart that follows starts
+   * clean rather than resuming whatever wedged the turn. Only reached when
+   * `decideSessionClearOnAbort` found evidence the session is the problem —
+   * doing it on every abort is what made ten slow-but-healthy turns in the
+   * fortnight to 2026-08-17 cost the user their entire conversation.
+   *
    * It must clear the ACTIVE provider's key: the Claude provider persists
    * under `mainAgent.claude.mainSessionName`, and clearing the Codex key while
    * Claude was live (the pre-2026-08 behavior) deleted nothing — the poisoned
    * session survived every abort and every restart.
    */
-  private async resetPersistedMainSessionAfterWatchdogAbort(): Promise<void> {
+  private async resetPersistedMainSessionAfterWatchdogAbort(reason = "watchdog_abort"): Promise<void> {
     const provider = this.mainSwitcher.provider;
     const sessionName = this.mainSessionNameForProvider(provider);
     try {
       await this.mainSwitcher.clearPersistedSession("watchdog_abort");
       this.logger.warn(
-        { component: "codex", event: "watchdog_cleared_main_session", provider, sessionName },
+        { component: "codex", event: "watchdog_cleared_main_session", provider, sessionName, reason },
         "cleared persisted main session after watchdog abort"
       );
     } catch (error) {

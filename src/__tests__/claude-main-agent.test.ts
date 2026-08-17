@@ -124,6 +124,7 @@ function testConfig(nested?: {
   contextRolloverInputTokens?: number;
   contextRolloverHardCapTokens?: number;
   handoffSummaryEnabled?: boolean;
+  interruptTimeoutSec?: number;
 }): AppConfig {
   return {
     rootDir: "/tmp/codex-chat-test",
@@ -145,6 +146,7 @@ function testConfig(nested?: {
         pathToClaudeCodeExecutable: "",
         mainSessionName: "codex-chat-main-claude",
         startupTimeoutSec: 2,
+        interruptTimeoutSec: nested?.interruptTimeoutSec ?? 1,
         nestedAgentSettleGraceMs: nested?.settleGraceMs ?? 5_000,
         nestedAgentHoldMaxMs: nested?.holdMaxMs ?? 55_000,
         contextRolloverInputTokens: nested?.contextRolloverInputTokens ?? 800_000,
@@ -175,6 +177,10 @@ function fakeState(initial?: { sessionId: string; behaviorHash?: string }, files
     }),
     getCodexSession: vi.fn(async (name: string) => sessions.get(name)?.sessionId as string | undefined),
     getCodexSessionBehaviorHash: vi.fn(async (name: string) => sessions.get(name)?.behaviorHash as string | undefined),
+    getCodexSessionInputTokens: vi.fn(async (name: string) => {
+      const value = sessions.get(name)?.lastInputTokens;
+      return typeof value === "number" ? value : undefined;
+    }),
     setCodexSession: vi.fn(async (name: string, value: Record<string, unknown>) => {
       sessions.set(name, { ...sessions.get(name), ...value });
     }),
@@ -238,6 +244,63 @@ function backgroundTasksMessage(
     subtype: "background_tasks_changed",
     tasks,
     uuid: `bg-${sessionId}-${tasks.length}-${Math.random()}`,
+    session_id: sessionId
+  };
+}
+
+/**
+ * One API request's usage, carried on an assistant message. This — not the
+ * result message — is where context occupancy is read from: a result's `usage`
+ * is summed over every request the turn made, so on a multi-tool turn it is a
+ * multiple of how full the window actually is.
+ */
+function assistantRequestUsage(sessionId: string, inputTokens: number, parentToolUseId: string | null = null) {
+  return {
+    type: "assistant",
+    parent_tool_use_id: parentToolUseId,
+    message: {
+      role: "assistant",
+      content: [],
+      usage: {
+        input_tokens: inputTokens,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0
+      }
+    },
+    uuid: `assistant-usage-${Math.random()}`,
+    session_id: sessionId
+  };
+}
+
+/** An assistant message issuing one tool call, at parent or nested depth. */
+function toolUseMessage(sessionId: string, toolUseId: string, parentToolUseId: string | null = null) {
+  return {
+    type: "assistant",
+    parent_tool_use_id: parentToolUseId,
+    message: {
+      role: "assistant",
+      content: [{ type: "tool_use", id: toolUseId, name: "Bash", input: { command: "sleep 300" } }]
+    },
+    uuid: `tool-use-${toolUseId}-${Math.random()}`,
+    session_id: sessionId
+  };
+}
+
+/**
+ * A tool_progress heartbeat in the exact shape production emits: `heartbeat`
+ * true, `tool_use_id` suffixed, and `parent_tool_use_id` naming the
+ * originating call. Verified against all 15 such messages captured in this
+ * repo's data/subagents/ event streams — none has a null parent.
+ */
+function heartbeatMessage(sessionId: string, originatingToolUseId: string, elapsedSeconds: number) {
+  return {
+    type: "tool_progress",
+    tool_use_id: `${originatingToolUseId}-heartbeat-0`,
+    tool_name: "Bash",
+    parent_tool_use_id: originatingToolUseId,
+    elapsed_time_seconds: elapsedSeconds,
+    heartbeat: true,
+    uuid: `heartbeat-${originatingToolUseId}-${elapsedSeconds}`,
     session_id: sessionId
   };
 }
@@ -790,23 +853,21 @@ describe("ClaudeMainAgentClient", () => {
 
     const first = collect(client.sendTurn({ text: "one" }));
     await sdk.instances[0]!.input.next();
-    sdk.instances[0]!.sdk.push({
-      ...successResult("usage-session", "first answer"),
-      usage: { input_tokens: 100, cache_read_input_tokens: 400, cache_creation_input_tokens: 90 }
-    });
+    sdk.instances[0]!.sdk.push(assistantRequestUsage("usage-session", 590));
+    sdk.instances[0]!.sdk.push(successResult("usage-session", "first answer"));
     await expect(first).resolves.toEqual([{ type: "final", text: "first answer" }]);
     expect(client.contextStats()).toEqual({
+      sessionId: "usage-session",
       lastTurnInputTokens: 590,
       rolloverThresholdTokens: 1_000,
-      rolloverPending: false
+      rolloverPending: false,
+      contextWindowTokens: undefined
     });
 
     const second = collect(client.sendTurn({ text: "two" }));
     const secondMessage = await sdk.instances[0]!.input.next();
-    sdk.instances[0]!.sdk.push({
-      ...successResult("usage-session", "second answer"),
-      usage: { input_tokens: 700, cache_read_input_tokens: 100, cache_creation_input_tokens: 0 }
-    });
+    sdk.instances[0]!.sdk.push(assistantRequestUsage("usage-session", 800));
+    sdk.instances[0]!.sdk.push(successResult("usage-session", "second answer"));
     const secondEvents = await second;
 
     // Under the threshold: same SDK query, no rollover notice, no handoff note.
@@ -832,10 +893,8 @@ describe("ClaudeMainAgentClient", () => {
 
     const first = collect(client.sendTurn({ text: "one" }));
     await sdk.instances[0]!.input.next();
-    sdk.instances[0]!.sdk.push({
-      ...successResult("full-session", "first answer"),
-      usage: { input_tokens: 900, cache_read_input_tokens: 200, cache_creation_input_tokens: 5 }
-    });
+    sdk.instances[0]!.sdk.push(assistantRequestUsage("full-session", 1105));
+    sdk.instances[0]!.sdk.push(successResult("full-session", "first answer"));
     await first;
     // Armed, but the running turn is never disturbed mid-flight.
     expect(client.contextStats()).toMatchObject({ lastTurnInputTokens: 1_105, rolloverPending: true });
@@ -882,10 +941,8 @@ describe("ClaudeMainAgentClient", () => {
 
     const first = collect(client.sendTurn({ text: "one" }));
     await sdk.instances[0]!.input.next();
-    sdk.instances[0]!.sdk.push({
-      ...successResult("full-session", "first answer"),
-      usage: { input_tokens: 1_100, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
-    });
+    sdk.instances[0]!.sdk.push(assistantRequestUsage("full-session", 1100));
+    sdk.instances[0]!.sdk.push(successResult("full-session", "first answer"));
     await first;
 
     // Summarization is scheduled off the hot path against the doomed session
@@ -936,10 +993,8 @@ describe("ClaudeMainAgentClient", () => {
 
     const first = collect(client.sendTurn({ text: "one" }));
     await sdk.instances[0]!.input.next();
-    sdk.instances[0]!.sdk.push({
-      ...successResult("full-session", "first answer"),
-      usage: { input_tokens: 1_100, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
-    });
+    sdk.instances[0]!.sdk.push(assistantRequestUsage("full-session", 1100));
+    sdk.instances[0]!.sdk.push(successResult("full-session", "first answer"));
     await first;
     await waitFor(() => handoffRecord(jsonFiles)?.status === "failed");
 
@@ -1021,10 +1076,8 @@ describe("ClaudeMainAgentClient", () => {
 
     const first = collect(client.sendTurn({ text: "one" }));
     await sdk.instances[0]!.input.next();
-    sdk.instances[0]!.sdk.push({
-      ...successResult("full-session", "first answer"),
-      usage: { input_tokens: 1_100, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
-    });
+    sdk.instances[0]!.sdk.push(assistantRequestUsage("full-session", 1100));
+    sdk.instances[0]!.sdk.push(successResult("full-session", "first answer"));
     await first;
     await waitFor(() => handoffRecord(jsonFiles)?.status === "pending");
 
@@ -1032,10 +1085,8 @@ describe("ClaudeMainAgentClient", () => {
     // the existing session rather than throwing the brief away.
     const second = collect(client.sendTurn({ text: "two" }));
     const secondMessage = await sdk.instances[0]!.input.next();
-    sdk.instances[0]!.sdk.push({
-      ...successResult("full-session", "second answer"),
-      usage: { input_tokens: 1_200, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
-    });
+    sdk.instances[0]!.sdk.push(assistantRequestUsage("full-session", 1200));
+    sdk.instances[0]!.sdk.push(successResult("full-session", "second answer"));
     const secondEvents = await second;
 
     expect(sdk.query).toHaveBeenCalledTimes(1);
@@ -1081,20 +1132,16 @@ describe("ClaudeMainAgentClient", () => {
 
     const first = collect(client.sendTurn({ text: "one" }));
     await sdk.instances[0]!.input.next();
-    sdk.instances[0]!.sdk.push({
-      ...successResult("full-session", "first answer"),
-      usage: { input_tokens: 1_100, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
-    });
+    sdk.instances[0]!.sdk.push(assistantRequestUsage("full-session", 1100));
+    sdk.instances[0]!.sdk.push(successResult("full-session", "first answer"));
     await first;
     await waitFor(() => handoffRecord(jsonFiles)?.status === "pending");
 
     // Under the cap: deferred, and this turn pushes the session over it.
     const second = collect(client.sendTurn({ text: "two" }));
     await sdk.instances[0]!.input.next();
-    sdk.instances[0]!.sdk.push({
-      ...successResult("full-session", "second answer"),
-      usage: { input_tokens: 1_600, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
-    });
+    sdk.instances[0]!.sdk.push(assistantRequestUsage("full-session", 1600));
+    sdk.instances[0]!.sdk.push(successResult("full-session", "second answer"));
     await second;
     expect(sdk.query).toHaveBeenCalledTimes(1);
 
@@ -1133,10 +1180,8 @@ describe("ClaudeMainAgentClient", () => {
 
     const first = collect(client.sendTurn({ text: "one" }));
     await sdk.instances[0]!.input.next();
-    sdk.instances[0]!.sdk.push({
-      ...successResult("wedged-session", "first answer"),
-      usage: { input_tokens: 1_100, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
-    });
+    sdk.instances[0]!.sdk.push(assistantRequestUsage("wedged-session", 1100));
+    sdk.instances[0]!.sdk.push(successResult("wedged-session", "first answer"));
     await first;
     await waitFor(() => handoffRecord(jsonFiles)?.status === "ready");
 
@@ -1160,6 +1205,443 @@ describe("ClaudeMainAgentClient", () => {
     // No rollover happened at this boundary, so no rollover status event.
     expect(events.every((event) => event.type !== "status")).toBe(true);
     expect(handoffRecord(jsonFiles)).toBeNull();
+    await client.stop();
+  });
+
+  test("the pending-rollover marker is readable at the very next turn boundary", async () => {
+    // The defect: the marker was written inside a floating async job while
+    // recordTurnUsage returned immediately, so the next boundary — which
+    // arrives within milliseconds during a live conversation — always read
+    // nothing. `context_rollover_deferred` never fired once in 14 days of
+    // production and `contextRolloverHardCapTokens` was dead code.
+    const sdk = fakeSdk([{ sessionId: "full-session" }, { sessionId: "rolled-session" }]);
+    const { state, jsonFiles } = fakeState({ sessionId: "full-session", behaviorHash: "behavior-hash" });
+    const summarize = vi.fn().mockImplementation(() => new Promise(() => undefined));
+    const client = await loadClient(
+      sdk,
+      state,
+      fakeBehavior(),
+      vi.fn(),
+      testConfig({ contextRolloverInputTokens: 1_000, contextRolloverHardCapTokens: 5_000 }),
+      summarize
+    );
+    await client.start();
+
+    const first = collect(client.sendTurn({ text: "one" }));
+    await sdk.instances[0]!.input.next();
+    sdk.instances[0]!.sdk.push(assistantRequestUsage("full-session", 1_100));
+    sdk.instances[0]!.sdk.push(successResult("full-session", "first answer"));
+    await first;
+
+    // Deliberately NO waitFor: the boundary has to see the marker on its own.
+    const second = collect(client.sendTurn({ text: "two" }));
+    await sdk.instances[0]!.input.next();
+    sdk.instances[0]!.sdk.push(successResult("full-session", "second answer"));
+    await second;
+
+    // Deferred rather than rolled over, which is only possible if the marker
+    // was already observable.
+    expect(sdk.query).toHaveBeenCalledTimes(1);
+    expect(handoffRecord(jsonFiles)).toMatchObject({ forSessionId: "full-session", status: "pending" });
+    expect(client.contextStats()).toMatchObject({ rolloverPending: true });
+    await client.stop();
+  });
+
+  test("a brief that is still generating at the boundary is kept and carried by a later turn", async () => {
+    // The defect: `consumeHandoffSummary` cleared the artifact BEFORE checking
+    // whether it was ready, so a brief that finished seconds later had nothing
+    // left to patch. Two of six summaries in 14 days were generated and binned.
+    const sdk = fakeSdk([{ sessionId: "full-session" }, { sessionId: "rolled-session" }]);
+    const { state, jsonFiles } = fakeState({ sessionId: "full-session", behaviorHash: "behavior-hash" });
+    let resolveSummary!: (value: unknown) => void;
+    const summarize = vi.fn().mockImplementation(() => new Promise((resolve) => {
+      resolveSummary = resolve;
+    }));
+    const client = await loadClient(
+      sdk,
+      state,
+      fakeBehavior(),
+      vi.fn(),
+      // Hard cap below the observed size, so the rollover happens immediately
+      // rather than waiting for the summary.
+      testConfig({ contextRolloverInputTokens: 1_000, contextRolloverHardCapTokens: 1_500 }),
+      summarize
+    );
+    await client.start();
+
+    const first = collect(client.sendTurn({ text: "one" }));
+    await sdk.instances[0]!.input.next();
+    sdk.instances[0]!.sdk.push(assistantRequestUsage("full-session", 1_600));
+    sdk.instances[0]!.sdk.push(successResult("full-session", "first answer"));
+    await first;
+    await waitFor(() => handoffRecord(jsonFiles)?.status === "pending");
+
+    // Rollover with the brief still generating: plain note now, brief kept.
+    const second = collect(client.sendTurn({ text: "two" }));
+    await waitFor(() => sdk.instances.length === 2);
+    const plainMessage = await sdk.instances[1]!.input.next();
+    sdk.instances[1]!.sdk.push(fakeClaudeInitMessage("rolled-session"));
+    sdk.instances[1]!.sdk.push(successResult("rolled-session", "fresh answer"));
+    await second;
+    expect(userMessageText(plainMessage.value)).not.toContain("Handoff brief");
+    expect(handoffRecord(jsonFiles)).toMatchObject({ forSessionId: "full-session", status: "pending" });
+
+    resolveSummary({ summary: "Ongoing: the late brief.", transcriptChars: 1, transcriptMessages: 1, transcriptBytes: 1 });
+    await waitFor(() => handoffRecord(jsonFiles)?.status === "ready");
+
+    // The debt survived: the next turn on the fresh session carries it.
+    const third = collect(client.sendTurn({ text: "three" }));
+    const briefedMessage = await sdk.instances[1]!.input.next();
+    sdk.instances[1]!.sdk.push(successResult("rolled-session", "briefed answer"));
+    await third;
+
+    const text = userMessageText(briefedMessage.value);
+    expect(text).toContain("Ongoing: the late brief.");
+    expect(text).toContain("three");
+    expect(handoffRecord(jsonFiles)).toBeNull();
+    await client.stop();
+  });
+
+  test("a rollover scheduled while another summary is in flight still persists its marker", async () => {
+    // The defect: `scheduleHandoffSummary` returned early on the in-flight
+    // guard BEFORE writing anything, and the artifact doubles as the persisted
+    // pending-rollover flag — so a restart in that window happily resumed a
+    // session that was already owed a rollover.
+    const sdk = fakeSdk([{ sessionId: "full-session" }, { sessionId: "rolled-session" }]);
+    const { state, jsonFiles } = fakeState({ sessionId: "full-session", behaviorHash: "behavior-hash" });
+    const summarize = vi.fn().mockImplementation(() => new Promise(() => undefined));
+    const client = await loadClient(
+      sdk,
+      state,
+      fakeBehavior(),
+      vi.fn(),
+      testConfig({ contextRolloverInputTokens: 1_000, contextRolloverHardCapTokens: 1_500 }),
+      summarize
+    );
+    await client.start();
+
+    const first = collect(client.sendTurn({ text: "one" }));
+    await sdk.instances[0]!.input.next();
+    sdk.instances[0]!.sdk.push(assistantRequestUsage("full-session", 1_600));
+    sdk.instances[0]!.sdk.push(successResult("full-session", "first answer"));
+    await first;
+    await waitFor(() => handoffRecord(jsonFiles)?.status === "pending");
+
+    const second = collect(client.sendTurn({ text: "two" }));
+    await waitFor(() => sdk.instances.length === 2);
+    await sdk.instances[1]!.input.next();
+    sdk.instances[1]!.sdk.push(fakeClaudeInitMessage("rolled-session"));
+    // The fresh session immediately fills up too, while the first summarizer
+    // is still running.
+    sdk.instances[1]!.sdk.push(assistantRequestUsage("rolled-session", 1_700));
+    sdk.instances[1]!.sdk.push(successResult("rolled-session", "fresh answer"));
+    await second;
+
+    await waitFor(() => handoffRecord(jsonFiles)?.forSessionId === "rolled-session");
+    // Marked terminal, not "pending": nothing may wait on a summary that was
+    // never started. But the marker itself exists, which is the safety property.
+    expect(handoffRecord(jsonFiles)).toMatchObject({ forSessionId: "rolled-session", status: "skipped" });
+    expect(summarize).toHaveBeenCalledTimes(1);
+    await client.stop();
+  });
+
+  test("context occupancy ignores nested-agent usage and the result's cumulative total", async () => {
+    // Ground truth, verified against SDK 0.3.220 on 2026-08-17: a result's
+    // `usage` is summed over every API request in the turn, and subagent
+    // traffic streams through this same query. Reading either as occupancy is
+    // how a 1M-token window reported 2,050,378 "effective input tokens".
+    const sdk = fakeSdk([{ sessionId: "usage-session" }]);
+    const { state } = fakeState({ sessionId: "usage-session", behaviorHash: "behavior-hash" });
+    const client = await loadClient(sdk, state, fakeBehavior(), vi.fn(), testConfig({ contextRolloverInputTokens: 100_000 }));
+    await client.start();
+
+    const turn = collect(client.sendTurn({ text: "run a nested agent" }));
+    await sdk.instances[0]!.input.next();
+    // Deliberately DECREASING across the turn, as an SDK-side auto-compaction
+    // makes it: the last figure is the truth, and a running maximum would
+    // leave a compacted session reading as permanently near-full.
+    sdk.instances[0]!.sdk.push(assistantRequestUsage("usage-session", 85_000));
+    // A nested agent's own conversation, relayed with parent_tool_use_id set.
+    sdk.instances[0]!.sdk.push(assistantRequestUsage("usage-session", 900_000, "toolu_nested_1"));
+    sdk.instances[0]!.sdk.push(assistantRequestUsage("usage-session", 700));
+    sdk.instances[0]!.sdk.push({
+      ...successResult("usage-session", "done"),
+      usage: { input_tokens: 10, cache_read_input_tokens: 3_000_000, cache_creation_input_tokens: 20_000 },
+      modelUsage: { "claude-sonnet-5": { contextWindow: 1_000_000 } }
+    });
+    await turn;
+
+    expect(client.contextStats()).toMatchObject({
+      lastTurnInputTokens: 700,
+      rolloverPending: false,
+      contextWindowTokens: 1_000_000
+    });
+    await client.stop();
+  });
+
+  test("a hung interrupt cannot strand the watchdog suspension", async () => {
+    // The rollover suspends the inactivity deadline across its stop()/start().
+    // stop() interrupts the child, and the one case that most needs
+    // interrupting — a child wedged on a near-full session — is the one most
+    // likely never to answer. A suspension that outlived its `finally` would
+    // disable the deadline forever, leaving only the absolute ceiling, which
+    // by design never clears a session: nothing would ever recover.
+    const sdk = fakeSdk([{ sessionId: "hung-session" }, { sessionId: "next-session" }]);
+    const { state } = fakeState({ sessionId: "hung-session", behaviorHash: "behavior-hash" });
+    const client = await loadClient(
+      sdk,
+      state,
+      fakeBehavior(),
+      vi.fn(),
+      testConfig({ contextRolloverInputTokens: 1_000, handoffSummaryEnabled: false, interruptTimeoutSec: 1 })
+    );
+    await client.start();
+    // Never resolves, exactly like a child blocked in epoll.
+    sdk.instances[0]!.interrupt.mockImplementation(() => new Promise(() => undefined));
+
+    const first = collect(client.sendTurn({ text: "one" }));
+    await sdk.instances[0]!.input.next();
+    sdk.instances[0]!.sdk.push(assistantRequestUsage("hung-session", 1_100));
+    sdk.instances[0]!.sdk.push(successResult("hung-session", "first answer"));
+    await first;
+    expect(client.turnWatchdogState().suspended).toBe(false);
+
+    // The rollover suspends, then blocks in interrupt().
+    const second = collect(client.sendTurn({ text: "two" }));
+    await waitFor(() => client.turnWatchdogState().suspended === true);
+    expect(client.turnWatchdogState().suspendedReason).toBe("context_rollover_restart");
+
+    // The suspension carries its own expiry, so it lifts even though the
+    // interrupt never returned and the `finally` never ran.
+    (client as unknown as { watchdogSuspendedUntil: number }).watchdogSuspendedUntil = Date.now() - 1;
+    expect(client.turnWatchdogState().suspended).toBe(false);
+    expect(client.turnWatchdogState().suspendedReason).toBeUndefined();
+
+    // And the interrupt itself is bounded, so the rollover still completes.
+    await waitFor(() => sdk.instances.length === 2, 4_000);
+    sdk.instances[1]!.sdk.push(fakeClaudeInitMessage("next-session"));
+    sdk.instances[1]!.sdk.push(successResult("next-session", "fresh answer"));
+    await second;
+    expect(client.turnWatchdogState().suspended).toBe(false);
+    await client.stop();
+  }, 30_000);
+
+  test("only the live turn's own SDK traffic counts as activity", async () => {
+    // The SDK's stream is session-scoped: `background_tasks_changed` fires for
+    // a dev server some earlier turn backgrounded, and `tool_progress` ticks
+    // for whatever is running. Unattributable traffic must not hold the
+    // inactivity budget open while the conversation itself is wedged.
+    const sdk = fakeSdk([{ sessionId: "activity-session" }]);
+    const { state } = fakeState({ sessionId: "activity-session", behaviorHash: "behavior-hash" });
+    const client = await loadClient(sdk, state, fakeBehavior(), vi.fn(), testConfig());
+    await client.start();
+
+    const first = collect(client.sendTurn({ text: "one" }));
+    await sdk.instances[0]!.input.next();
+    // A tool call from the FIRST turn, whose heartbeats outlive it.
+    sdk.instances[0]!.sdk.push(toolUseMessage("activity-session", "toolu_old_turn"));
+    sdk.instances[0]!.sdk.push(successResult("activity-session", "first answer"));
+    await first;
+
+    // Between turns: a leftover background task keeps talking.
+    const idleActivityAt = client.turnWatchdogState().lastActivityAt;
+    sdk.instances[0]!.sdk.push(backgroundTasksMessage("activity-session", [
+      { task_id: "bg-1", task_type: "bash", description: "dev server" }
+    ]));
+    await waitFor(() => true);
+    expect(client.turnWatchdogState().lastActivityAt).toBe(idleActivityAt);
+
+    const second = collect(client.sendTurn({ text: "two" }));
+    await sdk.instances[0]!.input.next();
+    expect(client.turnWatchdogState().activityEvents).toBe(0);
+
+    // The previous turn's tool is still heartbeating. Not this turn's problem.
+    sdk.instances[0]!.sdk.push(heartbeatMessage("activity-session", "toolu_old_turn", 30));
+    await waitFor(() => true);
+    expect(client.turnWatchdogState().activityEvents).toBe(0);
+
+    // A background task that predates this turn changing state is not progress.
+    sdk.instances[0]!.sdk.push(backgroundTasksMessage("activity-session", []));
+    await waitFor(() => true);
+    expect(client.turnWatchdogState().activityEvents).toBe(0);
+
+    // This turn's own call, and its heartbeat, are.
+    sdk.instances[0]!.sdk.push(toolUseMessage("activity-session", "toolu_this_turn"));
+    await waitFor(() => client.turnWatchdogState().activityEvents === 1);
+    sdk.instances[0]!.sdk.push(heartbeatMessage("activity-session", "toolu_this_turn", 30));
+    await waitFor(() => client.turnWatchdogState().activityEvents === 2);
+
+    sdk.instances[0]!.sdk.push(successResult("activity-session", "second answer"));
+    await second;
+    await client.stop();
+  });
+
+  test("a long quiet tool call stays alive on heartbeats alone (W3)", async () => {
+    // Regression pin for the shape that actually occurs in production: EVERY
+    // tool_progress message captured in data/subagents/ is heartbeat:true with
+    // parent_tool_use_id set to the originating call. job_46baa638's single
+    // Bash ran 119.8s emitting nothing else — excluding heartbeats would have
+    // aborted it ~40s from the finish line, making every build, test suite or
+    // clone longer than the inactivity window unfinishable.
+    const sdk = fakeSdk([{ sessionId: "long-tool-session" }]);
+    const { state } = fakeState({ sessionId: "long-tool-session", behaviorHash: "behavior-hash" });
+    const client = await loadClient(sdk, state, fakeBehavior(), vi.fn(), testConfig());
+    await client.start();
+
+    const turn = collect(client.sendTurn({ text: "run the suite" }));
+    await sdk.instances[0]!.input.next();
+    sdk.instances[0]!.sdk.push(toolUseMessage("long-tool-session", "toolu_long_bash"));
+    await waitFor(() => client.turnWatchdogState().activityEvents === 1);
+
+    // 30s-interval heartbeats spanning well past the 80s inactivity budget.
+    let expectedEvents = 1;
+    for (const elapsed of [30, 60, 90, 120]) {
+      sdk.instances[0]!.sdk.push(heartbeatMessage("long-tool-session", "toolu_long_bash", elapsed));
+      expectedEvents += 1;
+      await waitFor(() => client.turnWatchdogState().activityEvents === expectedEvents);
+    }
+    // Five attributable events: the tool_use plus four heartbeats. A watchdog
+    // reading this can never see the turn as silent.
+    expect(client.turnWatchdogState().activityEvents).toBe(5);
+
+    sdk.instances[0]!.sdk.push(successResult("long-tool-session", "suite green"));
+    await turn;
+    await client.stop();
+  });
+
+  test("a nested agent's own long tool call is attributable to the parent turn", async () => {
+    // Nested agents stream their assistant messages through the SAME query
+    // with parent_tool_use_id set, so their tool_use ids are observable and
+    // must join the turn's set — otherwise a nested agent running one long
+    // silent Bash reads as a stalled parent turn.
+    const sdk = fakeSdk([{ sessionId: "nested-session" }]);
+    const { state } = fakeState({ sessionId: "nested-session", behaviorHash: "behavior-hash" });
+    const client = await loadClient(sdk, state, fakeBehavior(), vi.fn(), testConfig());
+    await client.start();
+
+    const turn = collect(client.sendTurn({ text: "delegate it" }));
+    await sdk.instances[0]!.input.next();
+    // Parent launches a nested agent...
+    sdk.instances[0]!.sdk.push(toolUseMessage("nested-session", "toolu_agent_call"));
+    // ...which issues its own Bash, relayed with parent_tool_use_id set.
+    sdk.instances[0]!.sdk.push(toolUseMessage("nested-session", "toolu_nested_bash", "toolu_agent_call"));
+    await waitFor(() => client.turnWatchdogState().activityEvents === 2);
+
+    const before = client.turnWatchdogState().activityEvents;
+    sdk.instances[0]!.sdk.push(heartbeatMessage("nested-session", "toolu_nested_bash", 60));
+    await waitFor(() => client.turnWatchdogState().activityEvents === before + 1);
+
+    sdk.instances[0]!.sdk.push(successResult("nested-session", "delegated"));
+    await turn;
+    await client.stop();
+  });
+
+  test("an owed rollover outlives its brief's six-hour expiry", async () => {
+    // The artifact carries two things: a summary, which goes stale, and a
+    // rollover DEBT, which does not. Expiring both let startup resume a
+    // session that was already too full — straight back into the wedge.
+    const sdk = fakeSdk([{ sessionId: "fresh-session" }]);
+    const owed = {
+      forSessionId: "oversized-session",
+      createdAt: new Date(Date.now() - 7 * 60 * 60_000).toISOString(),
+      inputTokensAtSchedule: 850_000,
+      status: "ready",
+      summary: "STALE BRIEF"
+    };
+    const { state, sessions, jsonFiles } = fakeState(
+      { sessionId: "oversized-session", behaviorHash: "behavior-hash" },
+      { "main_session_handoff.json": owed }
+    );
+    const client = await loadClient(sdk, state, fakeBehavior(), vi.fn(), testConfig(), vi.fn());
+
+    await client.start();
+
+    // The debt was enforced: no resume, and the oversized key is dropped.
+    expect(sdk.instances[0]?.options.resume).toBeUndefined();
+    expect(sessions.get("codex-chat-main-claude")).toBeUndefined();
+
+    const turn = collect(client.sendTurn({ text: "after the outage" }));
+    const message = await sdk.instances[0]!.input.next();
+    sdk.instances[0]!.sdk.push(fakeClaudeInitMessage("fresh-session"));
+    sdk.instances[0]!.sdk.push(successResult("fresh-session", "answer"));
+    await turn;
+
+    // ...but the stale brief was NOT carried into the fresh session.
+    const text = userMessageText(message.value);
+    expect(text).not.toContain("STALE BRIEF");
+    expect(text).toContain("after the outage");
+    expect(handoffRecord(jsonFiles)).toBeNull();
+    await client.stop();
+  });
+
+  test("a resumed session re-seeds its context occupancy from state", async () => {
+    // Post-restart blindness: without this a resumed near-full session has no
+    // occupancy until a turn COMPLETES — and a session wedged because it is
+    // full never completes one, so the watchdog has no wedge evidence in
+    // exactly the case it was built for.
+    const sdk = fakeSdk([{ sessionId: "resumed-session" }]);
+    const { state } = fakeState({ sessionId: "resumed-session", behaviorHash: "behavior-hash" });
+    await state.setCodexSession("codex-chat-main-claude", { sessionId: "resumed-session", lastInputTokens: 812_345 });
+    const client = await loadClient(sdk, state, fakeBehavior(), vi.fn(), testConfig({ contextRolloverInputTokens: 800_000 }));
+
+    await client.start();
+
+    expect(client.contextStats()).toMatchObject({
+      sessionId: "resumed-session",
+      lastTurnInputTokens: 812_345
+    });
+    await client.stop();
+  });
+
+  test("persisting a new session id drops the previous session's occupancy", async () => {
+    // `setCodexSession` merges, so an occupancy figure outlives the session it
+    // was measured against unless dropped explicitly. Pairing a new id with the
+    // old session's tokens would re-seed a false "near full" reading on the
+    // next restart: a bogus rollover plus fabricated wedge evidence against a
+    // conversation that has barely started.
+    const sdk = fakeSdk([{ sessionId: "old-session" }]);
+    const { state, sessions } = fakeState({ sessionId: "old-session", behaviorHash: "behavior-hash" });
+    const client = await loadClient(sdk, state, fakeBehavior(), vi.fn(), testConfig({ contextRolloverInputTokens: 900_000 }));
+    await client.start();
+
+    const first = collect(client.sendTurn({ text: "one" }));
+    await sdk.instances[0]!.input.next();
+    sdk.instances[0]!.sdk.push(assistantRequestUsage("old-session", 850_000));
+    sdk.instances[0]!.sdk.push(successResult("old-session", "first answer"));
+    await first;
+    await waitFor(() => sessions.get("codex-chat-main-claude")?.lastInputTokens === 850_000);
+
+    // The SDK reports a different session id (resume divergence).
+    sdk.instances[0]!.sdk.push(fakeClaudeInitMessage("brand-new-session"));
+    await waitFor(() => sessions.get("codex-chat-main-claude")?.sessionId === "brand-new-session");
+
+    expect(sessions.get("codex-chat-main-claude")?.lastInputTokens).toBeUndefined();
+    expect(client.contextStats()).toMatchObject({ sessionId: "brand-new-session", lastTurnInputTokens: undefined });
+    await client.stop();
+  });
+
+  test("falls back to the result's last usage iteration when no parent assistant message carried usage", async () => {
+    const sdk = fakeSdk([{ sessionId: "iter-session" }]);
+    const { state } = fakeState({ sessionId: "iter-session", behaviorHash: "behavior-hash" });
+    const client = await loadClient(sdk, state, fakeBehavior(), vi.fn(), testConfig({ contextRolloverInputTokens: 100_000 }));
+    await client.start();
+
+    const turn = collect(client.sendTurn({ text: "one" }));
+    await sdk.instances[0]!.input.next();
+    sdk.instances[0]!.sdk.push({
+      ...successResult("iter-session", "done"),
+      usage: {
+        input_tokens: 8,
+        cache_read_input_tokens: 5_124,
+        cache_creation_input_tokens: 1_864,
+        // The last iteration is the final request, and its own prompt size is
+        // the occupancy figure — 1,866 against a 6,996 cumulative total.
+        iterations: [{ input_tokens: 2, cache_read_input_tokens: 1_786, cache_creation_input_tokens: 78 }]
+      }
+    });
+    await turn;
+
+    expect(client.contextStats()).toMatchObject({ lastTurnInputTokens: 1_866 });
     await client.stop();
   });
 

@@ -15,6 +15,7 @@ import {
   checkClaudeOAuthReadiness,
   redactClaudeSecrets,
   verifyClaudeOAuthInitialization,
+  withTimeout,
   type ChildEnvSource
 } from "./claude-auth.js";
 import {
@@ -41,7 +42,8 @@ import type {
   MainAgentContextStats,
   MainAgentEvent,
   MainAgentHealth,
-  MainAgentTurnInput
+  MainAgentTurnInput,
+  MainAgentTurnWatchdogState
 } from "./types.js";
 import { nowIso } from "./util.js";
 
@@ -58,6 +60,22 @@ interface ActiveTurn {
    * session produces a post-nested result (or a bound below releases this).
    */
   heldFinalText?: string;
+  /**
+   * `tool_use` ids this turn has issued, at every depth — the parent session's
+   * own calls and the nested agents' calls relayed through the same query.
+   * `tool_progress` (which in practice is only ever a 30s heartbeat) carries
+   * the originating call's id in `parent_tool_use_id`, so this set is what
+   * distinguishes "our long-running Bash is alive" from a previous turn's
+   * backgrounded task still ticking.
+   */
+  readonly toolUseIds: Set<string>;
+  /**
+   * Background task ids that already existed when this turn started. Changes
+   * confined to these belong to earlier turns and are not this turn's progress.
+   */
+  readonly baselineBackgroundTaskIds: Set<string>;
+  /** Background task ids this turn launched. */
+  readonly ownedBackgroundTaskIds: Set<string>;
   /** Fires `nestedAgentSettleGraceMs` after the nested set drains while quiet. */
   drainTimer?: NodeJS.Timeout;
   /** Absolute `nestedAgentHoldMaxMs` bound armed when the hold starts. */
@@ -108,14 +126,25 @@ function contextRolloverHandoffWithSummary(summary: string, rolledOver: boolean)
   ].join("\n");
 }
 
+/** Rate limit for the "occupancy signal has gone dark" warning. */
+const OCCUPANCY_UNAVAILABLE_LOG_INTERVAL_MS = 10 * 60_000;
+
 /** State-dir artifact carrying a rollover's pending flag and handoff brief. */
 export const CLAUDE_MAIN_HANDOFF_FILE = "main_session_handoff.json";
 
 /**
- * A handoff artifact older than this is ignored: whatever conversation it
- * describes is no longer the thing a fresh session is continuing.
+ * A handoff artifact older than this has its SUMMARY ignored: whatever
+ * conversation it describes is no longer the thing a fresh session is
+ * continuing. It does NOT expire the rollover debt the same record carries —
+ * an owed rollover is a fact about a session that is still too full to resume,
+ * and age makes that more true, not less.
  */
 const CLAUDE_MAIN_HANDOFF_MAX_AGE_MS = 6 * 60 * 60_000;
+
+function isHandoffArtifactExpired(record: MainSessionHandoffRecord, now = Date.now()): boolean {
+  const createdAt = Date.parse(record.createdAt ?? "");
+  return Number.isFinite(createdAt) && now - createdAt > CLAUDE_MAIN_HANDOFF_MAX_AGE_MS;
+}
 
 /**
  * The persisted rollover record. It doubles as the pending-rollover flag: a
@@ -244,11 +273,43 @@ export class ClaudeMainAgentClient implements MainAgentClient {
    */
   private sdkActivityGeneration = 0;
   /**
-   * Effective input size (input + cache read + cache creation tokens) of the
-   * last completed turn, straight off the SDK result message. This is the only
-   * signal codex-chat gets about how full the resumed session's context is.
+   * Epoch ms of the last SDK message of any kind, and how many have arrived
+   * since the current turn started. Every message counts — streamed deltas,
+   * tool_use/tool_result traffic, the nested agents' messages that stream
+   * through this same query with `parent_tool_use_id` set, status events and
+   * `system`/`background_tasks_changed` — because the service watchdog uses
+   * this to tell a turn that is working from one that is wedged.
+   */
+  private lastSdkActivityAt = 0;
+  private turnActivityEvents = 0;
+  /**
+   * Set while this client is doing bounded work that legitimately produces no
+   * SDK messages at all — the inline session restart a context rollover does
+   * inside `sendTurn`, which may take up to `startupTimeoutSec` (90s) and so
+   * outlives the watchdog's inactivity budget on its own.
+   *
+   * The suspension carries its OWN expiry rather than relying on the code that
+   * set it to clear it. Everything it covers is a teardown/startup path that
+   * can itself hang (an `interrupt()` against a wedged child is the obvious
+   * one), and a suspension that leaked would disable the inactivity deadline
+   * permanently — the watchdog would be left with only the absolute ceiling,
+   * which never clears a session, so nothing would ever recover.
+   */
+  private watchdogSuspendedReason?: string;
+  private watchdogSuspendedUntil = 0;
+  /**
+   * How full the session's context window is, measured from the LAST single
+   * API request of the last completed turn. See `effectiveInputTokens`: the
+   * result message's `usage` is cumulative across every request in the turn,
+   * so it is not an occupancy figure at all.
    */
   private lastTurnInputTokens?: number;
+  /** Occupancy of the most recent main-session (non-subagent) API request. */
+  private lastMainRequestInputTokens?: number;
+  /** Context window the serving model reported, for logging and stats. */
+  private contextWindowTokens?: number;
+  /** Rate limiter for the "no occupancy signal at all" warning. */
+  private occupancyUnavailableLoggedAt = 0;
   /**
    * Set when a completed turn crossed `contextRolloverInputTokens`. Acted on at
    * the NEXT turn boundary — never mid-turn — so no in-flight work is lost.
@@ -263,6 +324,15 @@ export class ClaudeMainAgentClient implements MainAgentClient {
   private pendingHandoffSourceSessionId?: string;
   /** At most one summarization job in flight; a newer schedule supersedes. */
   private handoffSummaryInFlight = false;
+  /** Session the in-flight summarization job belongs to. */
+  private handoffSummaryFor?: string;
+  /**
+   * The most recent handoff-artifact write. `scheduleHandoffSummary` runs from
+   * a synchronous SDK message handler and so cannot await its own write; the
+   * turn boundary awaits this instead, which is what makes the persisted
+   * pending-rollover marker observable before the next turn acts on it.
+   */
+  private handoffArtifactWrite: Promise<void> = Promise.resolve();
   private readonly logBuffer = new LogBuffer(300);
 
   constructor(
@@ -317,14 +387,22 @@ export class ClaudeMainAgentClient implements MainAgentClient {
         "Claude Agent SDK main-loop OAuth readiness passed"
       );
 
-      const [bootstrap, behaviorHash, storedSessionId, storedBehaviorHash] = await Promise.all([
+      const [bootstrap, behaviorHash, storedSessionId, storedBehaviorHash, storedInputTokens] = await Promise.all([
         this.behavior.loadBootstrapPrompt(),
         this.behavior.hash(),
         this.state.getCodexSession(cfg.mainSessionName),
-        this.state.getCodexSessionBehaviorHash(cfg.mainSessionName)
+        this.state.getCodexSessionBehaviorHash(cfg.mainSessionName),
+        this.state.getCodexSessionInputTokens?.(cfg.mainSessionName)
       ]);
       this.currentBehaviorHash = behaviorHash;
       this.sessionId = storedSessionId;
+      // A resumed session arrives as full as it was left. Seeding occupancy
+      // means the rollover threshold and the watchdog's wedge evidence both
+      // work from the first turn after a restart rather than after one.
+      if (storedSessionId && storedInputTokens !== undefined) {
+        this.lastTurnInputTokens = storedInputTokens;
+        this.lastMainRequestInputTokens = storedInputTokens;
+      }
 
       // The handoff artifact is also the persisted pending-rollover flag, so
       // it is consulted BEFORE deciding whether to resume: a threshold that
@@ -418,6 +496,10 @@ export class ClaudeMainAgentClient implements MainAgentClient {
     if (this.activeTurn) {
       throw new Error("Claude Agent SDK main session already has an active turn.");
     }
+    // Fresh inactivity budget for the new turn: the watchdog treats an
+    // activity count of zero as "this turn never produced a single event".
+    this.turnActivityEvents = 0;
+    this.lastSdkActivityAt = Date.now();
     // Turn boundary: the only safe place to swap the underlying session.
     const rolledOver = await this.rolloverContextIfPending();
     if (!this.alive || !this.query || !this.inputQueue) {
@@ -432,6 +514,9 @@ export class ClaudeMainAgentClient implements MainAgentClient {
       queue: new AsyncEventQueue<MainAgentEvent>(),
       assistantText: "",
       partialText: "",
+      toolUseIds: new Set<string>(),
+      baselineBackgroundTaskIds: new Set(this.liveBackgroundTasks.map((task) => task.taskId)),
+      ownedBackgroundTaskIds: new Set<string>(),
       nudgeSent: false
     };
     this.activeTurn = turn;
@@ -503,16 +588,51 @@ export class ClaudeMainAgentClient implements MainAgentClient {
     }
     this.sessionId = undefined;
     this.lastTurnInputTokens = undefined;
+    this.lastMainRequestInputTokens = undefined;
     this.pendingContextRollover = undefined;
     this.logBuffer.append("event", `[SESSION] cleared persisted session reason=${reason}`);
   }
 
   contextStats(): MainAgentContextStats {
     return {
+      sessionId: this.sessionId,
       lastTurnInputTokens: this.lastTurnInputTokens,
       rolloverThresholdTokens: this.config.mainAgent.claude.contextRolloverInputTokens,
-      rolloverPending: this.pendingContextRollover !== undefined
+      rolloverPending: this.pendingContextRollover !== undefined,
+      contextWindowTokens: this.contextWindowTokens
     };
+  }
+
+  /**
+   * Liveness of the turn in flight, for the service watchdog. `lastActivityAt`
+   * is bumped by every SDK message, so a turn that is doing tool work or
+   * running nested agents reads as active even though it has emitted no
+   * user-visible output for minutes.
+   */
+  turnWatchdogState(): MainAgentTurnWatchdogState {
+    const suspended = this.watchdogSuspendedReason !== undefined && Date.now() < this.watchdogSuspendedUntil;
+    return {
+      lastActivityAt: this.lastSdkActivityAt || undefined,
+      activityEvents: this.turnActivityEvents,
+      suspended,
+      suspendedReason: suspended ? this.watchdogSuspendedReason : undefined
+    };
+  }
+
+  /**
+   * Pause the watchdog's inactivity deadline for at most `maxMs`, whatever
+   * happens to the work it covers. The expiry is the point: the caller's
+   * `finally` cannot be trusted to run when the thing being awaited is a
+   * potentially-hanging child process operation.
+   */
+  private suspendWatchdog(reason: string, maxMs: number): void {
+    this.watchdogSuspendedReason = reason;
+    this.watchdogSuspendedUntil = Date.now() + maxMs;
+  }
+
+  private resumeWatchdog(): void {
+    this.watchdogSuspendedReason = undefined;
+    this.watchdogSuspendedUntil = 0;
   }
 
   /**
@@ -524,6 +644,9 @@ export class ClaudeMainAgentClient implements MainAgentClient {
   private async rolloverContextIfPending(): Promise<{ inputTokens: number; previousSessionId?: string } | undefined> {
     const pending = this.pendingContextRollover;
     if (!pending) return undefined;
+    // The marker was written from a synchronous message handler that could not
+    // await it. Land it before anything reads or acts on it.
+    await this.flushHandoffArtifactWrite();
     if (await this.deferRolloverForHandoffSummary(pending.inputTokens)) return undefined;
     this.pendingContextRollover = undefined;
     const previousSessionId = this.sessionId;
@@ -538,6 +661,17 @@ export class ClaudeMainAgentClient implements MainAgentClient {
       "rolling the Claude main session over to a fresh one before it exhausts its context window"
     );
     this.logBuffer.append("event", `[SESSION] context rollover input_tokens=${pending.inputTokens}`);
+    // stop()/start() emits no SDK messages and may take up to startupTimeoutSec
+    // (90s), which is longer than the watchdog's inactivity budget. Suspend the
+    // deadline across it rather than letting the watchdog shoot a rollover
+    // mid-startup; the absolute ceiling still bounds the turn. The suspension
+    // expires on its own (teardown + startup, doubled) so a hang below cannot
+    // strand the watchdog even though the `finally` would never run.
+    const cfg = this.config.mainAgent.claude;
+    this.suspendWatchdog(
+      "context_rollover_restart",
+      (cfg.interruptTimeoutSec + cfg.startupTimeoutSec) * 2_000
+    );
     try {
       await this.stop();
       await this.clearPersistedSession("context_rollover");
@@ -549,6 +683,9 @@ export class ClaudeMainAgentClient implements MainAgentClient {
         "failed to roll the Claude main session over to a fresh session"
       );
       throw error;
+    } finally {
+      this.resumeWatchdog();
+      this.lastSdkActivityAt = Date.now();
     }
     return { inputTokens: pending.inputTokens, previousSessionId };
   }
@@ -568,7 +705,11 @@ export class ClaudeMainAgentClient implements MainAgentClient {
   private async deferRolloverForHandoffSummary(scheduledInputTokens: number): Promise<boolean> {
     const cfg = this.config.mainAgent.claude;
     const record = await this.readHandoffArtifact();
-    if (!record || record.forSessionId !== this.sessionId || record.status !== "pending") return false;
+    const artifactPending = record?.forSessionId === this.sessionId && record?.status === "pending";
+    // In-memory truth wins over the artifact: the job is unambiguously running
+    // here, whereas a `pending` record only means nothing has overwritten it.
+    const summaryRunning = this.handoffSummaryInFlight && this.handoffSummaryFor === this.sessionId;
+    if (!artifactPending && !summaryRunning) return false;
     const inputTokens = Math.max(this.lastTurnInputTokens ?? 0, scheduledInputTokens);
     if (inputTokens >= cfg.contextRolloverHardCapTokens) return false;
     this.logger.info(
@@ -579,7 +720,8 @@ export class ClaudeMainAgentClient implements MainAgentClient {
         inputTokens,
         thresholdTokens: cfg.contextRolloverInputTokens,
         hardCapTokens: cfg.contextRolloverHardCapTokens,
-        artifactStatus: record.status
+        artifactStatus: record?.status,
+        summaryRunning
       },
       "holding the Claude main-session rollover until its handoff summary resolves"
     );
@@ -592,8 +734,18 @@ export class ClaudeMainAgentClient implements MainAgentClient {
    * arm a rollover once it crosses the configured threshold.
    */
   private recordTurnUsage(message: Extract<ClaudeSdkMessage, { type: "result" }>): void {
-    const inputTokens = effectiveInputTokens(message);
-    if (inputTokens === undefined) return;
+    this.contextWindowTokens = reportedContextWindow(message) ?? this.contextWindowTokens;
+    const inputTokens = effectiveInputTokens(message, this.lastMainRequestInputTokens);
+    if (inputTokens === undefined) {
+      // Both signals gone. This is not cosmetic: with no occupancy figure the
+      // rollover never arms AND the watchdog loses its wedge evidence, so the
+      // session grows unbounded and aborts stop being able to recover it.
+      // Rate-limited because a broken shape would repeat every single turn.
+      this.reportOccupancyUnavailable();
+      return;
+    }
+    this.occupancyUnavailableLoggedAt = 0;
+    this.persistOccupancy(inputTokens);
     this.lastTurnInputTokens = inputTokens;
     const threshold = this.config.mainAgent.claude.contextRolloverInputTokens;
     this.logBuffer.append("event", `[USAGE] input_tokens=${inputTokens} rollover_threshold=${threshold}`, true);
@@ -616,29 +768,54 @@ export class ClaudeMainAgentClient implements MainAgentClient {
    * Persist the rollover record and summarize the doomed conversation OUT of
    * band. Deliberately fire-and-forget: user turns must never wait on this,
    * and the summarizer must never run against the near-full main session.
+   *
+   * Ordering matters twice over. The record doubles as the persisted
+   * pending-rollover flag, so it is written FIRST and unconditionally —
+   * skipping the write because summarization is off, or because another
+   * summarizer is still running, used to leave a restart in that window free
+   * to resume a session that was already owed a rollover. And the write is
+   * kicked off synchronously (its promise parked on `handoffArtifactWrite`)
+   * because the next turn boundary can arrive before any await here resolves;
+   * that boundary awaits the promise instead of racing the file.
    */
   private scheduleHandoffSummary(sessionId: string | undefined, inputTokens: number): void {
     const cfg = this.config.mainAgent.claude;
     if (!sessionId) return;
-    if (this.handoffSummaryInFlight) return;
     const startedAt = Date.now();
+    // "pending" means a summarizer is being started for this record right now,
+    // and is what makes the next boundary wait for the brief. Anything else is
+    // marked terminal so nothing ever waits on a summary that will not come.
+    const willSummarize = cfg.handoffSummaryEnabled && !this.handoffSummaryInFlight;
     const record: MainSessionHandoffRecord = {
       forSessionId: sessionId,
       createdAt: nowIso(),
       inputTokensAtSchedule: inputTokens,
-      // The record is also the persisted pending-rollover flag, so it is
-      // written even with summarization off — a restart before the next turn
-      // must still refuse to resume this session.
-      status: cfg.handoffSummaryEnabled ? "pending" : "skipped"
+      status: willSummarize ? "pending" : "skipped"
     };
-    if (!cfg.handoffSummaryEnabled) {
-      void this.writeHandoffArtifact(record).catch(() => undefined);
+    this.handoffArtifactWrite = this.writeHandoffArtifact(record).catch((error) => {
+      this.logger.warn(
+        { component: "claude-main-agent", event: "handoff_write_failed", forSessionId: sessionId, error: this.redactError(error) },
+        "failed to persist the Claude main-session rollover marker"
+      );
+    });
+    if (!willSummarize) {
+      this.logger.info(
+        {
+          component: "claude-main-agent",
+          event: "handoff_summary_skipped",
+          sessionId,
+          inputTokens,
+          reason: cfg.handoffSummaryEnabled ? "summary_already_in_flight" : "disabled"
+        },
+        "wrote the rollover marker without scheduling a handoff summary"
+      );
       return;
     }
     this.handoffSummaryInFlight = true;
+    this.handoffSummaryFor = sessionId;
     void (async () => {
       try {
-        await this.writeHandoffArtifact(record);
+        await this.handoffArtifactWrite;
         this.logger.info(
           {
             component: "claude-main-agent",
@@ -690,8 +867,48 @@ export class ClaudeMainAgentClient implements MainAgentClient {
         this.logBuffer.append("event", "[HANDOFF] summary failed");
       } finally {
         this.handoffSummaryInFlight = false;
+        if (this.handoffSummaryFor === sessionId) this.handoffSummaryFor = undefined;
       }
     })();
+  }
+
+  /**
+   * Carry occupancy across restarts alongside the session id it describes.
+   * Fire-and-forget: a failed write costs post-restart wedge evidence, which
+   * is not worth failing or delaying a turn for.
+   */
+  private persistOccupancy(inputTokens: number): void {
+    const sessionId = this.sessionId;
+    if (!sessionId) return;
+    void this.state
+      .setCodexSession(this.config.mainAgent.claude.mainSessionName, { sessionId, lastInputTokens: inputTokens })
+      .catch((error) => {
+        this.logger.debug?.(
+          { component: "claude-main-agent", event: "occupancy_persist_failed", error: this.redactError(error) },
+          "failed to persist Claude main-session context occupancy"
+        );
+      });
+  }
+
+  private reportOccupancyUnavailable(): void {
+    const now = Date.now();
+    if (now - this.occupancyUnavailableLoggedAt < OCCUPANCY_UNAVAILABLE_LOG_INTERVAL_MS) return;
+    this.occupancyUnavailableLoggedAt = now;
+    this.logger.warn(
+      {
+        component: "claude-main-agent",
+        event: "context_occupancy_unavailable",
+        sessionId: this.sessionId,
+        thresholdTokens: this.config.mainAgent.claude.contextRolloverInputTokens
+      },
+      "a completed turn carried no per-request usage; context rollover and watchdog wedge evidence are both blind until it returns"
+    );
+    this.logBuffer.append("event", "[USAGE] no per-request occupancy signal available");
+  }
+
+  /** Let any in-flight handoff-artifact write land before reading it. */
+  private async flushHandoffArtifactWrite(): Promise<void> {
+    await this.handoffArtifactWrite.catch(() => undefined);
   }
 
   /**
@@ -700,8 +917,51 @@ export class ClaudeMainAgentClient implements MainAgentClient {
    * to it when the process last stopped.
    */
   private async evaluateStartupHandoff(storedSessionId?: string): Promise<boolean> {
-    const record = await this.readHandoffArtifact();
+    // Read past the age bound here. The record carries two independent things:
+    // a brief (which does go stale) and a rollover DEBT (which does not). If a
+    // process is down for more than six hours with a rollover owed, the
+    // session it names is still too full to resume — expiring the debt with
+    // the brief resumed it straight back into the wedge.
+    let record = await this.readRawHandoffArtifact();
     if (!record) return false;
+    const expired = isHandoffArtifactExpired(record);
+    if (expired && !(storedSessionId && record.forSessionId === storedSessionId && !record.abandoned)) {
+      // Stale and owed to nobody: nothing to carry, nothing to enforce.
+      return false;
+    }
+    if (expired) {
+      this.logger.warn(
+        {
+          component: "claude-main-agent",
+          event: "handoff_expired_rollover_forced",
+          sessionId: storedSessionId,
+          createdAt: record.createdAt,
+          inputTokensAtSchedule: record.inputTokensAtSchedule
+        },
+        "the rollover owed to the persisted Claude main session outlived its handoff brief; starting fresh without one"
+      );
+      // Drop the summary so the fresh session is never handed a stale brief,
+      // but keep the debt so the branch below still refuses the resume.
+      record = { ...record, status: "failed", summary: undefined };
+      await this.patchHandoffArtifact(record.forSessionId, { status: "failed", summary: undefined });
+    }
+    // A "pending" record with no summarizer behind it is orphaned — the
+    // process that owned the job is gone. Mark it terminal so the consume path
+    // stops waiting for a brief that will never arrive. Never do this while a
+    // job really is running (the rollover restart calls start() mid-job).
+    if (record.status === "pending" && !this.handoffSummaryInFlight) {
+      this.logger.info(
+        {
+          component: "claude-main-agent",
+          event: "handoff_summary_orphaned",
+          forSessionId: record.forSessionId,
+          createdAt: record.createdAt
+        },
+        "handoff summary was still pending when the process last stopped; marking it failed"
+      );
+      await this.patchHandoffArtifact(record.forSessionId, { status: "failed" });
+      record = { ...record, status: "failed" };
+    }
     if (storedSessionId && record.forSessionId === storedSessionId && !record.abandoned) {
       this.logger.warn(
         {
@@ -730,15 +990,59 @@ export class ClaudeMainAgentClient implements MainAgentClient {
 
   /**
    * Take the handoff brief owed to this fresh session, if one is ready. Reads
-   * only what is already persisted — a summary still generating is skipped,
-   * never awaited — and invalidates the artifact either way so it can never be
-   * replayed into a later session.
+   * only what is already persisted — a summary still generating is never
+   * awaited — and invalidates the artifact once it has been resolved, so a
+   * consumed or dead brief can never be replayed into a later session.
+   *
+   * A brief that is still `pending` is LEFT ALONE and stays owed to a later
+   * turn. Discarding it here (which is what clearing the artifact before
+   * checking its status did) threw away briefs that finished seconds later:
+   * on 2026-08-17 the boundary skipped an unready summary at 17:05:02, the
+   * summarizer completed at 17:05:19, and its write found nothing to patch.
+   * The age bound in `readHandoffArtifact` is what stops an orphaned pending
+   * record from being retried forever.
    */
   private async consumeHandoffSummary(rolledOver: boolean): Promise<string | undefined> {
     const source = this.pendingHandoffSourceSessionId;
     if (!source) return undefined;
     this.pendingHandoffSourceSessionId = undefined;
+    await this.flushHandoffArtifactWrite();
+    const raw = await this.readRawHandoffArtifact();
+    // Expired but ours: the debt it carried has already been enforced at
+    // startup, and the brief is too old to hand on. Retire the file rather
+    // than leaving an inert record behind.
+    if (raw?.forSessionId === source && isHandoffArtifactExpired(raw)) {
+      await this.clearHandoffArtifact();
+      this.logger.info(
+        {
+          component: "claude-main-agent",
+          event: "handoff_skipped_stale",
+          expectedSessionId: source,
+          artifactSessionId: raw.forSessionId,
+          expired: true,
+          rolledOver
+        },
+        "the handoff brief for the abandoned Claude main session had expired; using the plain note"
+      );
+      return undefined;
+    }
     const record = await this.readHandoffArtifact();
+    if (record?.forSessionId === source && record.status === "pending") {
+      // Still generating (or a fresh process that has not yet reconciled it):
+      // keep the debt, keep the artifact, and try again at a later boundary.
+      this.pendingHandoffSourceSessionId = source;
+      this.logger.info(
+        {
+          component: "claude-main-agent",
+          event: "handoff_deferred_unready",
+          previousSessionId: source,
+          sessionId: this.sessionId,
+          rolledOver
+        },
+        "handoff brief is still generating; keeping it owed to a later turn rather than discarding it"
+      );
+      return undefined;
+    }
     if (!record || record.forSessionId !== source) {
       this.logger.info(
         {
@@ -781,12 +1085,22 @@ export class ClaudeMainAgentClient implements MainAgentClient {
     return record.summary;
   }
 
+  /**
+   * The artifact with the age bound applied — i.e. the one whose SUMMARY is
+   * still worth carrying. Use `readRawHandoffArtifact` for the rollover debt,
+   * which never expires.
+   */
   private async readHandoffArtifact(): Promise<MainSessionHandoffRecord | undefined> {
+    const record = await this.readRawHandoffArtifact();
+    if (!record) return undefined;
+    return isHandoffArtifactExpired(record) ? undefined : record;
+  }
+
+  /** The artifact exactly as stored, age bound NOT applied. */
+  private async readRawHandoffArtifact(): Promise<MainSessionHandoffRecord | undefined> {
     try {
       const record = await this.state.readJson<MainSessionHandoffRecord | null>(CLAUDE_MAIN_HANDOFF_FILE, null);
       if (!record || typeof record !== "object" || typeof record.forSessionId !== "string") return undefined;
-      const createdAt = Date.parse(record.createdAt ?? "");
-      if (Number.isFinite(createdAt) && Date.now() - createdAt > CLAUDE_MAIN_HANDOFF_MAX_AGE_MS) return undefined;
       return record;
     } catch (error) {
       this.logger.warn(
@@ -957,12 +1271,93 @@ export class ClaudeMainAgentClient implements MainAgentClient {
     // Any SDK message means the session is not quiet, so a pending quiet-parent
     // release must be cancelled and re-armed only once it goes silent again.
     this.sdkActivityGeneration += 1;
+    // Same signal, different consumer: the service watchdog aborts on silence,
+    // so anything the session emits — including a nested agent's tool traffic
+    // relayed through this query — resets its inactivity budget.
+    //
+    // Scoped to an open turn, and within that to traffic ATTRIBUTABLE to it.
+    // The SDK's message stream is SESSION-scoped: `background_tasks_changed`
+    // fires for a dev server some earlier turn backgrounded, and
+    // `tool_progress` keeps ticking for whatever is running. Counting
+    // unattributable traffic would let a chatty leftover hold the inactivity
+    // budget open while the conversation itself is wedged — the precise
+    // failure this watchdog exists to catch — leaving only the 30-minute
+    // ceiling, i.e. an endless half-hour abort loop.
+    const turn = this.activeTurn;
+    if (turn) {
+      this.registerTurnToolUses(turn, message);
+      if (this.countsAsTurnActivity(turn, message)) {
+        this.lastSdkActivityAt = Date.now();
+        this.turnActivityEvents += 1;
+      }
+    }
     this.clearNestedDrainTimer();
     try {
       this.routeSdkMessage(message);
     } finally {
       this.armNestedDrainTimerIfIdle();
     }
+  }
+
+  /**
+   * Record every `tool_use` this turn issues, at any depth. Nested agents'
+   * assistant messages arrive on the same query with `parent_tool_use_id` set,
+   * and their tool calls are still work this turn is waiting on, so their ids
+   * belong in the same set — otherwise a nested agent running one long silent
+   * Bash would look like a stalled turn.
+   */
+  private registerTurnToolUses(turn: ActiveTurn, message: ClaudeSdkMessage): void {
+    if (message.type !== "assistant") return;
+    const content = message.message?.content;
+    if (!Array.isArray(content)) return;
+    for (const block of content) {
+      if (!block || typeof block !== "object") continue;
+      const record = block as unknown as Record<string, unknown>;
+      if (record.type === "tool_use" && typeof record.id === "string") turn.toolUseIds.add(record.id);
+    }
+  }
+
+  /**
+   * Whether an SDK message is evidence that THIS turn is progressing.
+   *
+   * Almost everything is: any message at all proves the CLI child is not
+   * blocked (the 2026-08-07 wedge produced literally nothing). Two message
+   * types are session-scoped rather than turn-scoped and need attributing:
+   *
+   * - `tool_progress`. In production this is ONLY ever a 30-second heartbeat:
+   *   all 15 such messages captured in this repo's `data/subagents/` streams
+   *   carry `heartbeat: true`, and none carries a null `parent_tool_use_id`.
+   *   Excluding heartbeats outright therefore does not exclude "noise", it
+   *   makes every tool call longer than the inactivity budget unfinishable —
+   *   job_46baa638's single Bash ran 119.8s emitting nothing but heartbeats
+   *   and would have been aborted ~40s from the finish line. So a heartbeat
+   *   IS activity, provided it belongs to a call this turn made.
+   * - `background_tasks_changed`. Attributable only when the change involves a
+   *   task this turn launched; a previous turn's task starting or stopping is
+   *   not this turn's progress.
+   */
+  private countsAsTurnActivity(turn: ActiveTurn, message: ClaudeSdkMessage): boolean {
+    if (message.type === "tool_progress") {
+      const originating = message.parent_tool_use_id;
+      return typeof originating === "string" && turn.toolUseIds.has(originating);
+    }
+    if (message.type === "system" && message.subtype === "background_tasks_changed") {
+      const incoming = normalizeClaudeBackgroundTasks(message.tasks ?? []);
+      let attributable = false;
+      for (const task of incoming) {
+        if (turn.baselineBackgroundTaskIds.has(task.taskId)) continue;
+        turn.ownedBackgroundTaskIds.add(task.taskId);
+        attributable = true;
+      }
+      if (attributable) return true;
+      // A task this turn launched disappearing is this turn's progress too.
+      const liveIds = new Set(incoming.map((task) => task.taskId));
+      for (const owned of turn.ownedBackgroundTaskIds) {
+        if (!liveIds.has(owned)) return true;
+      }
+      return false;
+    }
+    return true;
   }
 
   private routeSdkMessage(message: ClaudeSdkMessage): void {
@@ -986,6 +1381,12 @@ export class ClaudeMainAgentClient implements MainAgentClient {
       }
       const previousSessionId = this.sessionId;
       this.sessionId = message.session_id;
+      if (previousSessionId !== message.session_id) {
+        // Occupancy belongs to a conversation, not to the client: a different
+        // session id means the old figure describes something that is gone.
+        this.lastMainRequestInputTokens = undefined;
+        this.lastTurnInputTokens = undefined;
+      }
       if (previousSessionId && previousSessionId !== message.session_id) {
         this.logger.warn(
           {
@@ -1005,6 +1406,23 @@ export class ClaudeMainAgentClient implements MainAgentClient {
         );
       });
       return;
+    }
+
+    // Context occupancy is read off individual assistant messages, before the
+    // active-turn guard. Each one carries the usage of the ONE API request that
+    // produced it, which is the only per-request figure the stream offers; the
+    // result message's `usage` is summed over the whole turn. Subagent messages
+    // (`parent_tool_use_id` set) describe a different conversation entirely and
+    // must never be mistaken for this session's occupancy.
+    //
+    // Last write wins, deliberately NOT a running maximum. Occupancy is not
+    // monotonic: SDK-side auto-compaction can shrink a session's context in
+    // place, and a ratcheted high-water mark would then read as "near full"
+    // forever — arming rollovers on an empty session and, worse, making every
+    // watchdog abort look like wedge evidence and destroy a healthy session.
+    if (message.type === "assistant" && message.parent_tool_use_id === null) {
+      const occupancy = assistantRequestInputTokens(message);
+      if (occupancy !== undefined) this.lastMainRequestInputTokens = occupancy;
     }
 
     // Usage is recorded before the active-turn guard: a result that arrives
@@ -1134,9 +1552,12 @@ export class ClaudeMainAgentClient implements MainAgentClient {
       raw: { event: "claude_result_held_for_nested_agents", nestedAgents: count }
     });
     if (!firstHold || turn.holdTimer) return;
-    // Absolute bound: the service watchdog force-aborts any main turn older
-    // than TURN_ABORT_MS and tells the user it timed out, so the hold has to
-    // release on its own well before that.
+    // Absolute bound. The service watchdog aborts on SILENCE, and a hold is not
+    // silent while the nested agents work — their tool traffic streams through
+    // this query and resets the budget. The only quiet stretch is the
+    // post-drain settle/nudge window, so this cap simply has to stay under
+    // `service.turnInactivityAbortMs` (55s against 80s) to guarantee the hold
+    // always releases itself rather than being killed.
     turn.holdTimer = setTimeout(() => {
       turn.holdTimer = undefined;
       this.releaseHeldResultOnMaxHold(turn);
@@ -1288,11 +1709,21 @@ export class ClaudeMainAgentClient implements MainAgentClient {
     if (!query) return;
     if (interrupt) {
       try {
-        await query.interrupt();
+        // Bounded on purpose. `interrupt()` is a round trip to the CLI child,
+        // and the single case that most needs interrupting — a child wedged on
+        // a near-full session — is also the one most likely never to answer.
+        // An unbounded await here hangs stop(), and with it the rollover,
+        // provider switches and shutdown.
+        const interruptTimeoutMs = this.config.mainAgent.claude.interruptTimeoutSec * 1000;
+        await withTimeout(
+          query.interrupt(),
+          interruptTimeoutMs,
+          `Claude Agent SDK interrupt did not complete within ${interruptTimeoutMs}ms`
+        );
       } catch (error) {
         this.logger.warn(
           { component: "claude-main-agent", event: "interrupt_failed", error: this.redactError(error) },
-          "Claude Agent SDK interrupt failed; closing query"
+          "Claude Agent SDK interrupt failed or timed out; closing query"
         );
       }
     }
@@ -1302,13 +1733,22 @@ export class ClaudeMainAgentClient implements MainAgentClient {
   private async persistSession(sessionId: string, behaviorHash = this.currentBehaviorHash): Promise<void> {
     if (!behaviorHash) throw new Error("Cannot persist Claude Agent SDK session before behavior hash is available.");
     const cfg = this.config.mainAgent.claude;
-    await this.state.setCodexSession(cfg.mainSessionName, {
+    const record: Record<string, unknown> = {
       sessionId,
       provider: "claude_agent_sdk",
       transport: "claude-agent-sdk",
       model: cfg.model,
       behaviorHash
-    });
+    };
+    // `setCodexSession` MERGES, so a persisted occupancy figure outlives the
+    // session id it was measured against unless it is explicitly dropped.
+    // Pairing a new id with the old session's tokens is actively dangerous: a
+    // restart before the new session completes a turn would re-seed a false
+    // "≥ threshold" occupancy, arming a bogus rollover and handing the
+    // watchdog fabricated wedge evidence against a healthy conversation.
+    const storedSessionId = await this.state.getCodexSession(cfg.mainSessionName);
+    if (storedSessionId !== sessionId) record.lastInputTokens = undefined;
+    await this.state.setCodexSession(cfg.mainSessionName, record);
   }
 
   private async buildUserMessage(text: string, attachments: Attachment[]): Promise<ClaudeSdkUserMessage> {
@@ -1389,34 +1829,98 @@ function deferred<T>(): Deferred<T> {
 }
 
 /**
- * Effective context size of the API call that produced this result: fresh
- * input plus everything served from (or written to) the prompt cache. Cached
- * tokens still occupy the context window, so they must be counted.
+ * How full the session's context window is after this turn.
  *
- * `SDKResultSuccess.usage` (NonNullableUsage) is the last request's usage and
- * is the authoritative figure. `modelUsage` (Record<string, ModelUsage>) is
- * summed across every request in the turn, so it is only a fallback for older
- * shapes — the largest single model entry is the closest available proxy.
+ * The prompt size of ONE API request is `input_tokens + cache_read + cache_
+ * creation` — cached tokens still occupy the window, so they must be counted.
+ * The trap is that a result message's `usage` is not one request: the SDK sums
+ * it over every request the agentic loop made for the turn. Verified against
+ * SDK 0.3.220 on 2026-08-17 with a four-request turn:
+ *
+ *   per request  1632, 1710, 1788, 1866   (real occupancy: 1866)
+ *   result.usage 8 + 5124 + 1864 = 6996   (the sum of all four)
+ *
+ * `modelUsage` is the same sum keyed by model, so it is no better. Reading
+ * `usage` as occupancy therefore overstates it by roughly the number of tool
+ * round-trips — which is how a 1M-token window produced "2,050,378 effective
+ * input tokens" in production and armed rollovers against sessions that were
+ * nowhere near full.
+ *
+ * Preference order, most to least direct:
+ *  1. `mainRequestInputTokens` — tracked from the parent session's own
+ *     assistant messages, each of which carries exactly one request's usage.
+ *  2. `usage.iterations` — the SDK's per-iteration breakdown, whose last entry
+ *     is the final request. Not in the published types; read defensively.
  */
-function effectiveInputTokens(message: Extract<ClaudeSdkMessage, { type: "result" }>): number | undefined {
+function effectiveInputTokens(
+  message: Extract<ClaudeSdkMessage, { type: "result" }>,
+  mainRequestInputTokens?: number
+): number | undefined {
+  if (mainRequestInputTokens !== undefined && mainRequestInputTokens > 0) return mainRequestInputTokens;
   const record = message as unknown as Record<string, unknown>;
   const usage = record.usage as Record<string, unknown> | undefined;
-  const fromUsage =
-    numberOrZero(usage?.input_tokens) +
-    numberOrZero(usage?.cache_read_input_tokens) +
-    numberOrZero(usage?.cache_creation_input_tokens);
-  if (fromUsage > 0) return fromUsage;
+  const iterations = usage?.iterations;
+  if (!Array.isArray(iterations) || iterations.length === 0) return undefined;
+  // `iterations` IS typed — `BetaUsage.iterations: BetaIterationsUsage | null`
+  // in @anthropic-ai/sdk 0.110.0, reaching this message through
+  // `NonNullableUsage` — but it is null on most results, and the union's
+  // members are not uniform: only the per-message entries carry prompt
+  // counters (a `fallback_message` entry, for instance, does not). Walk
+  // backwards to the last entry that actually carries them rather than
+  // trusting the tail.
+  for (let index = iterations.length - 1; index >= 0; index--) {
+    const entry = iterations[index] as Record<string, unknown> | undefined;
+    if (!entry || typeof entry !== "object") continue;
+    if (typeof entry.type === "string" && entry.type !== "message") continue;
+    if (!hasRequestTokenFields(entry)) continue;
+    const total = requestInputTokens(entry);
+    if (total > 0) return total;
+  }
+  return undefined;
+}
 
-  const modelUsage = record.modelUsage as Record<string, Record<string, unknown>> | undefined;
+/** A usage-shaped record carries at least one of the three prompt counters. */
+function hasRequestTokenFields(entry: Record<string, unknown>): boolean {
+  return (
+    typeof entry.input_tokens === "number" ||
+    typeof entry.cache_read_input_tokens === "number" ||
+    typeof entry.cache_creation_input_tokens === "number"
+  );
+}
+
+/** Prompt size of the single API request that produced an assistant message. */
+function assistantRequestInputTokens(
+  message: Extract<ClaudeSdkMessage, { type: "assistant" }>
+): number | undefined {
+  const usage = (message.message as unknown as Record<string, unknown> | undefined)?.usage;
+  if (!usage || typeof usage !== "object") return undefined;
+  const total = requestInputTokens(usage as Record<string, unknown>);
+  return total > 0 ? total : undefined;
+}
+
+function requestInputTokens(usage: Record<string, unknown>): number {
+  return (
+    numberOrZero(usage.input_tokens) +
+    numberOrZero(usage.cache_read_input_tokens) +
+    numberOrZero(usage.cache_creation_input_tokens)
+  );
+}
+
+/**
+ * The serving model's context window, off `modelUsage`. Unlike the token
+ * counts there this is a static model property, so the cumulative-sum problem
+ * does not apply; it is what makes an occupancy figure interpretable.
+ */
+function reportedContextWindow(message: Extract<ClaudeSdkMessage, { type: "result" }>): number | undefined {
+  const modelUsage = (message as unknown as Record<string, unknown>).modelUsage as
+    | Record<string, Record<string, unknown>>
+    | undefined;
   if (!modelUsage || typeof modelUsage !== "object") return undefined;
   let largest = 0;
   for (const entry of Object.values(modelUsage)) {
     if (!entry || typeof entry !== "object") continue;
-    const total =
-      numberOrZero(entry.inputTokens) +
-      numberOrZero(entry.cacheReadInputTokens) +
-      numberOrZero(entry.cacheCreationInputTokens);
-    if (total > largest) largest = total;
+    const window = numberOrZero(entry.contextWindow);
+    if (window > largest) largest = window;
   }
   return largest > 0 ? largest : undefined;
 }

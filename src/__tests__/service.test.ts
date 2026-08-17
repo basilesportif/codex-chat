@@ -9,7 +9,7 @@ import { sendIpcMessage } from "../ipc.js";
 import { authorize } from "../capabilities.js";
 import { capabilityRegistry, registryVersion } from "../capability-registry.js";
 import { formatTelegramReplyContextBlock, injectFilePath, INJECT_TELEGRAM_USER_ID, parseMainProviderCommand, ServiceSupervisor } from "../service.js";
-import type { CodexEvent, SubagentJob, UserEvent } from "../types.js";
+import type { CodexEvent, MainAgentContextStats, MainAgentTurnWatchdogState, SubagentJob, UserEvent } from "../types.js";
 
 const tempDirs: string[] = [];
 const services: ServiceSupervisor[] = [];
@@ -164,6 +164,28 @@ function makeService(...args: ConstructorParameters<typeof ServiceSupervisor>): 
   const service = new ServiceSupervisor(...args);
   services.push(service);
   return service;
+}
+
+/**
+ * Stand in for what the live Claude provider reports to the watchdog: how full
+ * its session's context is, and whether the current turn is showing any signs
+ * of life. Providers that report neither (Codex) stay on the wall clock.
+ */
+function stubWatchdogTelemetry(
+  service: ServiceSupervisor,
+  contextStats: MainAgentContextStats = {},
+  watchdogState: MainAgentTurnWatchdogState = { activityEvents: 0, suspended: false }
+): void {
+  vi.spyOn(service.codex, "contextStats").mockReturnValue(contextStats);
+  vi.spyOn(service.codex, "turnWatchdogState").mockReturnValue(watchdogState);
+}
+
+/** Backdate the running turn: started `ageMs` ago and silent ever since. */
+function ageRunningTurn(service: ServiceSupervisor, ageMs: number): void {
+  const startedAt = new Date(Date.now() - ageMs);
+  const internals = service as unknown as { turnStartedAt: Date; turnLastActivityAt: Date };
+  internals.turnStartedAt = startedAt;
+  internals.turnLastActivityAt = startedAt;
 }
 
 function userEvent(messageId: number, text = `message ${messageId}`): UserEvent {
@@ -784,7 +806,15 @@ describe("service supervisor", () => {
 
     await service.enqueueUserEvent(userEvent(1));
     await service.enqueueUserEvent(userEvent(2));
-    const abortPromise = (service as unknown as { forceAbortStuckTurn(): Promise<void> }).forceAbortStuckTurn();
+    const abortPromise = (service as unknown as {
+      forceAbortStuckTurn(decision: Record<string, unknown>): Promise<void>;
+    }).forceAbortStuckTurn({
+      kind: "wall_clock",
+      ageMs: 80_001,
+      inactiveMs: 80_001,
+      activityEvents: 0,
+      limitMs: 80_000
+    });
     await flush();
     await service.enqueueUserEvent(userEvent(3));
     firstTurn.resolve();
@@ -832,6 +862,252 @@ describe("service supervisor", () => {
     await vi.waitFor(() => expect(start).toHaveBeenCalledTimes(2));
   });
 
+  test("streamed main-agent events reset the inactivity budget of an old turn", async () => {
+    // Supervisor-level half of the activity signal: even if the provider
+    // reports nothing new, an event that reached consumeCodexStream is proof
+    // the turn is alive.
+    const config = await loadTestConfig("app-server", "\n[mainAgent]\nprovider = \"claude_agent_sdk\"\n");
+    const service = makeService(config, createLogger("silent"));
+    await service.state.init();
+    vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+    vi.spyOn(service.telegram, "notifyOps").mockResolvedValue();
+    const restartCodex = vi.spyOn(service as unknown as { restartCodex(reason: string): Promise<void> }, "restartCodex").mockResolvedValue();
+    // The provider itself has seen nothing for two minutes.
+    stubWatchdogTelemetry(service, {}, { lastActivityAt: Date.now() - 120_000, activityEvents: 0, suspended: false });
+    const releaseTurn = deferred();
+    const streamed = deferred();
+    vi.spyOn(service.codex, "sendTurn").mockImplementation(async function* (): AsyncIterable<CodexEvent> {
+      yield { type: "delta", text: "still working" };
+      streamed.resolve();
+      await releaseTurn.promise;
+      yield { type: "final", text: "done" };
+    });
+
+    await service.enqueueUserEvent(userEvent(96, "long task"));
+    await streamed.promise;
+    // Backdate only the start: the streamed delta is what has to save the turn.
+    (service as unknown as { turnStartedAt: Date }).turnStartedAt = new Date(Date.now() - 600_000);
+    await (service as unknown as { checkTurnTimeout(): Promise<void> }).checkTurnTimeout();
+
+    expect((service as unknown as { turnRunning: boolean }).turnRunning).toBe(true);
+    expect(restartCodex).not.toHaveBeenCalled();
+
+    // Silence from here: the same turn is aborted once the budget is spent.
+    ageRunningTurn(service, 600_000);
+    await (service as unknown as { checkTurnTimeout(): Promise<void> }).checkTurnTimeout();
+    expect(restartCodex).toHaveBeenCalled();
+    releaseTurn.resolve();
+  });
+
+  test("the Codex provider reports no liveness and so keeps the wall-clock watchdog", async () => {
+    // Parity guard: nothing about the activity-based path may reach Codex mode.
+    const config = await loadTestConfig();
+    const service = makeService(config, createLogger("silent"));
+    expect(service.codex.turnWatchdogState()).toBeUndefined();
+  });
+
+  test("a provider reporting no liveness gets exact wall-clock semantics, even in Claude mode", async () => {
+    // Pins the FALLBACK rather than the plumbing: absent turnWatchdogState()
+    // the abort must be age-based, use the original notice, and clear the
+    // session unconditionally — whichever provider is active.
+    const config = await loadTestConfig("app-server", "\n[mainAgent]\nprovider = \"claude_agent_sdk\"\n");
+    const service = makeService(config, createLogger("silent"));
+    await service.state.init();
+    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+    const notifyOps = vi.spyOn(service.telegram, "notifyOps").mockResolvedValue();
+    const restartCodex = vi.spyOn(service as unknown as { restartCodex(reason: string): Promise<void> }, "restartCodex").mockResolvedValue();
+    vi.spyOn(service.codex, "turnWatchdogState").mockReturnValue(undefined);
+    // Healthy by every other measure: only the missing liveness signal decides.
+    vi.spyOn(service.codex, "contextStats").mockReturnValue({ lastTurnInputTokens: 1_000, rolloverThresholdTokens: 800_000 });
+    const blockedTurn = deferred();
+    vi.spyOn(service as unknown as { processEvent(event: UserEvent): Promise<void> }, "processEvent").mockReturnValue(blockedTurn.promise);
+
+    await service.state.setCodexSession("codex-chat-main-claude", { sessionId: "no-liveness-session", provider: "claude_agent_sdk" });
+    await service.enqueueUserEvent(userEvent(97));
+    // Only the age is old; activity is recent and would save an activity-based
+    // turn. The wall clock must ignore it.
+    (service as unknown as { turnStartedAt: Date }).turnStartedAt = new Date(Date.now() - 80_001);
+    await (service as unknown as { checkTurnTimeout(): Promise<void> }).checkTurnTimeout();
+
+    expect(sendText).toHaveBeenCalledWith(253768951, "⚠️ Your previous request timed out after 80 seconds. Please resend your message.", 97);
+    expect(notifyOps).toHaveBeenCalledWith(expect.stringMatching(/^Watchdog: aborted a turn that had been running for \d+ms \(chat=253768951, source=telegram\)\.$/));
+    expect(await service.state.getCodexSession("codex-chat-main-claude")).toBeUndefined();
+    expect(restartCodex).toHaveBeenCalled();
+    blockedTurn.resolve();
+  });
+
+  test("an absolute abort with activity clears the silent-abort suspicion between it and the next", async () => {
+    // Without this, silent -> absolute(demonstrably active!) -> silent added up
+    // to a session reset on the strength of two non-consecutive silences.
+    const config = await loadTestConfig("app-server", "\n[mainAgent]\nprovider = \"claude_agent_sdk\"\n");
+    const service = makeService(config, createLogger("silent"));
+    await service.state.init();
+    vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+    vi.spyOn(service.telegram, "notifyOps").mockResolvedValue();
+    vi.spyOn(service as unknown as { restartCodex(reason: string): Promise<void> }, "restartCodex").mockResolvedValue();
+    vi.spyOn(service.codex, "contextStats").mockReturnValue({
+      sessionId: "steady-session",
+      lastTurnInputTokens: 42_000,
+      rolloverThresholdTokens: 800_000
+    });
+    vi.spyOn(service as unknown as { processEvent(event: UserEvent): Promise<void> }, "processEvent").mockReturnValue(deferred().promise);
+    await service.state.setCodexSession("codex-chat-main-claude", { sessionId: "steady-session", provider: "claude_agent_sdk" });
+
+    const silent = { activityEvents: 0, suspended: false } as MainAgentTurnWatchdogState;
+    const busy = { lastActivityAt: Date.now(), activityEvents: 5_000, suspended: false } as MainAgentTurnWatchdogState;
+    const watchdogState = vi.spyOn(service.codex, "turnWatchdogState");
+
+    // Silent abort.
+    watchdogState.mockReturnValue(silent);
+    await service.enqueueUserEvent(userEvent(98));
+    ageRunningTurn(service, 80_001);
+    await (service as unknown as { checkTurnTimeout(): Promise<void> }).checkTurnTimeout();
+    (service as unknown as { restartingCodex: boolean }).restartingCodex = false;
+
+    // Runaway abort of a turn that was plainly alive.
+    watchdogState.mockReturnValue(busy);
+    await service.enqueueUserEvent(userEvent(99));
+    (service as unknown as { turnStartedAt: Date }).turnStartedAt = new Date(Date.now() - (config.service.turnAbsoluteAbortMs + 1_000));
+    await (service as unknown as { checkTurnTimeout(): Promise<void> }).checkTurnTimeout();
+    (service as unknown as { restartingCodex: boolean }).restartingCodex = false;
+
+    // Another silent abort — the first no longer counts toward it.
+    watchdogState.mockReturnValue(silent);
+    await service.enqueueUserEvent(userEvent(100));
+    ageRunningTurn(service, 80_001);
+    await (service as unknown as { checkTurnTimeout(): Promise<void> }).checkTurnTimeout();
+
+    expect(await service.state.getCodexSession("codex-chat-main-claude")).toBe("steady-session");
+  });
+
+  test("repeated runaway aborts on one session eventually clear it", async () => {
+    // An absolute abort never clears on its own, so without escalation a
+    // looping session is an unbreakable half-hour abort cycle.
+    const config = await loadTestConfig("app-server", "\n[mainAgent]\nprovider = \"claude_agent_sdk\"\n");
+    const service = makeService(config, createLogger("silent"));
+    await service.state.init();
+    vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+    vi.spyOn(service.telegram, "notifyOps").mockResolvedValue();
+    vi.spyOn(service as unknown as { restartCodex(reason: string): Promise<void> }, "restartCodex").mockResolvedValue();
+    stubWatchdogTelemetry(
+      service,
+      { sessionId: "looping-session", lastTurnInputTokens: 42_000, rolloverThresholdTokens: 800_000 },
+      { lastActivityAt: Date.now(), activityEvents: 5_000, suspended: false }
+    );
+    vi.spyOn(service as unknown as { processEvent(event: UserEvent): Promise<void> }, "processEvent").mockReturnValue(deferred().promise);
+    await service.state.setCodexSession("codex-chat-main-claude", { sessionId: "looping-session", provider: "claude_agent_sdk" });
+
+    for (const messageId of [101, 102]) {
+      await service.enqueueUserEvent(userEvent(messageId));
+      (service as unknown as { turnStartedAt: Date }).turnStartedAt = new Date(Date.now() - (config.service.turnAbsoluteAbortMs + 1_000));
+      await (service as unknown as { checkTurnTimeout(): Promise<void> }).checkTurnTimeout();
+      (service as unknown as { restartingCodex: boolean }).restartingCodex = false;
+    }
+
+    expect(await service.state.getCodexSession("codex-chat-main-claude")).toBeUndefined();
+  });
+
+  test("alternating silent and runaway aborts still terminate in a session clear (W6)", async () => {
+    // The silent and runaway counters reset each other, so an alternating
+    // sequence could ping-pong forever with neither reaching its bound — an
+    // abort->resume loop that never recovers. The any-kind backstop is what
+    // guarantees termination.
+    const config = await loadTestConfig("app-server", "\n[mainAgent]\nprovider = \"claude_agent_sdk\"\n");
+    const service = makeService(config, createLogger("silent"));
+    await service.state.init();
+    vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+    vi.spyOn(service.telegram, "notifyOps").mockResolvedValue();
+    vi.spyOn(service as unknown as { restartCodex(reason: string): Promise<void> }, "restartCodex").mockResolvedValue();
+    vi.spyOn(service.codex, "contextStats").mockReturnValue({
+      sessionId: "pingpong-session",
+      lastTurnInputTokens: 42_000,
+      rolloverThresholdTokens: 800_000
+    });
+    vi.spyOn(service as unknown as { processEvent(event: UserEvent): Promise<void> }, "processEvent").mockReturnValue(deferred().promise);
+    await service.state.setCodexSession("codex-chat-main-claude", { sessionId: "pingpong-session", provider: "claude_agent_sdk" });
+
+    const watchdogState = vi.spyOn(service.codex, "turnWatchdogState");
+    const budget = config.service.turnSilentAbortsBeforeSessionReset + config.service.turnRunawayAbortsBeforeSessionReset;
+    let messageId = 110;
+    for (let cycle = 0; cycle < budget; cycle++) {
+      const silentCycle = cycle % 2 === 0;
+      watchdogState.mockReturnValue(
+        silentCycle
+          ? { activityEvents: 0, suspended: false }
+          : { lastActivityAt: Date.now(), activityEvents: 5_000, suspended: false }
+      );
+      await service.enqueueUserEvent(userEvent(messageId++));
+      if (silentCycle) {
+        ageRunningTurn(service, 80_001);
+      } else {
+        (service as unknown as { turnStartedAt: Date }).turnStartedAt = new Date(Date.now() - (config.service.turnAbsoluteAbortMs + 1_000));
+      }
+      await (service as unknown as { checkTurnTimeout(): Promise<void> }).checkTurnTimeout();
+      (service as unknown as { restartingCodex: boolean }).restartingCodex = false;
+    }
+
+    expect(await service.state.getCodexSession("codex-chat-main-claude")).toBeUndefined();
+  });
+
+  test("a lazily-captured session id is not a session change (W7)", async () => {
+    // A fresh Claude session has no id until its first turn reports one.
+    // Treating undefined -> defined as a session change would reset the
+    // counters between exactly the consecutive aborts they must add up.
+    const config = await loadTestConfig("app-server", "\n[mainAgent]\nprovider = \"claude_agent_sdk\"\n");
+    const service = makeService(config, createLogger("silent"));
+    await service.state.init();
+    vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+    vi.spyOn(service.telegram, "notifyOps").mockResolvedValue();
+    vi.spyOn(service as unknown as { restartCodex(reason: string): Promise<void> }, "restartCodex").mockResolvedValue();
+    vi.spyOn(service.codex, "turnWatchdogState").mockReturnValue({ activityEvents: 0, suspended: false });
+    const contextStats = vi.spyOn(service.codex, "contextStats");
+    vi.spyOn(service as unknown as { processEvent(event: UserEvent): Promise<void> }, "processEvent").mockReturnValue(deferred().promise);
+    await service.state.setCodexSession("codex-chat-main-claude", { sessionId: "late-session", provider: "claude_agent_sdk" });
+
+    // First silent abort: the session has not identified itself yet.
+    contextStats.mockReturnValue({ sessionId: undefined, lastTurnInputTokens: 1_000, rolloverThresholdTokens: 800_000 });
+    await service.enqueueUserEvent(userEvent(120));
+    ageRunningTurn(service, 80_001);
+    await (service as unknown as { checkTurnTimeout(): Promise<void> }).checkTurnTimeout();
+    (service as unknown as { restartingCodex: boolean }).restartingCodex = false;
+    expect(await service.state.getCodexSession("codex-chat-main-claude")).toBe("late-session");
+
+    // Same session, now named. The first abort must still count.
+    contextStats.mockReturnValue({ sessionId: "late-session", lastTurnInputTokens: 1_000, rolloverThresholdTokens: 800_000 });
+    await service.enqueueUserEvent(userEvent(121));
+    ageRunningTurn(service, 80_001);
+    await (service as unknown as { checkTurnTimeout(): Promise<void> }).checkTurnTimeout();
+
+    expect(await service.state.getCodexSession("codex-chat-main-claude")).toBeUndefined();
+  });
+
+  test("abort evidence does not carry across a session change", async () => {
+    const config = await loadTestConfig("app-server", "\n[mainAgent]\nprovider = \"claude_agent_sdk\"\n");
+    const service = makeService(config, createLogger("silent"));
+    await service.state.init();
+    vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+    vi.spyOn(service.telegram, "notifyOps").mockResolvedValue();
+    vi.spyOn(service as unknown as { restartCodex(reason: string): Promise<void> }, "restartCodex").mockResolvedValue();
+    vi.spyOn(service.codex, "turnWatchdogState").mockReturnValue({ activityEvents: 0, suspended: false });
+    const contextStats = vi.spyOn(service.codex, "contextStats");
+    vi.spyOn(service as unknown as { processEvent(event: UserEvent): Promise<void> }, "processEvent").mockReturnValue(deferred().promise);
+
+    contextStats.mockReturnValue({ sessionId: "session-a", lastTurnInputTokens: 1_000, rolloverThresholdTokens: 800_000 });
+    await service.enqueueUserEvent(userEvent(103));
+    ageRunningTurn(service, 80_001);
+    await (service as unknown as { checkTurnTimeout(): Promise<void> }).checkTurnTimeout();
+    (service as unknown as { restartingCodex: boolean }).restartingCodex = false;
+
+    // Different conversation entirely: its first silent abort is a first.
+    contextStats.mockReturnValue({ sessionId: "session-b", lastTurnInputTokens: 1_000, rolloverThresholdTokens: 800_000 });
+    await service.state.setCodexSession("codex-chat-main-claude", { sessionId: "session-b", provider: "claude_agent_sdk" });
+    await service.enqueueUserEvent(userEvent(104));
+    ageRunningTurn(service, 80_001);
+    await (service as unknown as { checkTurnTimeout(): Promise<void> }).checkTurnTimeout();
+
+    expect(await service.state.getCodexSession("codex-chat-main-claude")).toBe("session-b");
+  });
+
   test("watchdog aborts main-loop turns after 80 seconds", async () => {
     const config = await loadTestConfig();
     const logger = createLogger("silent");
@@ -861,6 +1137,7 @@ describe("service supervisor", () => {
     // past its context window, every turn stalled, and the watchdog cleared
     // the Codex key ("codex-chat-main") — which does not exist in Claude mode —
     // so the poisoned "codex-chat-main-claude" session was resumed forever.
+    // Clearing now requires wedge evidence, which the context stats supply here.
     const config = await loadTestConfig("app-server", "\n[mainAgent]\nprovider = \"claude_agent_sdk\"\n");
     const logger = createLogger("silent");
     const service = makeService(config, logger);
@@ -868,6 +1145,7 @@ describe("service supervisor", () => {
     vi.spyOn(service.telegram, "sendText").mockResolvedValue();
     vi.spyOn(service.telegram, "notifyOps").mockResolvedValue();
     vi.spyOn(service as unknown as { restartCodex(reason: string): Promise<void> }, "restartCodex").mockResolvedValue();
+    stubWatchdogTelemetry(service, { lastTurnInputTokens: 810_000, rolloverThresholdTokens: 800_000 });
     const blockedTurn = deferred();
     vi.spyOn(service as unknown as { processEvent(event: UserEvent): Promise<void> }, "processEvent").mockReturnValue(blockedTurn.promise);
 
@@ -876,11 +1154,142 @@ describe("service supervisor", () => {
     expect(Object.keys(JSON.parse(await readFile(sessionsPath, "utf8")) as Record<string, unknown>)).toEqual(["codex-chat-main-claude"]);
 
     await service.enqueueUserEvent(userEvent(82));
-    (service as unknown as { turnStartedAt: Date }).turnStartedAt = new Date(Date.now() - 80_001);
+    ageRunningTurn(service, 80_001);
     await (service as unknown as { checkTurnTimeout(): Promise<void> }).checkTurnTimeout();
 
     expect(await service.state.getCodexSession("codex-chat-main-claude")).toBeUndefined();
     expect(JSON.parse(await readFile(sessionsPath, "utf8"))).toEqual({});
+    blockedTurn.resolve();
+  });
+
+  test("a turn that keeps producing events is never aborted, however long it runs", async () => {
+    // The defect this replaces: a wall-clock watchdog cannot tell a four-minute
+    // agentic task from a wedged session, and killed ten healthy turns in the
+    // fortnight to 2026-08-17.
+    const config = await loadTestConfig("app-server", "\n[mainAgent]\nprovider = \"claude_agent_sdk\"\n");
+    const service = makeService(config, createLogger("silent"));
+    await service.state.init();
+    vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+    vi.spyOn(service.telegram, "notifyOps").mockResolvedValue();
+    const restartCodex = vi.spyOn(service as unknown as { restartCodex(reason: string): Promise<void> }, "restartCodex").mockResolvedValue();
+    // Ten minutes in, but the session emitted something a second ago.
+    stubWatchdogTelemetry(service, {}, { lastActivityAt: Date.now() - 1_000, activityEvents: 400, suspended: false });
+    const blockedTurn = deferred();
+    vi.spyOn(service as unknown as { processEvent(event: UserEvent): Promise<void> }, "processEvent").mockReturnValue(blockedTurn.promise);
+
+    await service.enqueueUserEvent(userEvent(90));
+    (service as unknown as { turnStartedAt: Date }).turnStartedAt = new Date(Date.now() - 600_000);
+    await (service as unknown as { checkTurnTimeout(): Promise<void> }).checkTurnTimeout();
+
+    expect((service as unknown as { turnRunning: boolean }).turnRunning).toBe(true);
+    expect(restartCodex).not.toHaveBeenCalled();
+    blockedTurn.resolve();
+  });
+
+  test("a silent turn is still aborted at the inactivity deadline, but keeps its session", async () => {
+    const config = await loadTestConfig("app-server", "\n[mainAgent]\nprovider = \"claude_agent_sdk\"\n");
+    const service = makeService(config, createLogger("silent"));
+    await service.state.init();
+    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+    vi.spyOn(service.telegram, "notifyOps").mockResolvedValue();
+    const restartCodex = vi.spyOn(service as unknown as { restartCodex(reason: string): Promise<void> }, "restartCodex").mockResolvedValue();
+    // Well below the rollover threshold: no evidence the session is wedged.
+    stubWatchdogTelemetry(service, { lastTurnInputTokens: 42_000, rolloverThresholdTokens: 800_000 });
+    const blockedTurn = deferred();
+    vi.spyOn(service as unknown as { processEvent(event: UserEvent): Promise<void> }, "processEvent").mockReturnValue(blockedTurn.promise);
+
+    await service.state.setCodexSession("codex-chat-main-claude", { sessionId: "healthy-session", provider: "claude_agent_sdk" });
+    await service.enqueueUserEvent(userEvent(91));
+    ageRunningTurn(service, 80_001);
+    await (service as unknown as { checkTurnTimeout(): Promise<void> }).checkTurnTimeout();
+
+    expect((service as unknown as { turnRunning: boolean }).turnRunning).toBe(false);
+    expect(restartCodex).toHaveBeenCalled();
+    // The whole point: the conversation survives the abort.
+    expect(await service.state.getCodexSession("codex-chat-main-claude")).toBe("healthy-session");
+    expect(sendText).toHaveBeenCalledWith(
+      253768951,
+      "⚠️ Your previous request was aborted because it stopped making progress. Our conversation context was kept — please resend your message.",
+      91
+    );
+    blockedTurn.resolve();
+  });
+
+  test("a second consecutive silent abort escalates to clearing the session", async () => {
+    const config = await loadTestConfig("app-server", "\n[mainAgent]\nprovider = \"claude_agent_sdk\"\n");
+    const service = makeService(config, createLogger("silent"));
+    await service.state.init();
+    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+    vi.spyOn(service.telegram, "notifyOps").mockResolvedValue();
+    vi.spyOn(service as unknown as { restartCodex(reason: string): Promise<void> }, "restartCodex").mockResolvedValue();
+    stubWatchdogTelemetry(service, { lastTurnInputTokens: 42_000, rolloverThresholdTokens: 800_000 });
+    vi.spyOn(service as unknown as { processEvent(event: UserEvent): Promise<void> }, "processEvent").mockReturnValue(deferred().promise);
+
+    await service.state.setCodexSession("codex-chat-main-claude", { sessionId: "suspect-session", provider: "claude_agent_sdk" });
+
+    for (const messageId of [92, 93]) {
+      await service.enqueueUserEvent(userEvent(messageId));
+      ageRunningTurn(service, 80_001);
+      await (service as unknown as { checkTurnTimeout(): Promise<void> }).checkTurnTimeout();
+      (service as unknown as { restartingCodex: boolean }).restartingCodex = false;
+    }
+
+    expect(await service.state.getCodexSession("codex-chat-main-claude")).toBeUndefined();
+    expect(sendText).toHaveBeenLastCalledWith(
+      253768951,
+      "⚠️ Your previous request was aborted and my main session looked wedged, so it was reset. Earlier conversation history is no longer in context — please resend your message and re-state anything I still need.",
+      93
+    );
+  });
+
+  test("the watchdog stands down while the provider is restarting its session for a rollover", async () => {
+    // The inline stop()/start() a context rollover does inside sendTurn emits
+    // no SDK messages and may take the full 90s startup timeout — longer than
+    // the inactivity budget it would otherwise be judged against.
+    const config = await loadTestConfig("app-server", "\n[mainAgent]\nprovider = \"claude_agent_sdk\"\n");
+    const service = makeService(config, createLogger("silent"));
+    await service.state.init();
+    vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+    vi.spyOn(service.telegram, "notifyOps").mockResolvedValue();
+    const restartCodex = vi.spyOn(service as unknown as { restartCodex(reason: string): Promise<void> }, "restartCodex").mockResolvedValue();
+    stubWatchdogTelemetry(service, {}, {
+      lastActivityAt: Date.now() - 85_000,
+      activityEvents: 0,
+      suspended: true,
+      suspendedReason: "context_rollover_restart"
+    });
+    const blockedTurn = deferred();
+    vi.spyOn(service as unknown as { processEvent(event: UserEvent): Promise<void> }, "processEvent").mockReturnValue(blockedTurn.promise);
+
+    await service.enqueueUserEvent(userEvent(94));
+    ageRunningTurn(service, 85_000);
+    await (service as unknown as { checkTurnTimeout(): Promise<void> }).checkTurnTimeout();
+
+    expect((service as unknown as { turnRunning: boolean }).turnRunning).toBe(true);
+    expect(restartCodex).not.toHaveBeenCalled();
+    blockedTurn.resolve();
+  });
+
+  test("a turn that stays busy past the absolute ceiling is aborted with its session kept", async () => {
+    const config = await loadTestConfig("app-server", "\n[mainAgent]\nprovider = \"claude_agent_sdk\"\n");
+    const service = makeService(config, createLogger("silent"));
+    await service.state.init();
+    vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+    vi.spyOn(service.telegram, "notifyOps").mockResolvedValue();
+    const restartCodex = vi.spyOn(service as unknown as { restartCodex(reason: string): Promise<void> }, "restartCodex").mockResolvedValue();
+    stubWatchdogTelemetry(service, {}, { lastActivityAt: Date.now(), activityEvents: 9_000, suspended: false });
+    const blockedTurn = deferred();
+    vi.spyOn(service as unknown as { processEvent(event: UserEvent): Promise<void> }, "processEvent").mockReturnValue(blockedTurn.promise);
+
+    await service.state.setCodexSession("codex-chat-main-claude", { sessionId: "runaway-session", provider: "claude_agent_sdk" });
+    await service.enqueueUserEvent(userEvent(95));
+    (service as unknown as { turnStartedAt: Date }).turnStartedAt = new Date(Date.now() - (config.service.turnAbsoluteAbortMs + 1_000));
+    await (service as unknown as { checkTurnTimeout(): Promise<void> }).checkTurnTimeout();
+
+    expect((service as unknown as { turnRunning: boolean }).turnRunning).toBe(false);
+    expect(restartCodex).toHaveBeenCalled();
+    // Runaway, not wedged: the session is fine and is kept.
+    expect(await service.state.getCodexSession("codex-chat-main-claude")).toBe("runaway-session");
     blockedTurn.resolve();
   });
 

@@ -141,24 +141,36 @@ const claudeMainAgentSchema = z.object({
   pathToClaudeCodeExecutable: z.string().default(""),
   mainSessionName: z.string().default("codex-chat-main-claude"),
   startupTimeoutSec: z.number().int().positive().default(90),
+  // How long `stop()` waits for the SDK child to acknowledge an interrupt
+  // before closing the query anyway. Bounded because the case that most needs
+  // interrupting — a child wedged on a near-full session — is the one least
+  // likely to answer, and every caller of stop() (context rollover, provider
+  // switch, shutdown) is on a path that has to make progress regardless.
+  interruptTimeoutSec: z.number().int().positive().default(10),
   // A turn result that arrives while nested native agents are still running
   // describes work that has not happened yet, so it is held. Once the nested
   // set drains, this is how long the session may stay silent before codex-chat
   // nudges it once for the real post-nested report.
   nestedAgentSettleGraceMs: z.number().int().positive().default(10_000),
-  // Absolute cap on holding one turn's result. The service watchdog force-
-  // aborts any main turn older than 80s (TURN_ABORT_MS) and tells the user it
-  // timed out, so the hold must always release before that.
+  // Absolute cap on holding one turn's result. The service watchdog now
+  // measures INACTIVITY (`service.turnInactivityAbortMs`, 80s) rather than
+  // wall-clock age, and every SDK message — including the nested agents' own
+  // tool traffic streaming through the parent query — resets that budget. The
+  // only quiet stretch a hold can produce is the post-drain settle/nudge
+  // window, so this cap must stay comfortably under the inactivity budget:
+  // 55s of hold against an 80s silence budget leaves 25s of margin.
   nestedAgentHoldMaxMs: z.number().int().positive().default(55_000),
-  // Effective input size of one completed turn (input + cache-read +
-  // cache-creation tokens) above which the NEXT turn abandons the persisted
-  // session and starts a fresh one. The main session is resumed forever, so
-  // nothing else bounds its growth: on 2026-08-07 it reached ~934k tokens
-  // against sonnet-5's 1M window and the next turn stalled silently — no SDK
-  // error, no stderr, just a blocked child that the 80s watchdog had to kill,
-  // and every later turn resumed the same poisoned session. 800k leaves ~200k
-  // of headroom for the next turn's prompt, tool output and an effort=high
-  // response, which is the window the wedge actually consumed.
+  // How full the session's context window may get before the NEXT turn
+  // abandons the persisted session and starts a fresh one. Measured as the
+  // LAST API request's own occupancy (input + cache-read + cache-creation of
+  // one request) — NOT the result message's `usage`, which is summed over
+  // every request the agentic loop made and overstates occupancy several-fold
+  // on a long turn. The main session is resumed forever, so nothing else
+  // bounds its growth: on 2026-08-07 it filled up and the next turn stalled
+  // silently — no SDK error, no stderr, just a blocked child that the watchdog
+  // had to kill, and every later turn resumed the same poisoned session.
+  // 800k is 80% of sonnet-5's 1M window, leaving ~200k for the next turn's
+  // prompt, its tool output and an effort=high response.
   contextRolloverInputTokens: z.number().int().positive().default(800_000),
   // "Roll over even without a summary" bound. Once the threshold above is
   // crossed the rollover waits for the out-of-band handoff summary to resolve
@@ -166,8 +178,8 @@ const claudeMainAgentSchema = z.object({
   // during an active conversation the next turn boundary arrives long before
   // the summarizer finishes, which is exactly when continuity matters most.
   // Past this cap the swap happens regardless, with the plain handoff note.
-  // 900k stays under the ~934k wedge point observed on 2026-08-07 while still
-  // leaving the threshold ~100k of slack for the turns spent waiting.
+  // 900k is 90% of the 1M window: still short of exhaustion, while leaving the
+  // threshold ~100k of slack for the turns spent waiting.
   contextRolloverHardCapTokens: z.number().int().positive().default(900_000),
   // When a rollover is scheduled, summarize the doomed session's on-disk
   // transcript out of band and hand the brief to the fresh session's first
@@ -225,6 +237,34 @@ const configSchema = z.object({
     logLevel: z.string().default("info"),
     timezone: ianaTimeZoneSchema.default(DEFAULT_USER_TIME_ZONE),
     ipcSocket: z.string().default("data/run/codex-chat.sock"),
+    // How long a turn may go without ANY sign of life before the watchdog
+    // force-aborts it. This is an INACTIVITY budget, not a wall clock: every
+    // event the main agent produces for the turn (streamed deltas, tool
+    // traffic, nested-agent messages, background-task changes, status) resets
+    // it, so a turn that is genuinely working is never aborted no matter how
+    // long the work takes. Only providers that report `turnWatchdogState()`
+    // get this treatment; the Codex provider keeps the historical wall-clock
+    // abort at the same 80s value.
+    turnInactivityAbortMs: z.number().int().positive().default(80_000),
+    // Runaway backstop for an activity-based turn: something can emit events
+    // forever (a tool loop, a nested agent that never finishes) without ever
+    // tripping the inactivity budget, so a turn is still bounded absolutely.
+    // Sized well above any plausible legitimate turn.
+    turnAbsoluteAbortMs: z.number().int().positive().default(30 * 60_000),
+    // An inactivity abort preserves the main session by default. This is how
+    // many consecutive ZERO-activity aborts (turns where the session never
+    // produced a single event) it takes before the session is treated as
+    // wedged and cleared — the 2026-08-07 failure mode, where the child was
+    // blocked in epoll and every turn died silently.
+    turnSilentAbortsBeforeSessionReset: z.number().int().positive().default(2),
+    // The runaway equivalent. A turn aborted at `turnAbsoluteAbortMs` was
+    // demonstrably alive, so one such abort is never grounds for destroying the
+    // session — but a session that keeps producing 30-minute turns and never
+    // finishing one is looping rather than working, and since an absolute
+    // abort does not clear on its own that would otherwise be an unbreakable
+    // half-hour cycle. Counted separately from the silent aborts above because
+    // it is different evidence about a different failure.
+    turnRunawayAbortsBeforeSessionReset: z.number().int().positive().default(2),
   }).prefault({}),
   mainAgent: z.object({
     provider: z.enum(["codex", "claude_agent_sdk"]).default("codex"),
@@ -554,6 +594,18 @@ export const ENV_OVERRIDE_SPECS: EnvOverrideSpec[] = [
     { name: "CODEX_CHAT_TIMEZONE", path: ["service", "timezone"] },
     { name: "CODEX_CHAT_STATE_DIR", path: ["service", "stateDir"] },
     { name: "CODEX_CHAT_LOG_LEVEL", path: ["service", "logLevel"] },
+    { name: "CODEX_CHAT_TURN_INACTIVITY_ABORT_MS", path: ["service", "turnInactivityAbortMs"], parse: parseNumberEnv },
+    { name: "CODEX_CHAT_TURN_ABSOLUTE_ABORT_MS", path: ["service", "turnAbsoluteAbortMs"], parse: parseNumberEnv },
+    {
+      name: "CODEX_CHAT_TURN_SILENT_ABORTS_BEFORE_SESSION_RESET",
+      path: ["service", "turnSilentAbortsBeforeSessionReset"],
+      parse: parseNumberEnv,
+    },
+    {
+      name: "CODEX_CHAT_TURN_RUNAWAY_ABORTS_BEFORE_SESSION_RESET",
+      path: ["service", "turnRunawayAbortsBeforeSessionReset"],
+      parse: parseNumberEnv,
+    },
     { name: "CODEX_CHAT_MAIN_PROVIDER", path: ["mainAgent", "provider"] },
     { name: "CODEX_CHAT_MAIN_CLAUDE_MODEL", path: ["mainAgent", "claude", "model"] },
     { name: "CODEX_CHAT_MAIN_CLAUDE_EFFORT", path: ["mainAgent", "claude", "effort"] },

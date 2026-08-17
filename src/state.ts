@@ -352,6 +352,18 @@ export class StateStore {
     return sessions[name]?.behaviorHash;
   }
 
+  /**
+   * Last recorded context occupancy for a persisted main session. Without it a
+   * resumed session is blind until its next turn completes — and a session
+   * that is wedged BECAUSE it is full never completes one, so the watchdog
+   * would have no wedge evidence exactly when it needs it most.
+   */
+  async getCodexSessionInputTokens(name: string): Promise<number | undefined> {
+    const sessions = await this.readJson<Record<string, { lastInputTokens?: unknown }>>("codex_sessions.json", {});
+    const value = sessions[name]?.lastInputTokens;
+    return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+  }
+
   async setCodexSession(name: string, value: Record<string, unknown>): Promise<void> {
     await this.withJsonFileLock("codex_sessions.json", async (path) => {
       const sessions = await readJsonFile<Record<string, Record<string, unknown>>>(path, {});

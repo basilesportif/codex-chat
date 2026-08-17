@@ -121,6 +121,7 @@ userIds = [12345]
       pathToClaudeCodeExecutable: "",
       mainSessionName: "codex-chat-main-claude",
       startupTimeoutSec: 90,
+      interruptTimeoutSec: 10,
       nestedAgentSettleGraceMs: 10_000,
       nestedAgentHoldMaxMs: 55_000,
       contextRolloverInputTokens: 800_000,
@@ -129,6 +130,11 @@ userIds = [12345]
       handoffSummaryModel: "claude-sonnet-5",
     });
     expect(config.service.timezone).toBe("America/New_York");
+    // Watchdog budgets: silence, not age, and a far looser runaway ceiling.
+    expect(config.service.turnInactivityAbortMs).toBe(80_000);
+    expect(config.service.turnAbsoluteAbortMs).toBe(1_800_000);
+    expect(config.service.turnSilentAbortsBeforeSessionReset).toBe(2);
+    expect(config.service.turnRunawayAbortsBeforeSessionReset).toBe(2);
     expect(config.codex.sandbox).toBe("danger-full-access");
     expect(config.codex.serviceTier).toBe("fast");
     expect(config.codex.serviceTierMode).toBe("auto");

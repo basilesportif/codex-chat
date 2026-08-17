@@ -10,7 +10,8 @@ import type {
   MainAgentEvent,
   MainAgentHealth,
   MainAgentProvider,
-  MainAgentTurnInput
+  MainAgentTurnInput,
+  MainAgentTurnWatchdogState
 } from "./types.js";
 
 export const MAIN_AGENT_SWITCH_GRACE_MS = 15_000;
@@ -159,6 +160,10 @@ export class MainAgentSwitcher implements MainAgentClient {
 
   contextStats(): MainAgentContextStats | undefined {
     return this.inner.contextStats?.();
+  }
+
+  turnWatchdogState(): MainAgentTurnWatchdogState | undefined {
+    return this.inner.turnWatchdogState?.();
   }
 
   getRecentLogs(n?: number, includeRaw?: boolean): string[] {

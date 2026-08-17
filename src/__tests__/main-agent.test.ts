@@ -304,7 +304,8 @@ describe("main-agent minimal contract parity", () => {
           settingSources: [],
           pathToClaudeCodeExecutable: "",
           mainSessionName: "contract-claude",
-          startupTimeoutSec: 2
+          startupTimeoutSec: 2,
+          interruptTimeoutSec: 1
         }
       },
       codex: { providerApiKeyEnvNames: [] }

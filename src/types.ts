@@ -331,12 +331,46 @@ export interface MainAgentHealth {
 
 /** Context-window telemetry for a provider's persisted main session. */
 export interface MainAgentContextStats {
-  /** Effective input tokens (input + cache read + cache creation) on the last completed turn. */
+  /**
+   * The session these figures describe. The watchdog scopes its per-session
+   * escalation counters to it, so evidence gathered against one conversation
+   * can never condemn the next one.
+   */
+  sessionId?: string;
+  /**
+   * How full the main session's context window actually is, measured from the
+   * LAST single API request of the last completed turn (its own input +
+   * cache-read + cache-creation tokens). Deliberately NOT the turn's summed
+   * usage: a result message's `usage` is cumulative over every request the
+   * agentic loop made, which on a long turn overstates occupancy by an order
+   * of magnitude (see `effectiveInputTokens` in claude-main-agent.ts).
+   */
   lastTurnInputTokens?: number;
   /** Turn input size at or above which the next turn starts a fresh session. */
   rolloverThresholdTokens?: number;
   /** True once a rollover is queued and waiting for the next turn boundary. */
   rolloverPending?: boolean;
+  /** The serving model's context window, when the provider reports one. */
+  contextWindowTokens?: number;
+}
+
+/**
+ * Liveness telemetry for the turn currently in flight, used by the service
+ * watchdog to tell "slow but alive" from "wedged". A provider that cannot
+ * report it leaves the watchdog on plain wall-clock timing.
+ */
+export interface MainAgentTurnWatchdogState {
+  /** Epoch ms of the most recent event this provider saw for the live turn. */
+  lastActivityAt?: number;
+  /** Events seen since the turn started; 0 means the turn was silent throughout. */
+  activityEvents: number;
+  /**
+   * True while the provider is doing bounded work that legitimately produces
+   * no events (a context-rollover session restart), during which the
+   * inactivity deadline must not fire.
+   */
+  suspended: boolean;
+  suspendedReason?: string;
 }
 
 export interface MainAgentClient {
@@ -354,6 +388,12 @@ export interface MainAgentClient {
   clearPersistedSession?(reason?: string): Promise<void>;
   /** Optional: last observed context size of this provider's main session. */
   contextStats?(): MainAgentContextStats | undefined;
+  /**
+   * Optional: per-turn liveness for the service watchdog. Providers that
+   * implement it get activity-based (inactivity) timing; providers that do not
+   * keep the historical wall-clock abort.
+   */
+  turnWatchdogState?(): MainAgentTurnWatchdogState | undefined;
   /** Optional — clients may expose recent app-server output for introspection. */
   getRecentLogs?(n?: number, includeRaw?: boolean): string[];
   /** Optional: bootstrap text queued when the behavior pack changed since the session last saw it. */

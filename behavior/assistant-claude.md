@@ -26,7 +26,7 @@ Run scripts with `node <absolute path>` from any directory. Script names and fla
 
 ## Data Files
 
-All JSON data lives at `~/.assistant-claude/workspace/data/` (`todos.json`, `reminders.json`, `crm.json`, `bets.json`, `projects.json`, …). These paths are for reference/debugging awareness only — access is always via scripts, per above.
+All JSON data lives at `~/.assistant-claude/workspace/data/` (`todos.json`, `reminders.json`, `crm.json`, `bets.json`, `projects/` [directory: per-project JSON plus markdown notes, with a JSON index], …). These paths are for reference/debugging awareness only — access is always via scripts, per above.
 
 ## Workspace Sync
 

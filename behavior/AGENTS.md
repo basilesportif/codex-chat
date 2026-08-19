@@ -423,7 +423,7 @@ After reading the skill doc, check if `{{WORKSPACE}}/instructions/skills/<skill>
 
 ### Step 3 — Data lives in the workspace
 
-All state files are under `{{WORKSPACE}}/data/` (`todos.json`, `bets.json`, `crm.json`, `reminders.json`, `projects.json`, etc.). Never hardcode a file path — the skill doc will tell you the exact file name.
+All state files are under `{{WORKSPACE}}/data/` (`todos.json`, `bets.json`, `crm.json`, `reminders.json`, `projects/` [directory: per-project JSON plus markdown notes, with a JSON index], etc.). Never hardcode a file path — the skill doc will tell you the exact file name.
 
 ### Step 4 — Run scripts from the assistant-agent-logic repo
 

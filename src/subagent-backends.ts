@@ -25,7 +25,7 @@ import {
 import {
   CLAUDE_AGENT_TOOL_NAME,
   CLAUDE_NESTED_AGENTS_DRAINED_NUDGE,
-  buildForceForegroundNestedAgentsHook,
+  ClaudeNestedAgentLimiter,
   claudeNestedAgentPromptRules,
   isClaudeNestedAgentTask,
   normalizeClaudeBackgroundTasks,
@@ -143,13 +143,13 @@ function claudeNativeAgents(cfg: ClaudeSubagentConfig): Record<string, ClaudeAge
   };
 }
 
-export function nativeAgentGuidance(agents: Record<string, ClaudeAgentDefinition>): string {
+export function nativeAgentGuidance(agents: Record<string, ClaudeAgentDefinition>, maxConcurrentNestedAgents = 0): string {
   const model = (name: string) => agents[name]?.model ?? "inherit";
   return [
     `Native subagents (Agent tool) available in this session: implementer (${model("implementer")}) — writes code and runs tests; investigator (${model("investigator")}) — read-only research; reviewer (${model("reviewer")}) — read-only code review.`,
-    "Delegate substantive coding, repo research, and rote/mechanical execution to these subagents instead of doing it yourself: break the task into bounded briefs, dispatch implementer subagents for changes (parallel when independent) and investigators for research, then review what comes back, follow the leads it surfaces, and iterate until the work meets your standards.",
+    `Delegate substantive coding, repo research, and rote/mechanical execution to these subagents instead of doing it yourself: break the task into bounded briefs, dispatch implementer subagents for changes (${maxConcurrentNestedAgents > 0 ? `in parallel when independent, at most ${maxConcurrentNestedAgents} at a time` : "parallel when independent"}) and investigators for research, then review what comes back, follow the leads it surfaces, and iterate until the work meets your standards.`,
     "Reserve your own effort for briefs, review judgment, and decisions. Keep one concern per subagent and pass each a complete, self-contained brief.",
-    ...claudeNestedAgentPromptRules("failed job"),
+    ...claudeNestedAgentPromptRules("failed job", maxConcurrentNestedAgents),
     "You remain responsible for the final result reported to your parent."
   ].join("\n")
 }
@@ -480,6 +480,12 @@ class ClaudeAgentSdkSession {
   /** The {@link isClaudeNestedAgentTask} subset of {@link liveBackgroundTasks}. */
   private liveNestedAgentTasks: ClaudeBackgroundTask[] = [];
   /**
+   * Caps how many nested agents this child session may run at once. Built in
+   * the constructor so the cap is available to the launch prompt as well as
+   * to the hooks.
+   */
+  private readonly nestedAgentLimiter: ClaudeNestedAgentLimiter;
+  /**
    * A successful turn result was withheld because nested agents were still
    * live: the parent reported back before they finished, so the job must stay
    * open until they drain and the parent reports again.
@@ -507,7 +513,9 @@ class ClaudeAgentSdkSession {
     private readonly config: AppConfig,
     private readonly logger: Logger,
     private readonly input: StartChildAgentInput
-  ) {}
+  ) {
+    this.nestedAgentLimiter = new ClaudeNestedAgentLimiter(claudeSubagentConfig(config).maxConcurrentNestedAgents);
+  }
 
   async start(): Promise<StartedChildAgent> {
     const ready = await this.checkReadiness();
@@ -541,7 +549,7 @@ class ClaudeAgentSdkSession {
     this.input.job.activeTurnId = CLAUDE_SYNTHETIC_ACTIVE_TURN_ID;
     await this.input.onJobUpdated(this.input.job);
     this.pendingUserTurns += 1;
-    const initialPrompt = `${this.input.assembledPrompt}\n\n${nativeAgentGuidance(options.agents ?? {})}`;
+    const initialPrompt = `${this.input.assembledPrompt}\n\n${nativeAgentGuidance(options.agents ?? {}, this.nestedAgentLimiter.cap)}`;
     this.queue.push(await this.buildUserMessage(initialPrompt, this.input.images));
 
     return {
@@ -681,18 +689,43 @@ class ClaudeAgentSdkSession {
           {
             matcher: CLAUDE_AGENT_TOOL_NAME,
             hooks: [
-              buildForceForegroundNestedAgentsHook(({ subagentType }) =>
-                this.appendEvent({
-                  event: "claude_nested_agent_forced_foreground",
-                  at: nowIso(),
-                  backend: "claude_agent_sdk",
-                  jobId: this.input.job.id,
-                  subagentType
-                })
-              )
+              this.nestedAgentLimiter.buildPreToolUseHook({
+                onRewrite: ({ subagentType }) =>
+                  this.appendEvent({
+                    event: "claude_nested_agent_forced_foreground",
+                    at: nowIso(),
+                    backend: "claude_agent_sdk",
+                    jobId: this.input.job.id,
+                    subagentType
+                  }),
+                onDenied: ({ subagentType, liveCount, cap }) => {
+                  this.logger.warn(
+                    {
+                      component: "subagents",
+                      event: "claude_nested_agent_fanout_capped",
+                      jobId: this.input.job.id,
+                      subagentType,
+                      liveCount,
+                      cap
+                    },
+                    "denied a nested Agent call: nested-agent concurrency cap reached"
+                  );
+                  return this.appendEvent({
+                    event: "claude_nested_agent_fanout_capped",
+                    at: nowIso(),
+                    backend: "claude_agent_sdk",
+                    jobId: this.input.job.id,
+                    subagentType,
+                    liveCount,
+                    cap
+                  });
+                }
+              })
             ]
           }
-        ]
+        ],
+        PostToolUse: [{ matcher: CLAUDE_AGENT_TOOL_NAME, hooks: [this.nestedAgentLimiter.buildPostToolUseHook()] }],
+        PostToolUseFailure: [{ matcher: CLAUDE_AGENT_TOOL_NAME, hooks: [this.nestedAgentLimiter.buildPostToolUseHook()] }]
       },
       strictMcpConfig: true,
       includePartialMessages: true,
@@ -932,6 +965,10 @@ class ClaudeAgentSdkSession {
     this.clearSettleGraceTimer();
     this.clearBackgroundDrainTimer();
     this.resultHeldForBackgroundWork = false;
+    // A PostToolUse that never arrives (kill, interrupt, SDK hiccup) must not
+    // leave the fan-out cap permanently shut; nothing nested can outlive the
+    // settled session anyway.
+    this.nestedAgentLimiter.reset();
     this.input.job.activeTurnId = undefined;
     this.input.job.waitingOnNestedAgents = undefined;
     this.resolveFinished(finish);
@@ -948,6 +985,7 @@ class ClaudeAgentSdkSession {
     const previous = this.liveNestedAgentTasks.length;
     this.liveBackgroundTasks = normalizeClaudeBackgroundTasks(tasks);
     this.liveNestedAgentTasks = this.liveBackgroundTasks.filter((task) => isClaudeNestedAgentTask(task.taskType));
+    this.nestedAgentLimiter.noteLiveNestedAgentTasks(this.liveNestedAgentTasks);
     await this.appendEvent({
       event: "claude_background_tasks_changed",
       at: nowIso(),

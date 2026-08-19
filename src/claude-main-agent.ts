@@ -21,7 +21,7 @@ import {
 import {
   CLAUDE_AGENT_TOOL_NAME,
   CLAUDE_NESTED_AGENTS_DRAINED_NUDGE,
-  buildForceForegroundNestedAgentsHook,
+  ClaudeNestedAgentLimiter,
   claudeNestedAgentPromptRules,
   isClaudeNestedAgentTask,
   normalizeClaudeBackgroundTasks,
@@ -90,11 +90,13 @@ interface ActiveTurn {
  * finish its turn (and codex-chat reply on Telegram) while the nested agent it
  * just launched is still working.
  */
-const CLAUDE_MAIN_NESTED_AGENT_GUIDANCE = [
-  "Nested agents (codex-chat main loop):",
-  ...claudeNestedAgentPromptRules("bug"),
-  "If you have nothing to report yet because nested work is still running, keep working instead of ending your turn: the user only sees your final message."
-].join("\n");
+function claudeMainNestedAgentGuidance(maxConcurrentNestedAgents: number): string {
+  return [
+    "Nested agents (codex-chat main loop):",
+    ...claudeNestedAgentPromptRules("bug", maxConcurrentNestedAgents),
+    "If you have nothing to report yet because nested work is still running, keep working instead of ending your turn: the user only sees your final message."
+  ].join("\n");
+}
 
 /**
  * `raw.event` marker on the status event emitted when a turn starts on a fresh
@@ -267,6 +269,13 @@ export class ClaudeMainAgentClient implements MainAgentClient {
   private liveBackgroundTasks: ClaudeBackgroundTask[] = [];
   private liveNestedAgentTasks: ClaudeBackgroundTask[] = [];
   /**
+   * Caps concurrent nested agents for the main session. The knob lives under
+   * `[subagents.claude]` on purpose: it is a whole-host memory guard, and the
+   * main loop and its child jobs draw on the same finite RAM, so one number
+   * governs both depths.
+   */
+  private readonly nestedAgentLimiter: ClaudeNestedAgentLimiter;
+  /**
    * Bumped on every SDK message. The quiet-parent drain timer captures it and
    * aborts if the session spoke again, so a stale timer cannot release a turn
    * that is making progress.
@@ -341,7 +350,9 @@ export class ClaudeMainAgentClient implements MainAgentClient {
     private readonly behavior: BehaviorPack,
     private readonly logger: Logger,
     private readonly onCrash?: CodexCrashHandler
-  ) {}
+  ) {
+    this.nestedAgentLimiter = new ClaudeNestedAgentLimiter(config.subagents.claude.maxConcurrentNestedAgents);
+  }
 
   async start(): Promise<void> {
     if (this.alive && this.query) return;
@@ -520,6 +531,12 @@ export class ClaudeMainAgentClient implements MainAgentClient {
       nudgeSent: false
     };
     this.activeTurn = turn;
+    // Turn boundary: drop any admitted-but-never-released Agent slot, so a
+    // PostToolUse lost to an interrupt cannot wedge the cap shut for this
+    // long-lived session. This does NOT forget agents the SDK still reports as
+    // live — a turn released at `nestedAgentHoldMaxMs` can and does outlive
+    // them, and they must keep holding the cap into the next turn.
+    this.nestedAgentLimiter.reset();
     this.logBuffer.append("event", `[TURN START] session_id=${this.sessionId ?? "?"}`);
     try {
       if (rolledOver) {
@@ -1204,7 +1221,7 @@ export class ClaudeMainAgentClient implements MainAgentClient {
         ...this.safeEnv,
         CLAUDE_AGENT_SDK_CLIENT_APP: "codex-chat/main"
       },
-      systemPrompt: `${bootstrap}\n\n${CLAUDE_MAIN_NESTED_AGENT_GUIDANCE}`,
+      systemPrompt: `${bootstrap}\n\n${claudeMainNestedAgentGuidance(this.nestedAgentLimiter.cap)}`,
       model: cfg.model,
       effort: cfg.effort as ClaudeEffortLevel,
       permissionMode: cfg.permissionMode,
@@ -1224,24 +1241,45 @@ export class ClaudeMainAgentClient implements MainAgentClient {
           {
             matcher: CLAUDE_AGENT_TOOL_NAME,
             hooks: [
-              buildForceForegroundNestedAgentsHook(({ subagentType }) => {
-                this.logBuffer.append(
-                  "event",
-                  `[NESTED AGENT] forced foreground subagent_type=${subagentType ?? "unspecified"}`
-                );
-                this.logger.info(
-                  {
-                    component: "claude-main-agent",
-                    event: "claude_nested_agent_forced_foreground",
-                    sessionId: this.sessionId,
-                    subagentType
-                  },
-                  "rewrote a nested Agent call to run in the foreground"
-                );
+              this.nestedAgentLimiter.buildPreToolUseHook({
+                onRewrite: ({ subagentType }) => {
+                  this.logBuffer.append(
+                    "event",
+                    `[NESTED AGENT] forced foreground subagent_type=${subagentType ?? "unspecified"}`
+                  );
+                  this.logger.info(
+                    {
+                      component: "claude-main-agent",
+                      event: "claude_nested_agent_forced_foreground",
+                      sessionId: this.sessionId,
+                      subagentType
+                    },
+                    "rewrote a nested Agent call to run in the foreground"
+                  );
+                },
+                onDenied: ({ subagentType, liveCount, cap }) => {
+                  this.logBuffer.append(
+                    "event",
+                    `[NESTED AGENT] fan-out capped live=${liveCount} cap=${cap} subagent_type=${subagentType ?? "unspecified"}`
+                  );
+                  this.logger.warn(
+                    {
+                      component: "claude-main-agent",
+                      event: "claude_nested_agent_fanout_capped",
+                      sessionId: this.sessionId,
+                      subagentType,
+                      liveCount,
+                      cap
+                    },
+                    "denied a nested Agent call: nested-agent concurrency cap reached"
+                  );
+                }
               })
             ]
           }
-        ]
+        ],
+        PostToolUse: [{ matcher: CLAUDE_AGENT_TOOL_NAME, hooks: [this.nestedAgentLimiter.buildPostToolUseHook()] }],
+        PostToolUseFailure: [{ matcher: CLAUDE_AGENT_TOOL_NAME, hooks: [this.nestedAgentLimiter.buildPostToolUseHook()] }]
       },
       strictMcpConfig: true,
       includePartialMessages: true,
@@ -1512,6 +1550,7 @@ export class ClaudeMainAgentClient implements MainAgentClient {
     const previousNestedAgentCount = this.liveNestedAgentTasks.length;
     this.liveBackgroundTasks = normalizeClaudeBackgroundTasks(tasks);
     this.liveNestedAgentTasks = this.liveBackgroundTasks.filter((task) => isClaudeNestedAgentTask(task.taskType));
+    this.nestedAgentLimiter.noteLiveNestedAgentTasks(this.liveNestedAgentTasks);
     if (previousNestedAgentCount === this.liveNestedAgentTasks.length && this.liveNestedAgentTasks.length === 0) return;
     this.logBuffer.append(
       "event",

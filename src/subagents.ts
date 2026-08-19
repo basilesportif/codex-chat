@@ -227,6 +227,19 @@ export function resultTargetForRoute(route: Route): SubagentResultTarget {
   return "main";
 }
 
+/** One interrupted, never-reported job found by the startup orphan scan. */
+export interface OrphanedJobNotice {
+  jobId: string;
+  profile: string;
+  summary: string;
+  backend?: SubagentBackendKind;
+  /** `crashed` = no clean shutdown; `shutdown` = cancelled by service teardown. */
+  reason: "crashed" | "shutdown";
+  interruptedAt: string;
+  chatId?: number;
+  messageId?: number;
+}
+
 export function jobResultTarget(job: SubagentJob): SubagentResultTarget {
   return job.resultTarget ?? resultTargetForRoute(job.route);
 }
@@ -244,6 +257,21 @@ export class SubagentManager {
    * subagent pool can balloon under bursty load.
    */
   private draining = false;
+  /**
+   * Set-once latch by {@link prepareForServiceShutdown}. There is deliberately
+   * no reset: the contract is that the process exits after shutdown is
+   * prepared, and a SubagentManager instance is never reused afterwards. Any
+   * future path that tears down without exiting must construct a fresh
+   * manager — leaving this latched would stop recording deliveries, and every
+   * later job would look orphaned to the next startup scan.
+   *
+   * While it is set, a terminal
+   * result handed to a delivery callback is NOT counted as delivered: the main
+   * loop and every surface are being torn down around it, so whatever the
+   * callback does with the result never reaches the user. The startup orphan
+   * scan relies on that distinction.
+   */
+  private serviceShuttingDown = false;
 
   constructor(
     private readonly config: AppConfig,
@@ -424,6 +452,93 @@ export class SubagentManager {
     }
     this.logger.info({ component: "subagents", event: "load_jobs", loaded: persisted.length, abandoned }, "loaded persisted subagent jobs");
     return { loaded: persisted.length, abandoned };
+  }
+
+  /**
+   * Startup scan for jobs the previous process never finished reporting on.
+   *
+   * Two ways a job ends up here, both backend-agnostic (Codex-backed and
+   * Claude-backed records are treated identically — this is job-store logic):
+   *
+   * 1. **Crash.** The process died without a clean shutdown (the 2026-08-18
+   *    OOM kill), leaving `running`/`cancelling` records behind. NOTE: the
+   *    brief describes marking those `running -> cancelled` here, but
+   *    {@link loadJobs} already flips every still-active persisted record to
+   *    `abandoned` on every boot, and it runs first. So the terminal marking
+   *    already exists; what was missing is the notice. Both statuses are
+   *    accepted so the scan is correct whatever order it is called in.
+   * 2. **Clean shutdown.** `prepareForServiceShutdown` cancels running jobs
+   *    with `cancelReason: "shutdown"`. Their results, if any were produced,
+   *    were handed to a main loop that was itself being destroyed.
+   *
+   * Jobs that actually delivered a result while the service was healthy carry
+   * `resultDeliveredAt` and are skipped. `orphanHandledAt` is stamped (and
+   * persisted) for every job the scan claims, so a second restart cannot
+   * re-notify.
+   *
+   * The age window bounds the scan itself, not just the notice: anything older
+   * is already terminal in the store, a notice about it would be archaeology
+   * rather than news, and re-stamping thousands of historical records on every
+   * boot is pure I/O.
+   */
+  async markStartupOrphans(nowMs = Date.now()): Promise<OrphanedJobNotice[]> {
+    const maxAgeMs = this.config.subagents.orphanNoticeMaxAgeHours * 3_600_000;
+    const at = nowIso();
+    const notices: OrphanedJobNotice[] = [];
+    for (const job of this.jobs.values()) {
+      if (job.orphanHandledAt || job.resultDeliveredAt) continue;
+      const interrupted = ACTIVE_JOB_STATUSES.has(job.status) || job.status === "abandoned";
+      const shutdownCancelled = job.cancelReason === "shutdown" && TERMINAL_JOB_STATUSES.has(job.status);
+      if (!interrupted && !shutdownCancelled) continue;
+      // A job still running at a CLEAN shutdown is marked `cancelling` with
+      // `cancelReason: "shutdown"` and then flipped to `abandoned` by loadJobs
+      // on the next boot, so it matches both predicates. The explicit
+      // shutdown signal wins: an ordinary deploy restart must not tell the
+      // user codex-chat crashed.
+      const reason: OrphanedJobNotice["reason"] = shutdownCancelled ? "shutdown" : "crashed";
+      const interruptedAt = job.abandonedAt ?? job.completedAt ?? job.cancelRequestedAt ?? job.startedAt ?? job.enqueuedAt;
+      if (!interruptedAt) continue;
+      const interruptedMs = Date.parse(interruptedAt);
+      if (!Number.isFinite(interruptedMs) || nowMs - interruptedMs > maxAgeMs) continue;
+      if (ACTIVE_JOB_STATUSES.has(job.status)) {
+        job.status = "cancelled";
+        job.cancelRequestedAt ??= at;
+        job.completedAt ??= at;
+      }
+      if (reason === "crashed") job.cancelReason ??= "orphaned_at_startup";
+      job.orphanHandledAt = at;
+      await this.state.saveJob(job).catch((error) => {
+        this.logger.warn({ component: "subagents", event: "orphan_mark_failed", jobId: job.id, error }, "could not persist orphaned subagent job marking");
+      });
+      notices.push({
+        jobId: job.id,
+        profile: job.profile,
+        summary: (job.summary ?? "").trim(),
+        backend: job.backend,
+        reason,
+        interruptedAt,
+        chatId: job.originChatId,
+        messageId: job.originMessageId
+      });
+    }
+    if (notices.length > 0) {
+      this.logger.warn(
+        { component: "subagents", event: "orphaned_jobs_found", count: notices.length, jobIds: notices.map((notice) => notice.jobId) },
+        "found subagent jobs interrupted by a crash or shutdown that never reported back"
+      );
+    }
+    return notices;
+  }
+
+  /** Records that the interruption notice for these jobs was actually sent. */
+  async recordOrphanNoticeSent(jobIds: string[]): Promise<void> {
+    const at = nowIso();
+    for (const jobId of jobIds) {
+      const job = this.jobs.get(jobId);
+      if (!job || job.orphanNoticeSentAt) continue;
+      job.orphanNoticeSentAt = at;
+      await this.state.saveJob(job).catch(() => undefined);
+    }
   }
 
   async loadRuntimeBackendOverride(): Promise<SubagentBackendStatus> {
@@ -643,6 +758,7 @@ export class SubagentManager {
   }
 
   prepareForServiceShutdown(reason = "shutdown"): void {
+    this.serviceShuttingDown = true;
     const at = nowIso();
     for (const input of this.queue) {
       const job = input.id ? this.jobs.get(input.id) : undefined;
@@ -908,6 +1024,10 @@ export class SubagentManager {
       if (target === "user") await this.callbacks.onSendToUser(result);
       if (target === "employee") await this.callbacks.onReturnToEmployee?.(result);
       if (target === "admins") await this.callbacks.onSendToAdmins?.(result);
+      if (!this.serviceShuttingDown && !job.resultDeliveredAt) {
+        job.resultDeliveredAt = nowIso();
+        await this.state.saveJob(job).catch(() => undefined);
+      }
     } catch (error) {
       this.logger.error({ component: "subagents", event: "callback_failed", jobId: job.id, route: job.route, resultTarget: jobResultTarget(job), error }, "subagent result delivery failed");
     }

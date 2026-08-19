@@ -40,6 +40,14 @@ ExecStart=${runtime} ${main} --config ${config.configPath} start
 Restart=always
 RestartSec=5
 StartLimitIntervalSec=0
+# Memory guard (2026-08-19). Steady-state RSS is ~940MB; the 2026-08-18 OOM
+# peaked over 3GB when one job fanned out to three nested claude processes
+# on top of the main loop and an operator subagent, and the kernel killed the
+# unit. MemoryHigh throttles the cgroup and reclaims into the 4GB swapfile
+# before that point instead of killing anything. Deliberately NO MemoryMax:
+# a hard ceiling would just re-create the kill under a different name.
+MemoryAccounting=yes
+MemoryHigh=2500M
 # NoNewPrivileges is intentionally NOT set: the system crontab binary is
 # setgid (group crontab) and loop sync invokes it to install the managed
 # block. NoNewPrivileges=true would silently break "codex-chat loop sync"

@@ -12,6 +12,23 @@ import { formatTelegramReplyContextBlock, injectFilePath, INJECT_TELEGRAM_USER_I
 import type { CodexEvent, MainAgentContextStats, MainAgentTurnWatchdogState, SubagentJob, UserEvent } from "../types.js";
 
 const tempDirs: string[] = [];
+
+function orphanJobRecord(overrides: Partial<SubagentJob> & { id: string }): SubagentJob {
+  return {
+    profile: "operator",
+    route: "return_to_main",
+    status: "running",
+    promptPath: `/tmp/${overrides.id}/prompt.md`,
+    artifactDir: `/tmp/${overrides.id}`,
+    enqueuedAt: new Date().toISOString(),
+    ...overrides
+  } as SubagentJob;
+}
+
+async function readJobRecord(rootDir: string, jobId: string): Promise<SubagentJob> {
+  return JSON.parse(await readFile(join(rootDir, "state", "jobs", `${jobId}.json`), "utf8")) as SubagentJob;
+}
+
 const services: ServiceSupervisor[] = [];
 
 async function loadTestConfig(transport = "app-server", extraToml = "") {
@@ -641,6 +658,124 @@ describe("service supervisor", () => {
     expect(sendText).toHaveBeenCalledWith(253768951, "⚠️ Service was restarted. Please resend your message.", 123);
     const turn = JSON.parse(await readFile(join(config.rootDir, "state", "turns", "turn_old.json"), "utf8")) as { status: string };
     expect(turn.status).toBe("abandoned");
+  });
+
+  test("notifies the originating chat once about subagent jobs orphaned by a crash or shutdown, batching per chat", async () => {
+    const config = await loadTestConfig();
+    const logger = createLogger("silent");
+    const service = makeService(config, logger);
+    await service.state.init();
+    const sendText = vi.spyOn(service.telegram, "sendText").mockResolvedValue();
+    const recent = new Date(Date.now() - 5 * 60_000).toISOString();
+    // (a) killed mid-flight without a clean shutdown: still marked running.
+    await service.state.writeJson("jobs/job_crashed.json", orphanJobRecord({
+      id: "job_crashed",
+      status: "running",
+      startedAt: recent,
+      summary: "Add league matches to the Football calendar",
+      originChatId: 253768951,
+      backend: "claude_agent_sdk"
+    }));
+    // (b) cancelled by a clean shutdown, same chat -> batched into one message.
+    await service.state.writeJson("jobs/job_shutdown.json", orphanJobRecord({
+      id: "job_shutdown",
+      status: "cancelled",
+      cancelReason: "shutdown",
+      startedAt: recent,
+      completedAt: recent,
+      summary: "Summarize the weekly metrics",
+      originChatId: 253768951,
+      backend: "codex_exec"
+    }));
+    // Different chat -> its own message. Also the clean-shutdown shape that
+    // looks like a crash on the next boot: still `cancelling` when the service
+    // stopped, so loadJobs flips it to `abandoned` while `cancelReason` stays
+    // "shutdown". The explicit signal must win — an ordinary deploy restart
+    // must not tell the user codex-chat crashed.
+    await service.state.writeJson("jobs/job_other_chat.json", orphanJobRecord({
+      id: "job_other_chat",
+      status: "cancelling",
+      cancelReason: "shutdown",
+      startedAt: recent,
+      cancelRequestedAt: recent,
+      summary: "Check the deploy logs",
+      originChatId: 4242,
+      backend: "codex_exec"
+    }));
+    // A third chat whose job really did die without a clean shutdown.
+    await service.state.writeJson("jobs/job_hard_crash.json", orphanJobRecord({
+      id: "job_hard_crash",
+      status: "running",
+      startedAt: recent,
+      summary: "Scrape the fixture list",
+      originChatId: 777,
+      backend: "claude_agent_sdk"
+    }));
+    // Delivered its result while the service was healthy -> not an orphan.
+    await service.state.writeJson("jobs/job_delivered.json", orphanJobRecord({
+      id: "job_delivered",
+      status: "cancelled",
+      cancelReason: "shutdown",
+      startedAt: recent,
+      completedAt: recent,
+      resultDeliveredAt: recent,
+      summary: "Already reported back",
+      originChatId: 253768951
+    }));
+    // Older than the 24h window -> marked terminal by loadJobs, never notified.
+    const old = new Date(Date.now() - 48 * 3_600_000).toISOString();
+    await service.state.writeJson("jobs/job_ancient.json", orphanJobRecord({
+      id: "job_ancient",
+      status: "cancelled",
+      cancelReason: "shutdown",
+      startedAt: old,
+      completedAt: old,
+      summary: "Ancient interrupted task",
+      originChatId: 253768951
+    }));
+
+    const subagents = (service as unknown as { subagents: { loadJobs(): Promise<unknown> } }).subagents;
+    await subagents.loadJobs();
+    await (service as unknown as { notifyOrphanedJobs(): Promise<void> }).notifyOrphanedJobs();
+
+    expect(sendText).toHaveBeenCalledTimes(3);
+    const tim = sendText.mock.calls.find((call) => call[0] === 253768951)?.[1] ?? "";
+    expect(tim).toContain("2 background tasks were interrupted");
+    expect(tim).toContain("Add league matches to the Football calendar");
+    expect(tim).toContain("Summarize the weekly metrics");
+    expect(tim).toContain("Resend any of those requests");
+    expect(tim).not.toContain("Already reported back");
+    expect(tim).not.toContain("Ancient interrupted task");
+    const other = sendText.mock.calls.find((call) => call[0] === 4242)?.[1] ?? "";
+    expect(other).toContain("interrupted when codex-chat restarted");
+    expect(other).not.toContain("crashed");
+    expect(other).toContain("Check the deploy logs");
+    const hardCrash = sendText.mock.calls.find((call) => call[0] === 777)?.[1] ?? "";
+    expect(hardCrash).toContain("interrupted when codex-chat crashed");
+    expect(hardCrash).toContain("Scrape the fixture list");
+    // The clean-shutdown orphan keeps its original reason; only a true crash
+    // gets the distinct startup-orphan marker.
+    expect((await readJobRecord(config.rootDir, "job_other_chat")).cancelReason).toBe("shutdown");
+    expect((await readJobRecord(config.rootDir, "job_hard_crash")).cancelReason).toBe("orphaned_at_startup");
+
+    // The crashed job is terminal now, and both notified jobs carry the
+    // persisted guard.
+    const crashed = await readJobRecord(config.rootDir, "job_crashed");
+    expect(crashed.status).toBe("abandoned");
+    expect(crashed.orphanHandledAt).toBeTruthy();
+    expect(crashed.orphanNoticeSentAt).toBeTruthy();
+    const shutdown = await readJobRecord(config.rootDir, "job_shutdown");
+    expect(shutdown.orphanNoticeSentAt).toBeTruthy();
+    const ancient = await readJobRecord(config.rootDir, "job_ancient");
+    expect(ancient.orphanHandledAt).toBeUndefined();
+
+    // A SECOND restart must not re-notify: fresh service, same job store.
+    const second = makeService(config, logger);
+    await second.state.init();
+    const secondSend = vi.spyOn(second.telegram, "sendText").mockResolvedValue();
+    await (second as unknown as { subagents: { loadJobs(): Promise<unknown> } }).subagents.loadJobs();
+    await (second as unknown as { notifyOrphanedJobs(): Promise<void> }).notifyOrphanedJobs();
+    expect(secondSend).not.toHaveBeenCalled();
   });
 
   test("handles Employee scaffold list command before Codex", async () => {

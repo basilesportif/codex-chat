@@ -128,6 +128,16 @@ const claudeSubagentSchema = z.object({
   // run produces no extra result message; if the SDK stays silent for
   // this window, the recorded result is treated as final.
   steerSettleGraceMs: z.number().int().positive().default(10_000),
+  // Hard ceiling on nested agents running CONCURRENTLY inside one Claude
+  // session (child job or main loop — this is a host-memory guard, so one
+  // knob governs both depths). Each nested agent is its own `claude` process
+  // holding its own payloads: on 2026-08-18 a single job fanned out to three
+  // parallel investigators which, with the main loop and the operator
+  // subagent, put five such processes on a 3.8GB host and the kernel
+  // OOM-killed the unit. Excess Agent calls are denied with an instructive
+  // message rather than queued, so the model waits or works sequentially.
+  // 0 disables the cap (forced-foreground rewrite still applies).
+  maxConcurrentNestedAgents: z.number().int().nonnegative().default(2),
 });
 
 const claudeMainAgentSchema = z.object({
@@ -378,6 +388,13 @@ const configSchema = z.object({
     childInterruptGraceMs: z.number().int().positive().default(5000),
     allowedProfiles: z.array(z.string()).default([]),
     cleanupArtifacts: z.boolean().default(true),
+    // How far back the startup orphan scan looks for jobs that were killed
+    // mid-flight (crash or clean shutdown) and never reported anything to the
+    // user. Both the marking and the Telegram notice are bounded by this
+    // window: anything older is already terminal in the store (loadJobs
+    // abandons active records on every boot) and a notice about a task the
+    // user asked for days ago is noise, not news.
+    orphanNoticeMaxAgeHours: z.number().positive().default(24),
     claude: claudeSubagentSchema.prefault({}),
   }).prefault({}),
   employees: z.object({
@@ -641,6 +658,16 @@ export const ENV_OVERRIDE_SPECS: EnvOverrideSpec[] = [
     { name: "CODEX_CHAT_SUBAGENTS_CLAUDE_ALLOWED_TOOLS", path: ["subagents", "claude", "allowedTools"], parse: splitCsvEnv },
     { name: "CODEX_CHAT_SUBAGENTS_CLAUDE_DISALLOWED_TOOLS", path: ["subagents", "claude", "disallowedTools"], parse: splitCsvEnv },
     { name: "CODEX_CHAT_SUBAGENTS_CLAUDE_FAST_MODE", path: ["subagents", "claude", "fastMode"], parse: parseBooleanEnv },
+    {
+      name: "CODEX_CHAT_SUBAGENTS_CLAUDE_MAX_CONCURRENT_NESTED_AGENTS",
+      path: ["subagents", "claude", "maxConcurrentNestedAgents"],
+      parse: parseNumberEnv,
+    },
+    {
+      name: "CODEX_CHAT_SUBAGENTS_ORPHAN_NOTICE_MAX_AGE_HOURS",
+      path: ["subagents", "orphanNoticeMaxAgeHours"],
+      parse: parseNumberEnv,
+    },
     {
       name: "CODEX_CHAT_API_ENABLED",
       path: ["api", "enabled"],

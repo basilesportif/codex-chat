@@ -51,6 +51,7 @@ import {
   resultTargetForRoute,
   type ActiveSubagentJobSnapshot,
   type CancelJobResult,
+  type OrphanedJobNotice,
   type SteerJobResult,
   type SubagentBackendStatus,
   type SubagentTerminalResult
@@ -264,6 +265,30 @@ function fenceQuotedBody(text: string): string {
  * inert noise — while still scoping the replied-to body as data rather than as a new
  * instruction from the user.
  */
+/**
+ * One concise Telegram notice covering every job in a chat that a crash or
+ * restart interrupted. Deliberately short and actionable: what was interrupted,
+ * and that resending the request retries it. Nothing is auto-retried — a task
+ * killed by an OOM would just be replayed into the same wall.
+ */
+export function formatOrphanedJobsNotice(orphans: OrphanedJobNotice[]): string {
+  const label = (orphan: OrphanedJobNotice): string =>
+    compactText(orphan.summary || `${orphan.profile} subagent job`, { maxLength: 160 });
+  if (orphans.length === 1) {
+    const orphan = orphans[0] as OrphanedJobNotice;
+    return [
+      `⚠️ A background task was interrupted when codex-chat ${orphan.reason === "crashed" ? "crashed" : "restarted"} and never finished:`,
+      `• ${label(orphan)}`,
+      "No result was delivered. Resend the request if you still want it done."
+    ].join("\n");
+  }
+  return [
+    `⚠️ ${orphans.length} background tasks were interrupted when codex-chat restarted and never finished:`,
+    ...orphans.map((orphan) => `• ${label(orphan)}`),
+    "No results were delivered. Resend any of those requests if you still want them done."
+  ].join("\n");
+}
+
 export function formatTelegramReplyContextBlock(reply: TelegramReplyContext): string {
   const replied = reply.replyToMessage;
   // Everything the model can actually resolve "this"/"that" against: a reproduced body,
@@ -2851,6 +2876,54 @@ export class ServiceSupervisor {
   private async recoverAbandonedWork(): Promise<void> {
     await this.abandonStuckTurns();
     await this.abandonQueuedTurns();
+    await this.notifyOrphanedJobs();
+  }
+
+  /**
+   * Tell the user about subagent jobs the previous process was killed in the
+   * middle of. Runs from `recoverAbandonedWork()`, i.e. after `telegram.start()`
+   * and alongside the existing "please resend your message" turn recovery, so
+   * it uses the same outbound path and the same moment in startup.
+   *
+   * Batched per chat: one restart that killed four jobs sends one message, not
+   * four. Anything the scan claimed is marked persistently whether or not the
+   * send succeeds, so a notification loop is structurally impossible.
+   */
+  private async notifyOrphanedJobs(): Promise<void> {
+    const orphans = await this.subagents.markStartupOrphans().catch((error) => {
+      this.logger.error({ component: "service", event: "orphan_scan_failed", error }, "startup scan for orphaned subagent jobs failed");
+      return [] as OrphanedJobNotice[];
+    });
+    if (orphans.length === 0) return;
+    const byChat = new Map<number, OrphanedJobNotice[]>();
+    for (const orphan of orphans) {
+      if (orphan.chatId === undefined) continue;
+      const bucket = byChat.get(orphan.chatId) ?? [];
+      if (!byChat.has(orphan.chatId)) byChat.set(orphan.chatId, bucket);
+      bucket.push(orphan);
+    }
+    const notified: string[] = [];
+    for (const [chatId, chatOrphans] of byChat) {
+      try {
+        await this.telegram.sendText(chatId, formatOrphanedJobsNotice(chatOrphans));
+        notified.push(...chatOrphans.map((orphan) => orphan.jobId));
+      } catch (error) {
+        this.logger.error({ component: "service", event: "orphan_notice_failed", chatId, error }, "failed to send orphaned-subagent notice to Telegram");
+      }
+    }
+    await this.subagents.recordOrphanNoticeSent(notified);
+    this.logger.warn(
+      {
+        component: "service",
+        event: "orphaned_jobs_notified",
+        orphans: orphans.length,
+        notified: notified.length,
+        chats: byChat.size,
+        withoutChat: orphans.length - orphans.filter((orphan) => orphan.chatId !== undefined).length,
+        jobIds: orphans.map((orphan) => orphan.jobId)
+      },
+      "notified users about subagent jobs interrupted by a crash or restart"
+    );
   }
 
   private async abandonStuckTurns(): Promise<void> {

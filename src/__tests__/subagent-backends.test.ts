@@ -591,7 +591,7 @@ describe("Claude Agent SDK subagent backend", () => {
     expect(agents.implementer?.tools).toEqual(expect.arrayContaining(["Write", "Edit"]));
     expect(agents.investigator?.tools).not.toEqual(expect.arrayContaining(["Write", "Edit"]));
     expect(agents.reviewer?.tools).not.toEqual(expect.arrayContaining(["Write", "Edit"]));
-    const guidance = nativeAgentGuidance(agents as never);
+    const guidance = nativeAgentGuidance(agents as never, 2);
     const initialText = (prompts[0] as { message: { content: Array<{ text: string }> } }).message.content[0]?.text;
     expect(initialText).toBe(`do claude work\n\n${guidance}`);
     expect(initialText).toContain("implementer (haiku)");
@@ -1299,6 +1299,93 @@ describe("Claude Agent SDK subagent backend", () => {
 
     const events = await readFile(join(root, "events.jsonl"), "utf8");
     expect(events).toContain("claude_nested_agent_forced_foreground");
+    stream.end();
+    await started.kill("SIGTERM");
+    await backend.shutdown();
+  });
+
+  test("caps concurrent nested agents: the call past the cap is denied, and a slot frees when one finishes", async () => {
+    vi.resetModules();
+    const root = await mkdtemp(join(tmpdir(), "codex-chat-subagent-claude-"));
+    tempDirs.push(root);
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "oauth-secret-value";
+    const stream = pushDrivenSdkStream();
+    vi.doMock("@anthropic-ai/claude-agent-sdk", () => ({ query: stream.queryMock }));
+
+    const { ClaudeAgentSdkChildAgentBackend } = await import("../subagent-backends.js");
+    const config = enableClaude(testConfig(root));
+    // Cap of 2 is the default; set it explicitly to prove it is configurable.
+    config.subagents.claude!.maxConcurrentNestedAgents = 2;
+    const backend = new ClaudeAgentSdkChildAgentBackend(config, fakeLogger() as never);
+    const job = subagentJob(root, "job_claudefanoutcap0000000000000000");
+    const started = await backend.start({
+      job,
+      assembledPrompt: "investigate three things",
+      lastMessagePath: join(root, "last-message.md"),
+      stdoutPath: join(root, "events.jsonl"),
+      stderrPath: join(root, "stderr.log"),
+      appServerLogPath: join(root, "app-server.log"),
+      model: "claude-opus-5",
+      effort: "high",
+      serviceTier: "fast",
+      serviceTierMode: "auto",
+      images: [],
+      onJobUpdated: vi.fn().mockResolvedValue(undefined)
+    });
+
+    const options = stream.queryMock.mock.calls[0]?.[0].options as {
+      hooks?: Record<string, Array<{ matcher?: string; hooks: Array<(input: unknown) => Promise<never>> }>>;
+    };
+    const pre = options.hooks?.PreToolUse?.[0]?.hooks[0] as (input: unknown) => Promise<Record<string, never>>;
+    const post = options.hooks?.PostToolUse?.[0]?.hooks[0] as (input: unknown) => Promise<Record<string, never>>;
+    expect(options.hooks?.PostToolUse?.[0]?.matcher).toBe("Agent");
+    expect(options.hooks?.PostToolUseFailure?.[0]?.matcher).toBe("Agent");
+
+    const agentCall = (toolUseId: string) => ({
+      hook_event_name: "PreToolUse",
+      tool_name: "Agent",
+      tool_use_id: toolUseId,
+      tool_input: { prompt: "investigate", subagent_type: "investigator", run_in_background: true }
+    });
+
+    // The model fires three Agent calls in one message (the 2026-08-18 OOM
+    // shape): the first two are admitted and rewritten to the foreground.
+    for (const id of ["toolu_1", "toolu_2"]) {
+      expect(await pre(agentCall(id))).toMatchObject({
+        continue: true,
+        hookSpecificOutput: { updatedInput: { run_in_background: false } }
+      });
+    }
+    const denied = await pre(agentCall("toolu_3")) as {
+      continue: boolean;
+      hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string };
+    };
+    expect(denied.continue).toBe(true);
+    expect(denied.hookSpecificOutput.permissionDecision).toBe("deny");
+    expect(denied.hookSpecificOutput.permissionDecisionReason).toContain("allows at most 2 at a time");
+    expect(denied.hookSpecificOutput.permissionDecisionReason).toContain("was NOT started");
+    expect(denied.hookSpecificOutput.permissionDecisionReason).toContain("Wait for a running nested agent to finish");
+
+    // One finishes -> the slot frees and the next call is admitted again.
+    await post({ hook_event_name: "PostToolUse", tool_name: "Agent", tool_use_id: "toolu_1", tool_input: {}, tool_response: {} });
+    expect(await pre(agentCall("toolu_4"))).toMatchObject({
+      continue: true,
+      hookSpecificOutput: { updatedInput: { run_in_background: false } }
+    });
+    // ...and the cap holds again at the same ceiling.
+    expect(await pre(agentCall("toolu_5"))).toMatchObject({
+      hookSpecificOutput: { permissionDecision: "deny" }
+    });
+
+    // Non-Agent tools are untouched by the cap.
+    expect(await pre({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_use_id: "toolu_6", tool_input: { command: "ls" } }))
+      .toEqual({ continue: true });
+
+    const events = await readFile(join(root, "events.jsonl"), "utf8");
+    expect(events).toContain("claude_nested_agent_fanout_capped");
+    // The launch prompt states the same limit the hook enforces.
+    const initialPrompt = (stream.prompts[0] as { message: { content: Array<{ text: string }> } }).message.content[0]?.text ?? "";
+    expect(initialPrompt).toContain("Never run more than 2 nested agents at once");
     stream.end();
     await started.kill("SIGTERM");
     await backend.shutdown();

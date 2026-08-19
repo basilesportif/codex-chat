@@ -294,6 +294,20 @@ filesystem agent definitions loaded via `settingSources` — none of which
 codex-chat can annotate, which is why the main loop forces foreground execution
 with a `PreToolUse` hook instead.
 
+That same `PreToolUse` hook (`ClaudeNestedAgentLimiter` in
+`src/claude-nested-agents.ts`) also caps how many nested agents may run
+CONCURRENTLY in one session:
+`[subagents.claude].maxConcurrentNestedAgents` (default 2, env
+`CODEX_CHAT_SUBAGENTS_CLAUDE_MAX_CONCURRENT_NESTED_AGENTS`). The one knob
+governs both depths — a child job and the Claude main loop draw on the same
+host RAM — because forcing foreground execution does not stop a model from
+emitting several `Agent` tool calls in a single assistant message, which is how
+2026-08-18 put five `claude` processes on a 3.8GB host and got the unit
+OOM-killed. Calls past the cap are denied (never queued) with a message telling
+the model to wait for a running agent or work sequentially, and each denial
+logs `claude_nested_agent_fanout_capped`. The systemd backstop lives in
+`deploy/systemd/codex-chat.service.d/memory.conf`.
+
 The models are pinned explicitly on purpose. Per the SDK's
 `AgentDefinition.model` doc comment, the field takes a "model alias ... or full
 model ID" and "if omitted or 'inherit', uses the main model". Leaving it unset

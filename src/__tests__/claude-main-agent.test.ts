@@ -125,6 +125,7 @@ function testConfig(nested?: {
   contextRolloverHardCapTokens?: number;
   handoffSummaryEnabled?: boolean;
   interruptTimeoutSec?: number;
+  maxConcurrentNestedAgents?: number;
 }): AppConfig {
   return {
     rootDir: "/tmp/codex-chat-test",
@@ -154,6 +155,9 @@ function testConfig(nested?: {
         handoffSummaryEnabled: nested?.handoffSummaryEnabled ?? true,
         handoffSummaryModel: "claude-sonnet-5"
       }
+    },
+    subagents: {
+      claude: { maxConcurrentNestedAgents: nested?.maxConcurrentNestedAgents ?? 2 }
     },
     codex: { providerApiKeyEnvNames: ["OPENROUTER_API_KEY"] }
   } as unknown as AppConfig;
@@ -677,6 +681,124 @@ describe("ClaudeMainAgentClient", () => {
     await client.stop();
     expect(sdk.instances[0]?.interrupt).toHaveBeenCalledOnce();
     await expect(client.health()).resolves.toMatchObject({ ok: false, detail: "stopped" });
+  });
+
+  test("caps concurrent nested agents in the main loop, at the configured limit, and frees the slot when one finishes", async () => {
+    const sdk = fakeSdk([{ sessionId: "cap-session" }]);
+    // Configurable: 1 here, not the default 2.
+    const client = await loadClient(sdk, fakeState().state, fakeBehavior(), vi.fn(), testConfig({ maxConcurrentNestedAgents: 1 }));
+    await client.start();
+
+    const options = sdk.instances[0]!.options as {
+      hooks?: Record<string, Array<{ matcher?: string; hooks: Array<(input: unknown) => Promise<Record<string, never>>> }>>;
+      systemPrompt?: string;
+    };
+    expect(options.systemPrompt).toContain("Never run more than 1 nested agent at once");
+    const pre = options.hooks?.PreToolUse?.[0]?.hooks[0] as (input: unknown) => Promise<Record<string, never>>;
+    const post = options.hooks?.PostToolUse?.[0]?.hooks[0] as (input: unknown) => Promise<Record<string, never>>;
+    const agentCall = (toolUseId: string) => ({
+      hook_event_name: "PreToolUse",
+      tool_name: "Agent",
+      tool_use_id: toolUseId,
+      tool_input: { prompt: "investigate", subagent_type: "investigator" }
+    });
+
+    expect(await pre(agentCall("toolu_1"))).toMatchObject({
+      hookSpecificOutput: { updatedInput: { run_in_background: false } }
+    });
+    const denied = await pre(agentCall("toolu_2")) as {
+      hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string };
+    };
+    expect(denied.hookSpecificOutput.permissionDecision).toBe("deny");
+    expect(denied.hookSpecificOutput.permissionDecisionReason).toContain("allows at most 1 at a time");
+    expect(denied.hookSpecificOutput.permissionDecisionReason).toContain("work sequentially");
+
+    await post({ hook_event_name: "PostToolUse", tool_name: "Agent", tool_use_id: "toolu_1", tool_input: {}, tool_response: {} });
+    expect(await pre(agentCall("toolu_3"))).toMatchObject({
+      hookSpecificOutput: { updatedInput: { run_in_background: false } }
+    });
+
+    // A nested agent the SDK reports as live counts even without a PreToolUse
+    // admission of its own (e.g. one that never went through this hook).
+    await post({ hook_event_name: "PostToolUse", tool_name: "Agent", tool_use_id: "toolu_3", tool_input: {}, tool_response: {} });
+    sdk.instances[0]!.sdk.push(
+      backgroundTasksMessage("cap-session", [{ task_id: "task-1", task_type: "local_agent", description: "investigator" }])
+    );
+    let deniedByLiveTask = false;
+    for (let attempt = 0; attempt < 50 && !deniedByLiveTask; attempt++) {
+      const probe = await pre(agentCall("toolu_probe")) as { hookSpecificOutput: { permissionDecision?: string } };
+      deniedByLiveTask = probe.hookSpecificOutput.permissionDecision === "deny";
+      // An admitted probe must give its slot back, or the NEXT probe would be
+      // denied by the probe itself rather than by the live nested task.
+      if (!deniedByLiveTask) {
+        await post({ hook_event_name: "PostToolUse", tool_name: "Agent", tool_use_id: "toolu_probe", tool_input: {}, tool_response: {} });
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      }
+    }
+    expect(deniedByLiveTask).toBe(true);
+    await client.stop();
+  });
+
+  test("nested agents that outlive a turn keep holding the cap across the next turn boundary", async () => {
+    const sdk = fakeSdk([{ sessionId: "survive-session" }]);
+    // Short hold window so the turn is released while the nested agent is
+    // still live — the exact case reset() must not forget.
+    const client = await loadClient(
+      sdk,
+      fakeState().state,
+      fakeBehavior(),
+      vi.fn(),
+      testConfig({ maxConcurrentNestedAgents: 1, holdMaxMs: 20 })
+    );
+    await client.start();
+    const options = sdk.instances[0]!.options as {
+      hooks?: Record<string, Array<{ hooks: Array<(input: unknown) => Promise<Record<string, never>>> }>>;
+    };
+    const pre = options.hooks?.PreToolUse?.[0]?.hooks[0] as (input: unknown) => Promise<Record<string, never>>;
+    const agentCall = (toolUseId: string) => ({
+      hook_event_name: "PreToolUse",
+      tool_name: "Agent",
+      tool_use_id: toolUseId,
+      tool_input: { prompt: "investigate", subagent_type: "investigator" }
+    });
+
+    // One nested agent is live per the SDK. A turn released at
+    // `nestedAgentHoldMaxMs` can end while it is still running, and
+    // background_tasks_changed only fires on CHANGE — so nothing will re-report
+    // it. The next turn must still see it.
+    const eventsPromise = collect(client.sendTurn({ text: "first turn" }));
+    await beginFirstTurn(sdk.instances[0]!);
+    sdk.instances[0]!.sdk.push(
+      backgroundTasksMessage("survive-session", [{ task_id: "task-1", task_type: "local_agent", description: "investigator" }])
+    );
+    await waitFor(() => (client as unknown as { liveNestedAgentTasks: unknown[] }).liveNestedAgentTasks.length === 1);
+    sdk.instances[0]!.sdk.push({
+      type: "result",
+      subtype: "success",
+      result: "done",
+      errors: [],
+      uuid: "r1",
+      session_id: "survive-session"
+    });
+    // The held result is released at the hold window with the agent still live.
+    await eventsPromise;
+
+    const nextTurn = collect(client.sendTurn({ text: "second turn" }));
+    // sendTurn's generator is lazy: probe only once the turn has really begun,
+    // i.e. after the turn-boundary reset() has run.
+    await waitFor(() => (client as unknown as { activeTurn?: unknown }).activeTurn !== undefined);
+    const decision = await pre(agentCall("toolu_next")) as { hookSpecificOutput: { permissionDecision?: string } };
+    expect(decision.hookSpecificOutput.permissionDecision).toBe("deny");
+    sdk.instances[0]!.sdk.push({
+      type: "result",
+      subtype: "success",
+      result: "second",
+      errors: [],
+      uuid: "r2",
+      session_id: "survive-session"
+    });
+    await nextTurn;
+    await client.stop();
   });
 
   test("holds a result that arrives while a nested agent is live, then releases the post-nested result", async () => {

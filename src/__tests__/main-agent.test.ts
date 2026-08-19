@@ -15,6 +15,7 @@ const logger = {} as Logger;
 function configFor(provider: MainAgentProvider, employeesEnabled = false): AppConfig {
   return {
     mainAgent: { provider },
+    subagents: { claude: { maxConcurrentNestedAgents: 2 } },
     employees: { enabled: employeesEnabled }
   } as unknown as AppConfig;
 }
@@ -308,6 +309,7 @@ describe("main-agent minimal contract parity", () => {
           interruptTimeoutSec: 1
         }
       },
+      subagents: { claude: { maxConcurrentNestedAgents: 2 } },
       codex: { providerApiKeyEnvNames: [] }
     } as unknown as AppConfig;
     const claudeState = {

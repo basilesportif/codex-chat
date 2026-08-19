@@ -483,6 +483,23 @@ export interface SubagentJob {
   steerCount?: number;
   /** Live nested/background agents inside a Claude-backed child session; the job cannot complete while this is set. */
   waitingOnNestedAgents?: number;
+  /**
+   * Stamped when this job's terminal result was handed to a delivery callback
+   * while the service was NOT tearing down — i.e. when the user could actually
+   * have been told. Deliberately not stamped during shutdown: the main loop is
+   * being destroyed at that moment, so a `return_to_main` result delivered
+   * then reaches nobody. The startup orphan scan uses this to tell a job that
+   * reported back from one that vanished mid-flight.
+   */
+  resultDeliveredAt?: string;
+  /**
+   * Stamped by the startup orphan scan the first time this job is recognised
+   * as interrupted-and-undelivered. Persisted purely as the idempotence guard:
+   * a second restart must not re-notify.
+   */
+  orphanHandledAt?: string;
+  /** Stamped when the interruption notice for this job actually went out. */
+  orphanNoticeSentAt?: string;
 }
 
 export type EmployeeStatus = "disabled" | "idle" | "proposal_pending" | "running" | "stopped" | "error";

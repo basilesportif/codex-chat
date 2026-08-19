@@ -204,6 +204,7 @@ maxThreadMessages = 5
       settingSources: [],
       fastMode: true,
       steerSettleGraceMs: 10_000,
+      maxConcurrentNestedAgents: 2,
     });
     // Partial [slack] / [slack.context] tables keep defaults for unspecified fields.
     expect(config.slack.enabled).toBe(true);

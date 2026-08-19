@@ -146,6 +146,13 @@ childSocketDir = "data/run/subagents"
 childStartupTimeoutSec = 60
 childInterruptGraceMs = 5000
 allowedProfiles = []
+# At startup, jobs interrupted by a crash or restart that never reported back
+# get one Telegram notice to their originating chat (batched per chat, sent
+# once — the notified state is persisted on the job record). This bounds how
+# far back that scan looks; older records are already terminal and a notice
+# about them would be archaeology.
+# Env override: CODEX_CHAT_SUBAGENTS_ORPHAN_NOTICE_MAX_AGE_HOURS
+orphanNoticeMaxAgeHours = 24
 cleanupArtifacts = true
 
 [subagents.claude]
@@ -189,6 +196,15 @@ settingSources = []
 # codex-chat applies Claude Code fastMode settings when supported and records
 # that serviceTier itself is otherwise ignored.
 fastMode = true
+# Hard ceiling on nested agents running CONCURRENTLY inside one Claude session.
+# Applies at both depths (a child job AND the Claude main loop) because it is a
+# whole-host memory guard: each nested agent is its own `claude` process. On
+# 2026-08-18 a job fanned out to three parallel investigators which, with the
+# main loop and an operator subagent, OOM-killed the service on a 3.8GB host.
+# Calls past the cap are DENIED with an instructive message (wait or work
+# sequentially); 0 disables the cap.
+# Env override: CODEX_CHAT_SUBAGENTS_CLAUDE_MAX_CONCURRENT_NESTED_AGENTS
+maxConcurrentNestedAgents = 2
 
 [employees]
 # Durable Employees are disabled by default. When enabled, the service can start

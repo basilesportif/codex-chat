@@ -396,7 +396,7 @@ Skill docs live at `{{LOGIC_REPO}}/config/skills/`. Read the matching file befor
 |---|---|
 | Todos / tasks | `todo.md` |
 | Bets / betting / odds / units / ROI | `betting.md` |
-| Personal CRM / my contacts / businesses / correspondence | `crm.md` |
+| Personal CRM (explicitly named) / businesses / correspondence | `crm.md` |
 | Work CRM / Galebach CRM / company CRM / Genie OS | `work-crm.md` |
 | Reminders / scheduled notifications | `reminders.md` |
 | Calendar / email / Gmail | `composio.md` |
@@ -408,7 +408,7 @@ Skill docs live at `{{LOGIC_REPO}}/config/skills/`. Read the matching file befor
 
 The skill doc defines the exact workflow, data format, script flags, and confirmation steps. Do not assume — read it.
 
-**Ambiguous "CRM" requests:** there are two CRMs — the personal one (`crm.md`, local JSON) and the work/Galebach one (`work-crm.md`, Genie OS API). If the request does not make clear which, ASK before doing anything; never guess. Work-CRM entities are write-once, so creating a person or company there requires Tim's explicit confirmation of the exact fields first.
+**Ambiguous "CRM" requests:** there are two CRMs — the personal one (`crm.md`, local JSON) and the work/Galebach one (`work-crm.md`, Genie OS API). The ONLY explicit selectors are "personal CRM" → `crm.md`, and "work CRM" / "Galebach CRM" / "company CRM" / "Genie" → `work-crm.md`. Anything else that mentions a CRM without one of those qualifiers — including "my CRM" and "my contacts" — counts as AMBIGUOUS (Tim's decision 2026-08-29): ASK before doing anything; never guess. Work-CRM entities are write-once, so creating a person or company there requires Tim's explicit confirmation of the exact fields first.
 
 Calendar-event safety defaults, repeated here for routing prompts:
 

@@ -396,7 +396,8 @@ Skill docs live at `{{LOGIC_REPO}}/config/skills/`. Read the matching file befor
 |---|---|
 | Todos / tasks | `todo.md` |
 | Bets / betting / odds / units / ROI | `betting.md` |
-| CRM / contacts / businesses / correspondence | `crm.md` |
+| Personal CRM / my contacts / businesses / correspondence | `crm.md` |
+| Work CRM / Galebach CRM / company CRM / Genie OS | `work-crm.md` |
 | Reminders / scheduled notifications | `reminders.md` |
 | Calendar / email / Gmail | `composio.md` |
 | Finance / banking / accounts / transactions | `finance.md` |
@@ -406,6 +407,8 @@ Skill docs live at `{{LOGIC_REPO}}/config/skills/`. Read the matching file befor
 | Scratch/temporary/private preview/quick/one-off pages, simple visualizations, maps, reports, charts, tables, calculators | `generated-web-page.md` |
 
 The skill doc defines the exact workflow, data format, script flags, and confirmation steps. Do not assume — read it.
+
+**Ambiguous "CRM" requests:** there are two CRMs — the personal one (`crm.md`, local JSON) and the work/Galebach one (`work-crm.md`, Genie OS API). If the request does not make clear which, ASK before doing anything; never guess. Work-CRM entities are write-once, so creating a person or company there requires Tim's explicit confirmation of the exact fields first.
 
 Calendar-event safety defaults, repeated here for routing prompts:
 

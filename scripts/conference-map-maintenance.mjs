@@ -10,7 +10,7 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..
 const WORKSPACE_ROOT = "/home/tim/.assistant-claude/workspace";
 const CANONICAL_RESOURCE = path.join(
   WORKSPACE_ROOT,
-  "data/project-resources/it-consulting-firm/decisive-outcomes-conference-listings-canonical.json"
+  "data/project-resources/it-consulting-firm/galebach-and-company-conference-listings-canonical.json"
 );
 const DERIVED_LIST_DIR = path.join(WORKSPACE_ROOT, "data/conference-lists/conference-map");
 const DERIVED_CONFERENCES = path.join(DERIVED_LIST_DIR, "conferences.json");
@@ -28,7 +28,7 @@ const BLOCKED_STAGE_NAMES = new Set([".env", ".git", "node_modules", ".npmrc", "
 
 function usage() {
   return `Usage: node scripts/conference-map-maintenance.mjs [options]\n\n` +
-    `Prune Decisive Outcomes canonical conference records ending before the configured cutoff,\n` +
+    `Prune Galebach and Company canonical conference records ending before the configured cutoff,\n` +
     `rebuild the derived conference-map data, and republish the map via codex-chat-web.\n\n` +
     `Options:\n` +
     `  --dry-run              Validate and stage only; do not write canonical/list data or publish.\n` +
@@ -215,13 +215,13 @@ function buildDerivedManifest(existing, { canonicalPath, store, active, cutoff, 
     ...(existing && typeof existing === "object" ? existing : {}),
     id: PAGE_ID,
     name: PAGE_TITLE,
-    description: "Derived durable copy for the main Decisive Outcomes conference map, rebuilt from the Decisive Outcomes canonical conference listings JSON resource.",
+    description: "Derived durable copy for the main Galebach and Company conference map, rebuilt from the Galebach and Company canonical conference listings JSON resource.",
     createdAt: existing?.createdAt || "2026-06-05T18:35:00.000Z",
     source: `Derived from ${canonicalPath}${store?.canonicalNoteId ? ` (canonical note ${store.canonicalNoteId}, canonicalKey ${store.canonicalKey || "unknown"})` : ""}.`,
     runtimePageId: PAGE_ID,
     dataFile: "conferences.json",
     mainConferenceMap: true,
-    notes: "Do not edit this derived copy as the source of truth. Update the Decisive Outcomes canonical conference listings JSON resource first, then rebuild and republish the map.",
+    notes: "Do not edit this derived copy as the source of truth. Update the Galebach and Company canonical conference listings JSON resource first, then rebuild and republish the map.",
     updatedAt: now,
     recordCount: active.length,
     favoriteCount: favorites.length,

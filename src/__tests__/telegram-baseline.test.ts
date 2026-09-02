@@ -137,7 +137,7 @@ describe("Phase 0 Telegram baseline", () => {
     expect(behavior).toContain("preserves an explicit user model request and Claude/provider overrides");
     expect(behavior).toContain('backend: "claude_agent_sdk"');
     expect(behavior).toContain('`claude-opus-4-8`');
-    expect(behavior).toContain('`claude-fable-5`');
+    expect(behavior).toContain('`claude-fable-5-1`');
   });
 
   test("formats Telegram event metadata and resolvable reply context before user content", async () => {

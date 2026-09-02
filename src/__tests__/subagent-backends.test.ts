@@ -721,6 +721,7 @@ describe("Claude Agent SDK subagent backend", () => {
     expect(claudeFastModeSupported("claude-opus-4-7")).toBe(true);
     expect(claudeFastModeSupported("opus")).toBe(true);
     expect(claudeFastModeSupported("")).toBe(true); // SDK default — let the SDK decide
+    expect(claudeFastModeSupported("claude-fable-5-1")).toBe(false);
     expect(claudeFastModeSupported("claude-fable-5")).toBe(false);
     expect(claudeFastModeSupported("fable")).toBe(false);
     expect(claudeFastModeSupported("claude-sonnet-5")).toBe(false);
@@ -765,7 +766,7 @@ describe("Claude Agent SDK subagent backend", () => {
       stdoutPath: join(root, "events.jsonl"),
       stderrPath: join(root, "stderr.log"),
       appServerLogPath: join(root, "app-server.log"),
-      model: "claude-fable-5",
+      model: "claude-fable-5-1",
       effort: "medium",
       serviceTier: "fast",
       serviceTierMode: "auto",

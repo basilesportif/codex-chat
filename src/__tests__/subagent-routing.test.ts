@@ -62,7 +62,7 @@ describe("Claude-main subagent routing enforcement", () => {
   test("rewrites an unrequested Fable dispatch to the workload default (Fable is explicit-only)", () => {
     const coding = action({
       prompt: "Implement the service code change and run the tests.",
-      model: "claude-fable-5",
+      model: "claude-fable-5-1",
       backend: "claude_agent_sdk",
       effort: "medium",
       serviceTier: "standard"
@@ -137,7 +137,7 @@ describe("Claude-main subagent routing enforcement", () => {
   });
 
   test("an explicitly requested Fable action passes through with the medium-effort default", () => {
-    const input = action({ model: "claude-fable-5", backend: "claude_agent_sdk", effort: "xhigh", serviceTier: "standard" });
+    const input = action({ model: "claude-fable-5-1", backend: "claude_agent_sdk", effort: "xhigh", serviceTier: "standard" });
     const result = normalizeSubagentRouting(input, "Use Fable to review this", "claude_agent_sdk");
 
     expect(result.action).toEqual({ ...input, effort: "medium" });
@@ -145,7 +145,7 @@ describe("Claude-main subagent routing enforcement", () => {
   });
 
   test("an explicit effort on an explicitly requested Fable action is untouched", () => {
-    const input = action({ model: "claude-fable-5", backend: "claude_agent_sdk", effort: "xhigh", serviceTier: "standard" });
+    const input = action({ model: "claude-fable-5-1", backend: "claude_agent_sdk", effort: "xhigh", serviceTier: "standard" });
 
     expect(normalizeSubagentRouting(input, "Use Fable to review this with xhigh effort", "claude_agent_sdk")).toEqual({
       action: input,
@@ -268,7 +268,7 @@ describe("subagent workload routing", () => {
 });
 
 describe("Fable effort default", () => {
-  test.each([["fable"], ["claude-fable-5"]] as const)(
+  test.each([["fable"], ["claude-fable-5-1"], ["claude-fable-5"]] as const)(
     "%s defaults to medium effort when no effort was explicitly requested",
     (model) => {
       const input = action({ model, backend: "claude_agent_sdk", effort: "xhigh", serviceTier: "standard" });

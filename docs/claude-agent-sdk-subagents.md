@@ -8,6 +8,7 @@
    - `claude --version`
    - Opus 4.8 requires Claude Code v2.1.154 or later.
    - Fable 5 requires Claude Code v2.1.170 or later.
+   - Fable 5.1 (`claude-fable-5-1`, released 2026-09-01) requires Claude Code v2.1.257 or later. This repo pins `@anthropic-ai/claude-agent-sdk@0.3.258` (= Claude Code 2.1.258), which satisfies that requirement.
    - Sonnet 5 requires Claude Code v2.1.197 or later.
    - Claude Code v2.1.200 or later validates Agent SDK `setModel()` strings; this machine tested with v2.1.201.
 2. Verify subscription OAuth without printing secrets:
@@ -26,7 +27,7 @@ Use full model IDs in codex-chat dispatches and config examples when pinning beh
 
 | Purpose | Full Claude API / Agent SDK model string | Claude Code alias notes |
 | --- | --- | --- |
-| Most capable generally available model | `claude-fable-5` | `fable`; `best` uses Fable 5 when available, otherwise latest Opus. Fable may trigger safety fallback for some cyber/bio requests. |
+| Most capable generally available model | `claude-fable-5-1` | `fable`; `best` uses Fable 5.1 when available, otherwise latest Opus. Successor to Fable 5 since 2026-09-01: 1M token context window by default, 128k max output tokens, $10/$50 per MTok with cache reads at $0.25 per MTok. `claude-fable-5` remains available as a pinned older snapshot. Fable may trigger safety fallback for some cyber/bio requests. |
 | Complex agentic coding / enterprise work | `claude-opus-5` | Flagship since 2026-07-24; near-Fable intelligence at half the price, supports fast mode. `opus` resolves to Opus 5 (verified live 2026-07-31). `claude-opus-4-8` remains available as a pinned older snapshot. |
 | Daily coding / speed-intelligence balance | `claude-sonnet-5` | `sonnet` currently resolves to Sonnet 5 on the Anthropic API. |
 | Fast, efficient work | `claude-haiku-4-5-20251001` | alias `claude-haiku-4-5`; Claude Code alias `haiku`. |
@@ -36,9 +37,9 @@ Anthropic's current model-ID convention for Claude 4.6 and later uses dateless p
 ## codex-chat dispatch semantics
 
 - `backend: "claude_agent_sdk"` in a `dispatch_subagent` directive routes that single job to Claude. Aliases `"claude"`, `"claude_code"`, and `"claude-agent-sdk"` normalize to the canonical kind. Jobs without a `backend` field use the configured/override default. Explicitly routed queued jobs keep their backend when the runtime override changes.
-- `model` is passed through to the Claude Agent SDK unchanged. For Opus 5, dispatch with `model: "claude-opus-5"`; for Fable 5, dispatch with `model: "claude-fable-5"`.
+- `model` is passed through to the Claude Agent SDK unchanged. For Opus 5, dispatch with `model: "claude-opus-5"`; for Fable 5.1, dispatch with `model: "claude-fable-5-1"`.
 - `effort` maps to the Claude SDK `effort` option for `low`, `medium`, `high`, and `xhigh`.
-- `effort: "none"` or `"minimal"` disables Claude thinking. Do not use those with `claude-fable-5`, because Fable 5 has always-on adaptive thinking and rejects explicit disabled thinking. Prefer `high` for most Fable work and `xhigh` only for the most capability-sensitive workloads.
+- `effort: "none"` or `"minimal"` disables Claude thinking. Do not use those with `claude-fable-5-1`, because Fable 5.1 has always-on adaptive thinking and rejects explicit disabled thinking. Prefer `high` for most Fable work and `xhigh` only for the most capability-sensitive workloads.
 - Claude has no Codex `serviceTier` equivalent. codex-chat records the requested tier for observability. When `serviceTier: "fast"` and `[subagents.claude].fastMode = true`, codex-chat passes Claude Code fast-mode settings when the installed SDK supports them; otherwise tier is ignored.
 - `codexProfile` and `modelProvider` are Codex-provider concepts; the service **rejects** a Claude-routed dispatch that includes them. `serviceTierMode` is resolved for observability only.
 - The backend is steerable while its SDK streaming input session is active; `agent steer <ref> <text>` enqueues a follow-up user message in the same Claude session.

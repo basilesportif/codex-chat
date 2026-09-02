@@ -235,10 +235,11 @@ message in the same session.
 
 Claude model/effort/tier notes: `model` is passed through to Claude unchanged.
 Use pinned model strings such as `claude-opus-4-8` for Opus 4.8 and
-`claude-fable-5` for Fable 5; Claude Code aliases include `opus`, `fable`,
-`sonnet`, `haiku`, and `best`, but aliases can move over time. `low|medium|high|xhigh`
+`claude-fable-5-1` for Fable 5.1 (current Fable since 2026-09-01; `claude-fable-5`
+remains available as a pinned older snapshot); Claude Code aliases include `opus`,
+`fable`, `sonnet`, `haiku`, and `best`, but aliases can move over time. `low|medium|high|xhigh`
 map to Claude SDK effort; `none|minimal` disable Claude thinking and should not
-be used with `claude-fable-5` because Fable 5 uses always-on adaptive thinking.
+be used with `claude-fable-5-1` because Fable 5.1 uses always-on adaptive thinking.
 Codex `serviceTier` has no Claude equivalent, so it is recorded on launch and
 otherwise ignored except that Fast requests apply Claude Code `fastMode`
 settings when the installed SDK supports them.

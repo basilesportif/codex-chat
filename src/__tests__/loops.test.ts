@@ -58,9 +58,9 @@ describe("loops config", () => {
     expect(loops.loops[0]?.model).toBe("gpt-5.4");
     expect(loops.loops[0]?.effort).toBe("high");
     expect(loops.defaults.route).toBe("return_to_main");
-    expect(loops.defaults.model).toBe("gpt-5.6-luna");
-    expect(loops.defaults.effort).toBe("xhigh");
-    expect(loops.defaults.serviceTier).toBe("fast");
+    expect(loops.defaults.model).toBe("gpt-5.6-sol");
+    expect(loops.defaults.effort).toBe("medium");
+    expect(loops.defaults.serviceTier).toBe("standard");
   });
 
   test("catches missing required loop fields", async () => {
@@ -138,8 +138,8 @@ test("uses loop model, effort, and service tier defaults for subagent dispatches
   const config = await writeLoops({
     version: 1,
     defaults: {
-      model: "gpt-5.6-luna",
-      effort: "xhigh",
+      model: "gpt-5.6-sol",
+      effort: "medium",
     },
     loops: [{
       id: "daily-research",
@@ -158,9 +158,9 @@ test("uses loop model, effort, and service tier defaults for subagent dispatches
 
   expect(dispatched).toHaveLength(1);
   expect(dispatched[0]).toMatchObject({
-    model: "gpt-5.6-luna",
-    effort: "xhigh",
-    serviceTier: "fast",
+    model: "gpt-5.6-sol",
+    effort: "medium",
+    serviceTier: "standard",
   });
 });
 

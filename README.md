@@ -263,8 +263,8 @@ lists the available profiles in the main-loop bootstrap prompt
 (`src/behavior.ts`), and when a job starts, the selected profile's markdown is
 read and prepended to the assembled child prompt (`src/subagents.ts`,
 `startJob`) for every backend, Claude included. Each file states routing
-defaults in Codex terms — `gpt-5.6-luna`/xhigh for `researcher` and `operator`,
-`gpt-5.6-sol`/high for `implementer`, `reviewer`, and `debugger` — but those are
+defaults in Codex terms — `gpt-5.6-sol`/medium for `researcher` and `operator`,
+`gpt-6-astra`/high for `implementer`, `reviewer`, and `debugger` — but those are
 documentation, not enforcement: `behavior/AGENTS.md` requires the main loop to
 pick `model`, `effort`, and `serviceTier` explicitly per dispatch rather than
 inheriting a profile default. These files are not Claude Agent SDK agent
@@ -454,25 +454,28 @@ existing scripts, and trivial local lookups that require no interpretation.
 README edits, documentation edits, code changes, repo inspection, calendar or
 email lookup, research, debugging, architecture, multi-step work, ambiguous
 work, and external-data lookup must dispatch a subagent with explicit
-`summary`, `model`, `effort`, and `serviceTier`. Fast is the default tier unless Tim explicitly asks for standard/slow/deep mode or config overrides it.
+`summary`, `model`, `effort`, and `serviceTier`. Standard is the default tier everywhere; Fast applies only when Tim explicitly asks for fast mode / the fast tier, or config overrides it.
 
-The default main loop and routine non-coding dispatch model is
-`gpt-5.6-luna` at xhigh effort. This explicitly includes routine CRM/contact,
-calendar/email, project/todo, research, and other external-data reads or
-mutations, regardless of whether the job runs scripts or uses a profile that
-can write data. Source-code implementation, debugging, code review, software
-architecture, and deploy-sensitive engineering use `gpt-5.6-sol` at high
-effort by default. The `operator` subagent profile exists for bounded
-non-coding domain operations so record mutation is not conflated with code
-implementation. Loop subagent dispatches that omit a per-loop override inherit
-`gpt-5.6-luna`/`xhigh` from `config/loops.json` defaults. Explicit Claude
-routing remains per-dispatch and is unchanged.
+The routine non-coding dispatch model is `gpt-5.6-sol` at medium effort, and
+the Codex main loop itself runs `gpt-5.6-sol` at high effort. Routine covers
+CRM/contact, calendar/email, project/todo, research, other external-data reads
+or mutations, and any workload that cannot be confidently classified,
+regardless of whether the job runs scripts or uses a profile that can write
+data. Source-code implementation, debugging, code review, software
+architecture, and deploy-sensitive engineering use `gpt-6-astra` at high
+effort by default; especially intensive work raises Astra to `xhigh`. The
+`operator` subagent profile exists for bounded non-coding domain operations so
+record mutation is not conflated with code implementation. Loop subagent
+dispatches that omit a per-loop override inherit `gpt-5.6-sol`/`medium` from
+`config/loops.json` defaults. `gpt-5.6-luna` and `gpt-5.6-terra` are no longer
+defaults anywhere and run only when named explicitly. Explicit Claude routing
+remains per-dispatch and is unchanged.
 
 The service also normalizes classifiable dispatches to that rubric as a safety
 net. It preserves explicit user model/effort/tier requests and Claude/provider
 overrides. For example, a CRM follow-up mutation emitted accidentally as
-Sol/high is corrected to Luna/xhigh/fast, while fixing a bug in the CRM script
-is Sol/high/fast.
+Astra/high is corrected to Sol/medium/standard, while fixing a bug in the CRM
+script is Astra/high/standard.
 
 The service does not enforce this policy by keyword-blocking final main-loop
 replies. The main Codex loop must choose the route up front, then either reply

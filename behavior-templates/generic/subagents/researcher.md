@@ -8,7 +8,7 @@ Inputs: clear question, relevant paths, constraints, and expected output.
 
 May edit files: no, unless the prompt explicitly says so.
 
-Defaults: `gpt-5.6-luna`, xhigh effort, fast service tier, 1800 second timeout, route `return_to_main`.
+Defaults: `gpt-5.6-sol`, medium effort, standard service tier, 1800 second timeout, route `return_to_main`.
 
 Routine CRM, calendar, project, external-data, and non-coding research stays on this Luna/xhigh/fast default. Use `operator` when the task must mutate domain data.
 

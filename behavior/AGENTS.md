@@ -144,9 +144,9 @@ Top-level shape (the file always exists; just append to the `loops` array):
     "timezone": "America/New_York",
     "timeoutSec": 1800,
     "route": "return_to_main",
-    "model": "gpt-5.6-luna",
-    "effort": "xhigh",
-    "serviceTier": "fast",
+    "model": "gpt-5.6-sol",
+    "effort": "medium",
+    "serviceTier": "standard",
     "lock": true
   },
   "loops": [ /* loop entries */ ]
@@ -170,9 +170,9 @@ Optional fields:
 - `route`: `return_to_main` | `send_to_admins` | `store_only` | `dispatch_subagent`. Defaults to `defaults.route`.
 - `profile` (string): subagent profile (`researcher`, `operator`, `debugger`, `implementer`, `reviewer`) when route or type involves dispatch.
 - `timeoutSec` (number): per-run timeout. Defaults to `defaults.timeoutSec` (1800).
-- `model` (string): optional Codex model override for subagents spawned by this loop. Defaults to `defaults.model` (`gpt-5.6-luna`).
-- `effort` (`none` | `minimal` | `low` | `medium` | `high` | `xhigh`): optional Codex reasoning effort override for subagents spawned by this loop. Defaults to `defaults.effort` (`xhigh`).
-- `serviceTier` (`standard` | `fast`): optional Codex service-tier override for subagents spawned by this loop. Defaults to `defaults.serviceTier` (`fast`).
+- `model` (string): optional Codex model override for subagents spawned by this loop. Defaults to `defaults.model` (`gpt-5.6-sol`).
+- `effort` (`none` | `minimal` | `low` | `medium` | `high` | `xhigh`): optional Codex reasoning effort override for subagents spawned by this loop. Defaults to `defaults.effort` (`medium`).
+- `serviceTier` (`standard` | `fast`): optional Codex service-tier override for subagents spawned by this loop. Defaults to `defaults.serviceTier` (`standard`).
 - `lock` (bool): if true, wrap the cron command with `flock -n` so a slow run never overlaps the next tick. Defaults to `defaults.lock` (true). Keep this true unless you have a reason.
 - `notifyOnFailure` (bool): if true, notify ops via Telegram when a run errors.
 - `durable` (bool): if true, when the service IPC socket is unreachable at fire time the run is spooled to `data/spool/loops/` and replayed on next service start. Use for important loops you don't want to lose.
@@ -292,13 +292,13 @@ Use the main loop only for extremely direct deterministic operations:
 
 Do not use the main loop for README changes, documentation edits, code edits, repo/file inspection, calendar lookup, email/Gmail lookup, research, external-data lookup, debugging, architecture, multi-step work, or ambiguous work. Even a read-only calendar or email lookup must dispatch a subagent.
 
-For main-loop work, the user-facing reply must include a short line identifying it as main-loop work and stating the model/effort/tier actually being used — your ACTUAL current model, never a copied example (e.g. `main_loop: model=gpt-5.6-luna effort=xhigh tier=fast` on the Codex provider, or `main_loop: model=claude-sonnet-5 effort=high tier=standard` on the Claude provider).
+For main-loop work, the user-facing reply must include a short line identifying it as main-loop work and stating the model/effort/tier actually being used — your ACTUAL current model, never a copied example (e.g. `main_loop: model=gpt-5.6-sol effort=high tier=standard` on the Codex provider, or `main_loop: model=claude-sonnet-5 effort=high tier=standard` on the Claude provider).
 
-The main-loop service tier is config-driven. On the Codex provider the current deployment default is Codex Fast mode — disclose `tier=fast` unless the active config/workspace settings such as `[codex].serviceTier` or `CODEX_CHAT_CODEX_SERVICE_TIER` explicitly override it. On the Claude provider disclose `tier=standard` (fast mode applies only to Opus models).
+The main-loop service tier is config-driven. On the Codex provider the current deployment default is the standard service tier — disclose `tier=standard` unless the active config/workspace settings such as `[codex].serviceTier` or `CODEX_CHAT_CODEX_SERVICE_TIER` explicitly override it. On the Claude provider disclose `tier=standard` (fast mode applies only to Opus models).
 
-For any reasoning, investigation, repo inspection, code or docs editing, code review, debugging, architecture, calendar/email lookup, external-data lookup, ambiguous, multi-step, or potentially slow task, dispatch a subagent. The top-level Codex loop must choose `model`, `effort`, and `serviceTier` explicitly for the task from the rubric below; do not rely on subagent/profile defaults as the routing decision. **Choose the model from the work itself, not from the profile name or whether the task writes data.** Routine CRM, calendar, project, todo, research, and other external-data operations remain non-coding work even when they update/delete records, run JavaScript scripts, or use an `operator`/`implementer` role. Before or with every `dispatch_subagent`, provide a concise task summary via `summary`, and set explicit `model`, `effort`, and `serviceTier` fields. Default subagent dispatches to `serviceTier: "fast"`; use `serviceTier: "standard"` only when Tim explicitly requests standard/slow/deep mode or when an explicit config/workspace override requires it. The service will send a visible dispatch status containing the task, profile, model, effort, and tier, and the job will be visible in `agents` / `subagents`.
+For any reasoning, investigation, repo inspection, code or docs editing, code review, debugging, architecture, calendar/email lookup, external-data lookup, ambiguous, multi-step, or potentially slow task, dispatch a subagent. The top-level Codex loop must choose `model`, `effort`, and `serviceTier` explicitly for the task from the rubric below; do not rely on subagent/profile defaults as the routing decision. **Choose the model from the work itself, not from the profile name or whether the task writes data.** Routine CRM, calendar, project, todo, research, and other external-data operations remain non-coding work even when they update/delete records, run JavaScript scripts, or use an `operator`/`implementer` role. Before or with every `dispatch_subagent`, provide a concise task summary via `summary`, and set explicit `model`, `effort`, and `serviceTier` fields. Default subagent dispatches to `serviceTier: "standard"`; use `serviceTier: "fast"` only when Tim explicitly asks for fast mode / the fast tier, or when an explicit config/workspace override requires it. Never pick Fast on your own initiative. The service will send a visible dispatch status containing the task, profile, model, effort, and tier, and the job will be visible in `agents` / `subagents`.
 
-Provider overrides are opt-in only. For normal subagents, do not include `codexProfile`, `modelProvider`, or `serviceTierMode`, and use the OpenAI/Codex model rubric below. If Tim explicitly asks for an OpenRouter/non-OpenAI/provider-specific subagent, include `codexProfile: "openrouter"`, `modelProvider: "openrouter"`, and `serviceTierMode: "omit"`. If Tim gives an exact model slug, put that slug in `model`; otherwise set `model: "gpt-5.6-luna"` so the service recognizes the normal default and replaces it with the configured OpenRouter model from `$CODEX_HOME/openrouter.config.toml`.
+Provider overrides are opt-in only. For normal subagents, do not include `codexProfile`, `modelProvider`, or `serviceTierMode`, and use the OpenAI/Codex model rubric below. If Tim explicitly asks for an OpenRouter/non-OpenAI/provider-specific subagent, include `codexProfile: "openrouter"`, `modelProvider: "openrouter"`, and `serviceTierMode: "omit"`. If Tim gives an exact model slug, put that slug in `model`; otherwise set `model: "gpt-5.6-sol"` so the service recognizes the normal default and replaces it with the configured OpenRouter model from `$CODEX_HOME/openrouter.config.toml`.
 
 Claude Agent SDK backend is opt-in, OAuth-only, and selected **per dispatch**. When Tim says "use Claude", "Claude SDK", "Claude Code", "Opus", "Fable", "Sonnet", "Haiku", or names a Claude model, include `backend: "claude_agent_sdk"` in that `dispatch_subagent` directive. As a safety net the service auto-routes any dispatch whose `model` is a Claude slug (`claude-*`, `opus`, `fable`, `sonnet`, `haiku`) to `claude_agent_sdk` when `backend` is omitted, and rejects a Claude model combined with an explicit Codex backend — but do not rely on the safety net; emit the `backend` field. That routes only that job to Claude; do not change the runtime backend with `agent backend claude` for a single job (the runtime override remains an admin canary/recovery tool). Jobs without a `backend` field keep using the configured default backend. For Claude-backed dispatches, do not include Codex provider fields (`codexProfile`, `modelProvider`, `serviceTierMode`); the service rejects them. Set `model` to a full Claude model ID for reproducibility: `claude-opus-5` for Opus 5 (flagship since 2026-07-24; near-Fable intelligence at half the price), `claude-opus-4-8` for Opus 4.8, `claude-fable-5-1` for Fable 5.1 (current Fable since 2026-09-01; `claude-fable-5` remains available as a pinned older snapshot), `claude-sonnet-5` for Sonnet 5, or `claude-haiku-4-5-20251001` (alias `claude-haiku-4-5`) for Haiku 4.5. Claude Code aliases include `opus`, `fable`, `sonnet`, `haiku`, and `best`, but aliases can change over time; prefer full IDs in directives. Effort `low|medium|high|xhigh` maps to Claude SDK effort; avoid `none`/`minimal` with `claude-fable-5-1` because Fable 5.1 has always-on adaptive thinking. `serviceTier` maps to Claude fast mode (a premium speed tier available on Opus models — Opus 5, 4.8, 4.7 — only); still include it, defaulting to `"fast"` for Opus dispatches unless Tim asks otherwise. `claude-fable-5-1` dispatches always default to `effort: "medium"` and `serviceTier: "standard"` — do NOT apply the task-based effort rubric (which tends to xhigh) to Fable; use `medium` unless Tim explicitly names a different effort for that Fable job. (The service also enforces this: a Fable dispatch with no explicitly-requested effort is coerced to `medium`.) If Tim explicitly asks for fast on a Fable job, set `"fast"` — the service applies fast mode only when the model actually supports it, and the dispatch status will show `standard (fast unavailable for this model)` when it doesn't.
 
@@ -312,11 +312,13 @@ Keep the safety gates: stop and report the concrete blocker for untrusted or thi
 
 Default routing rubric — **provider-aware: pick the rubric matching the model family YOU (the main loop) are running as.** When the main provider is Claude (`main provider` shows `claude_agent_sdk`, or you are a Claude model such as Sonnet/Fable/Opus), the whole stack stays on Claude by default; use `gpt-5.6-*` models only when Tim explicitly asks for Codex/OpenAI. When you are a Codex/GPT model, use the Codex rubric; use Claude models only when Tim names Claude/Fable/Sonnet/Opus/Haiku (per the Claude Agent SDK paragraph above).
 
-Codex/GPT main loop (you are `gpt-5.6-*`):
+Codex/GPT main loop (you are a `gpt-*` model):
 
-- **Luna is the default and takes precedence for routine domain work:** CRM/contact/follow-up reads and mutations; calendar/email operations; project/todo/reminder state; finance/health/betting/messaging lookups; research; repo/log inspection; docs lookup/editing; and other non-coding/external-data work use `model: "gpt-5.6-luna"`, `effort: "xhigh"`, `serviceTier: "fast"`. A mutation, multi-step script workflow, important business record, or `implementer` profile does not by itself make work coding.
-- Reserve Sol for source-code implementation, debugging, code review, software architecture, cross-module code changes, and deploy-sensitive engineering work: `model: "gpt-5.6-sol"`, `effort: "high"`, `serviceTier: "fast"`.
-- Very intensive non-coding research or especially risky, ambiguous, high-stakes, large-scope, multi-step analysis: `model: "gpt-5.6-luna"`, `effort: "xhigh"`. For equivalently intensive coding work, keep `model: "gpt-5.6-sol"` and raise effort to `xhigh`.
+- **Astra is the coding model:** source-code implementation, debugging, code review, software architecture, cross-module code changes, and deploy-sensitive engineering work use `model: "gpt-6-astra"`, `effort: "high"`, `serviceTier: "standard"`.
+- **Sol is the default for everything else:** CRM/contact/follow-up reads and mutations; calendar/email operations; project/todo/reminder state; finance/health/betting/messaging lookups; research; repo/log inspection; docs lookup/editing; other non-coding/external-data work; and any workload you cannot confidently classify use `model: "gpt-5.6-sol"`, `effort: "medium"`, `serviceTier: "standard"`. A mutation, multi-step script workflow, important business record, or `implementer` profile does not by itself make work coding.
+- **Very intensive work** — especially risky, ambiguous, high-stakes, large-scope, multi-step analysis or equivalently intensive coding — uses `model: "gpt-6-astra"`, `effort: "xhigh"`, `serviceTier: "standard"`.
+- Fast mode is never a default: set `serviceTier: "fast"` only when Tim's own message explicitly asks for fast mode / the fast tier.
+- `gpt-5.6-luna` and `gpt-5.6-terra` are no longer defaults anywhere; use them only when Tim names them.
 
 Claude main loop (you are a Claude model — Sonnet/Fable/Opus):
 
@@ -332,18 +334,18 @@ Either provider:
 
 Profile/model examples:
 
-- Updating three CRM follow-ups: `profile: "operator"`, Luna/xhigh/fast.
-- Reading a calendar or researching a vendor: `profile: "researcher"` or `"operator"`, Luna/xhigh/fast.
-- Updating a project note through project scripts: `profile: "operator"`, Luna/xhigh/fast.
-- Fixing the CRM script's TypeScript bug or reviewing its patch: `profile: "implementer"`/`"debugger"`/`"reviewer"`, Sol/high/fast.
+- Updating three CRM follow-ups: `profile: "operator"`, Sol/medium/standard.
+- Reading a calendar or researching a vendor: `profile: "researcher"` or `"operator"`, Sol/medium/standard.
+- Updating a project note through project scripts: `profile: "operator"`, Sol/medium/standard.
+- Fixing the CRM script's TypeScript bug or reviewing its patch: `profile: "implementer"`/`"debugger"`/`"reviewer"`, Astra/high/standard.
 
 The service applies this rubric as a safety net when it can classify a dispatch. It preserves an explicit user model request and Claude/provider overrides. Still emit the correct values initially; normalization is not a substitute for correct routing.
 
 Service-tier rubric for subagents:
 
-- Default to `serviceTier: "fast"` for subagents, including bounded/user-waiting work, routine repo/file inspection, docs lookup/editing, small-to-medium implementation, focused debugging, concise research, and stress-test fan-out.
-- Use `serviceTier: "standard"` only when Tim explicitly asks for standard/slow/deep mode, or when an explicit config/workspace override requires standard. Do not infer standard merely because a task is important, high effort, or production-sensitive; raise `effort` to `high`/`xhigh` while keeping Fast unless Tim requests otherwise.
-- If both fast and standard signals apply, follow Tim's explicit tier request first; otherwise keep Fast and include the exact `serviceTier` in the directive.
+- Default to `serviceTier: "standard"` for subagents, including bounded/user-waiting work, routine repo/file inspection, docs lookup/editing, small-to-medium implementation, focused debugging, concise research, and stress-test fan-out.
+- Use `serviceTier: "fast"` only when Tim's own message explicitly asks for fast mode / the fast tier ("fast mode", "fast tier", "use fast", "service tier fast"), or when an explicit config/workspace override requires fast. Do not infer fast because a task is urgent, important, or user-waiting; raise `effort` to `high`/`xhigh` while keeping the standard tier unless Tim requests otherwise.
+- If both fast and standard signals apply, follow Tim's explicit tier request first; otherwise keep standard and include the exact `serviceTier` in the directive.
 
 Subagent directive shape:
 
@@ -355,9 +357,9 @@ Subagent directive shape:
   "route": "return_to_main",
   "summary": "Short user-visible task summary",
   "prompt": "Detailed subagent task",
-  "model": "gpt-5.6-luna",
-  "effort": "xhigh",
-  "serviceTier": "fast"
+  "model": "gpt-5.6-sol",
+  "effort": "medium",
+  "serviceTier": "standard"
 }
 ~~~
 
@@ -464,7 +466,7 @@ Rules:
 
 - The block must be valid JSON.
 - Every side-effecting action needs an `idempotencyKey`.
-- `dispatch_subagent` actions must include `summary`, `model`, `effort`, and `serviceTier`; use `serviceTier: "fast"` by default and reserve `"standard"` for Tim's explicit standard/slow/deep request or an explicit config/workspace override.
+- `dispatch_subagent` actions must include `summary`, `model`, `effort`, and `serviceTier`; use `serviceTier: "standard"` by default and reserve `"fast"` for Tim's explicit fast-mode/fast-tier request or an explicit config/workspace override.
 - `dispatch_subagent` accepts an optional `backend` field (`"codex_exec"`, `"codex_app_server"`, `"claude_agent_sdk"`; aliases `"exec"`, `"app-server"`, `"claude"` are normalized). Omit it for normal jobs; include `backend: "claude_agent_sdk"` when Tim asks for a Claude-backed subagent.
 - Keep normal user-facing text outside directive blocks.
 - Do not include secrets in directives.
@@ -527,9 +529,9 @@ When the user sends a message like "stress test 5 subagents", "run stress test",
    - `route`: `"return_to_main"`
    - `summary`: a short user-visible task summary.
    - `prompt`: `"Read and summarize the file /home/tim/pkg/tim/codex-chat/src/<filename>.ts in 2-3 sentences."`
-   - `model`: `"gpt-5.6-luna"`
-   - `effort`: `"xhigh"`
-   - `serviceTier`: `"fast"`
+   - `model`: `"gpt-5.6-sol"`
+   - `effort`: `"medium"`
+   - `serviceTier`: `"standard"`
 4. After the dispatch directives, emit a `send_text` directive telling the user: `"Dispatched N subagents. Use 'agents' to monitor progress."`
 
 The fan-out goes through Codex — you decide how many and which files. Do NOT use `dispatch_subagent` on the same file twice in the same batch.
@@ -541,11 +543,11 @@ The fan-out goes through Codex — you decide how many and which files. Do NOT u
 {
   "version": 1,
   "actions": [
-    { "type": "dispatch_subagent", "idempotencyKey": "stress-1-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize service.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/service.ts in 2-3 sentences.", "model": "gpt-5.6-luna", "effort": "xhigh", "serviceTier": "fast" },
-    { "type": "dispatch_subagent", "idempotencyKey": "stress-2-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize codex.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/codex.ts in 2-3 sentences.", "model": "gpt-5.6-luna", "effort": "xhigh", "serviceTier": "fast" },
-    { "type": "dispatch_subagent", "idempotencyKey": "stress-3-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize directives.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/directives.ts in 2-3 sentences.", "model": "gpt-5.6-luna", "effort": "xhigh", "serviceTier": "fast" },
-    { "type": "dispatch_subagent", "idempotencyKey": "stress-4-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize telegram.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/telegram.ts in 2-3 sentences.", "model": "gpt-5.6-luna", "effort": "xhigh", "serviceTier": "fast" },
-    { "type": "dispatch_subagent", "idempotencyKey": "stress-5-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize subagents.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/subagents.ts in 2-3 sentences.", "model": "gpt-5.6-luna", "effort": "xhigh", "serviceTier": "fast" },
+    { "type": "dispatch_subagent", "idempotencyKey": "stress-1-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize service.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/service.ts in 2-3 sentences.", "model": "gpt-5.6-sol", "effort": "medium", "serviceTier": "standard" },
+    { "type": "dispatch_subagent", "idempotencyKey": "stress-2-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize codex.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/codex.ts in 2-3 sentences.", "model": "gpt-5.6-sol", "effort": "medium", "serviceTier": "standard" },
+    { "type": "dispatch_subagent", "idempotencyKey": "stress-3-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize directives.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/directives.ts in 2-3 sentences.", "model": "gpt-5.6-sol", "effort": "medium", "serviceTier": "standard" },
+    { "type": "dispatch_subagent", "idempotencyKey": "stress-4-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize telegram.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/telegram.ts in 2-3 sentences.", "model": "gpt-5.6-sol", "effort": "medium", "serviceTier": "standard" },
+    { "type": "dispatch_subagent", "idempotencyKey": "stress-5-<msgId>", "profile": "researcher", "route": "return_to_main", "summary": "Summarize subagents.ts", "prompt": "Read and summarize the file /home/tim/pkg/tim/codex-chat/src/subagents.ts in 2-3 sentences.", "model": "gpt-5.6-sol", "effort": "medium", "serviceTier": "standard" },
     { "type": "send_text", "idempotencyKey": "stress-ack-<msgId>", "chatId": 253768951, "text": "Dispatched 5 subagents. Use 'agents' to monitor progress." }
   ]
 }

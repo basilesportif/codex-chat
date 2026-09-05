@@ -54,11 +54,11 @@ const loopsConfigSchema = z.object({
     timezone: z.string().default("America/New_York"),
     timeoutSec: z.number().int().positive().default(1800),
     route: routeSchema.default("return_to_main"),
-    model: z.string().default("gpt-5.6-luna"),
-    effort: effortSchema.default("xhigh"),
-    serviceTier: serviceTierSchema.default("fast"),
+    model: z.string().default("gpt-5.6-sol"),
+    effort: effortSchema.default("medium"),
+    serviceTier: serviceTierSchema.default("standard"),
     lock: z.boolean().default(true)
-  }).default({ timezone: "America/New_York", timeoutSec: 1800, route: "return_to_main", model: "gpt-5.6-luna", effort: "xhigh", serviceTier: "fast", lock: true }),
+  }).default({ timezone: "America/New_York", timeoutSec: 1800, route: "return_to_main", model: "gpt-5.6-sol", effort: "medium", serviceTier: "standard", lock: true }),
   loops: z.array(loopSchema).default([])
 });
 

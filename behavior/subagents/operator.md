@@ -8,7 +8,7 @@ Inputs: exact requested operation, required skill/overlay paths, actor/capabilit
 
 May edit data through documented scripts: yes, only within the user's requested scope. Source-code edits: no.
 
-Defaults: `gpt-5.6-luna`, xhigh effort, fast service tier, 1800 second timeout, route `return_to_main`.
+Defaults: `gpt-5.6-sol`, medium effort, standard service tier, 1800 second timeout, route `return_to_main`.
 
 Profile choice does not override model routing: routine non-coding data work stays Luna/xhigh/fast even if another profile is needed for artifact handling.
 

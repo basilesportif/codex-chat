@@ -114,22 +114,24 @@ describe("Phase 0 Telegram baseline", () => {
     });
   });
 
-  test("documents Fast as the default main-loop and subagent tier", async () => {
+  test("documents the standard tier as the default main-loop and subagent tier", async () => {
     const config = await tempConfig();
     const behavior = await readFile(join(process.cwd(), "behavior", "AGENTS.md"), "utf8");
 
-    expect(config.codex.serviceTier).toBe("fast");
-    expect(config.subagents.defaultServiceTier).toBe("fast");
-    expect(behavior).toContain("current deployment default is Codex Fast mode");
+    expect(config.codex.serviceTier).toBe("standard");
+    expect(config.subagents.defaultServiceTier).toBe("standard");
+    expect(behavior).toContain("current deployment default is the standard service tier");
     expect(behavior).toContain("choose `model`, `effort`, and `serviceTier` explicitly");
-    expect(behavior).toContain("Default subagent dispatches to `serviceTier: \"fast\"`");
+    expect(behavior).toContain("Default subagent dispatches to `serviceTier: \"standard\"`");
   });
 
-  test("documents Luna for routine work and Sol for coding while preserving Claude routing", async () => {
+  test("documents Sol for routine work and Astra for coding while preserving Claude routing", async () => {
     const behavior = await readFile(join(process.cwd(), "behavior", "AGENTS.md"), "utf8");
 
-    expect(behavior).toContain('`model: "gpt-5.6-luna"`, `effort: "xhigh"`');
-    expect(behavior).toContain('`model: "gpt-5.6-sol"`, `effort: "high"`');
+    expect(behavior).toContain('`model: "gpt-5.6-sol"`, `effort: "medium"`');
+    expect(behavior).toContain('`model: "gpt-6-astra"`, `effort: "high"`');
+    expect(behavior).toContain('`model: "gpt-6-astra"`, `effort: "xhigh"`');
+    expect(behavior).toContain("Fast mode is never a default");
     expect(behavior).toContain("CRM/contact/follow-up reads and mutations");
     expect(behavior).toContain("calendar/email operations");
     expect(behavior).toContain("project/todo/reminder state");

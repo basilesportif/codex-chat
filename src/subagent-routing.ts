@@ -40,9 +40,9 @@ export function classifySubagentWorkload(action: DispatchSubagentAction): Subage
 
 function explicitlyRequestsModel(text: string): boolean {
   return /\bgpt-[a-z0-9._-]+\b/i.test(text) ||
-    /\b(?:use|using|with|via|run|dispatch)(?:\s+the)?\s+(?:sol|luna|terra|codex|openai)\b/i.test(text) ||
-    /\b(?:sol|luna|terra)\s+(?:model|subagent)\b/i.test(text) ||
-    /\bmodel(?:\s+is|\s*=|:)?[\s`"']+(?:sol|luna|terra)\b/i.test(text);
+    /\b(?:use|using|with|via|run|dispatch)(?:\s+the)?\s+(?:sol|luna|terra|astra|codex|openai)\b/i.test(text) ||
+    /\b(?:sol|luna|terra|astra)\s+(?:model|subagent)\b/i.test(text) ||
+    /\bmodel(?:\s+is|\s*=|:)?[\s`"']+(?:sol|luna|terra|astra)\b/i.test(text);
 }
 
 function explicitlyRequestsEffort(text: string): boolean {
@@ -129,13 +129,17 @@ export function normalizeSubagentRouting(
     }
   }
 
-  if (workload === "unknown" || isClaudeOrProviderOverride(action) || explicitlyRequestsModel(originText)) {
+  if (isClaudeOrProviderOverride(action) || explicitlyRequestsModel(originText)) {
     return { action, changed: changedByFableDefault, workload };
   }
 
+  // Coding/debugging/review/implementation runs on Astra at high effort; every
+  // other workload (including "unknown", which must not silently inherit a
+  // heavier default) runs on Sol at medium. Fast service tier is never a
+  // default — it applies only when the user's own text asked for it.
   const defaults = workload === "coding"
-    ? { model: "gpt-5.6-sol", effort: "high" as const, serviceTier: "fast" as const }
-    : { model: "gpt-5.6-luna", effort: "xhigh" as const, serviceTier: "fast" as const };
+    ? { model: "gpt-6-astra", effort: "high" as const, serviceTier: "standard" as const }
+    : { model: "gpt-5.6-sol", effort: "medium" as const, serviceTier: "standard" as const };
   const normalized: DispatchSubagentAction = {
     ...action,
     model: defaults.model,

@@ -176,11 +176,11 @@ describe("subagent workload routing", () => {
     ["calendar", "Read the calendar skill and list tomorrow's calendar events."] as const,
     ["project", "Use project scripts to update the existing project note without creating a duplicate."] as const,
     ["research", "Research current vendor options and summarize the findings."] as const
-  ])("normalizes routine %s work to Luna xhigh fast", (_domain, prompt) => {
+  ])("normalizes routine %s work to Sol medium standard", (_domain, prompt) => {
     const result = normalizeSubagentRouting(action({ prompt }), "Please handle this routine task");
 
     expect(result).toMatchObject({ changed: true, workload: "routine_non_coding" });
-    expect(result.action).toMatchObject({ model: "gpt-5.6-luna", effort: "xhigh", serviceTier: "fast" });
+    expect(result.action).toMatchObject({ model: "gpt-5.6-sol", effort: "medium", serviceTier: "standard" });
   });
 
   test("the operator profile defaults to routine non-coding, independent of mutation verbs", () => {
@@ -188,9 +188,9 @@ describe("subagent workload routing", () => {
 
     expect(classifySubagentWorkload(input)).toBe("routine_non_coding");
     expect(normalizeSubagentRouting(input, "delete that record").action).toMatchObject({
-      model: "gpt-5.6-luna",
-      effort: "xhigh",
-      serviceTier: "fast"
+      model: "gpt-5.6-sol",
+      effort: "medium",
+      serviceTier: "standard"
     });
   });
 
@@ -200,7 +200,7 @@ describe("subagent workload routing", () => {
     expect(classifySubagentWorkload(input)).toBe("coding");
   });
 
-  test("normalizes coding, debugging, review, architecture, and deploy work to Sol high fast", () => {
+  test("normalizes coding, debugging, review, architecture, and deploy work to Astra high standard", () => {
     const input = action({
       profile: "implementer",
       prompt: "Debug the TypeScript service, fix the regression, run tests, and prepare the deployment.",
@@ -212,7 +212,7 @@ describe("subagent workload routing", () => {
     expect(normalizeSubagentRouting(input, "fix the service regression")).toMatchObject({
       changed: true,
       workload: "coding",
-      action: { model: "gpt-5.6-sol", effort: "high", serviceTier: "fast" }
+      action: { model: "gpt-6-astra", effort: "high", serviceTier: "standard" }
     });
   });
 
@@ -221,14 +221,14 @@ describe("subagent workload routing", () => {
     const coding = action({ prompt: "Debug the TypeScript service.", model: "gpt-5.6-luna", effort: "xhigh" });
 
     expect(normalizeSubagentRouting(routine, "Look up the calendar event").action).toMatchObject({
-      model: "gpt-5.6-luna",
-      effort: "xhigh",
-      serviceTier: "fast"
+      model: "gpt-5.6-sol",
+      effort: "medium",
+      serviceTier: "standard"
     });
     expect(normalizeSubagentRouting(coding, "Debug the TypeScript service").action).toMatchObject({
-      model: "gpt-5.6-sol",
+      model: "gpt-6-astra",
       effort: "high",
-      serviceTier: "fast"
+      serviceTier: "standard"
     });
   });
 
@@ -246,7 +246,33 @@ describe("subagent workload routing", () => {
     const input = action({ prompt: "Update the CRM follow-up.", effort: "medium", serviceTier: "standard" });
     const result = normalizeSubagentRouting(input, "Use medium effort and standard tier for this CRM update");
 
-    expect(result.action).toMatchObject({ model: "gpt-5.6-luna", effort: "medium", serviceTier: "standard" });
+    expect(result.action).toMatchObject({ model: "gpt-5.6-sol", effort: "medium", serviceTier: "standard" });
+  });
+
+  test("an unknown Codex workload falls back to the Sol default instead of passing through", () => {
+    const input = action({ prompt: "Handle this.", model: "gpt-5.6-luna", effort: "xhigh", serviceTier: "fast" });
+    const result = normalizeSubagentRouting(input, "Handle this");
+
+    expect(result).toMatchObject({ changed: true, workload: "unknown" });
+    expect(result.action).toMatchObject({ model: "gpt-5.6-sol", effort: "medium", serviceTier: "standard" });
+  });
+
+  test("an explicit fast-mode request in the origin text preserves the fast tier without changing the model", () => {
+    const input = action({ profile: "operator", prompt: "Look up the calendar event.", model: "gpt-5.6-luna", effort: "xhigh", serviceTier: "fast" });
+    const result = normalizeSubagentRouting(input, "Look up the calendar event in fast mode");
+
+    expect(result).toMatchObject({ changed: true, workload: "routine_non_coding" });
+    expect(result.action).toMatchObject({ model: "gpt-5.6-sol", effort: "medium", serviceTier: "fast" });
+  });
+
+  test("naming Astra with an explicit effort is treated as an explicit request and left untouched", () => {
+    const input = action({ prompt: "Update the CRM follow-up.", model: "gpt-6-astra", effort: "xhigh", serviceTier: "standard" });
+
+    expect(normalizeSubagentRouting(input, "Use astra at xhigh effort for this CRM update")).toEqual({
+      action: input,
+      changed: false,
+      workload: "routine_non_coding"
+    });
   });
 
   test.each([

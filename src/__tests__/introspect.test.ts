@@ -219,7 +219,9 @@ describe("dispatch_subagent status", () => {
         effort: "high",
         serviceTier: "fast"
       },
-      { source: "telegram", text: "x", attachments: [], receivedAt: new Date().toISOString(), chatId: 123, userId: 253768951, messageId: 456 }
+      // Explicit model + tier request in the origin text so routing normalization
+      // passes the dispatch through untouched; this test covers status formatting.
+      { source: "telegram", text: "use gpt-5.5 in fast mode", attachments: [], receivedAt: new Date().toISOString(), chatId: 123, userId: 253768951, messageId: 456 }
     );
 
     expect(sendText).toHaveBeenCalledWith(123, "Sub: inspect routing\nresearcher · gpt-5.5 · high · fast", 456);

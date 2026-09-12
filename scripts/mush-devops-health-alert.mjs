@@ -1,6 +1,25 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { pathToFileURL } from "node:url";
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+import {
+  DEFAULT_COOLDOWN_MINUTES,
+  DEFAULT_REMEDIATION_TIMEOUT_SEC,
+  MAX_TARGETS_PER_RUN,
+  OUTCOMES,
+  detectGpuRemediationTargets,
+  formatRemediationReport,
+  readRemediationState,
+  recordRemediationAttempt,
+  redactSecrets,
+  runGpuRemediation,
+  shouldAttemptRemediation,
+  writeRemediationState,
+} from "./lib/gpu-remediation.mjs";
+
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const REMEDIATION_STATE_PATH = path.join(REPO_ROOT, "data/state/mush_devops_remediation.json");
 
 const DEFAULT_HOST = "tim@89.167.72.52";
 const DEFAULT_REMOTE_DIR = "/home/tim/pkg/mush/mush-devops";
@@ -9,6 +28,7 @@ const DEFAULT_LOW_BALANCE_THRESHOLD = 5;
 const NO_TARGET_ERROR = "No health check target could be derived from stack.json.";
 
 async function main() {
+  const options = parseCliOptions(process.argv.slice(2), process.env);
   const host = process.env.MUSH_DEVOPS_SSH_HOST || DEFAULT_HOST;
   const remoteDir = process.env.MUSH_DEVOPS_REMOTE_DIR || DEFAULT_REMOTE_DIR;
   const timeoutSec = parsePositiveNumber(process.env.MUSH_DEVOPS_TIMEOUT_SEC, DEFAULT_TIMEOUT_SEC);
@@ -49,11 +69,153 @@ async function main() {
   }
 
   const findings = collectFindings(payload.value, { lowBalanceThreshold });
-  if (findings.length === 0) {
+
+  // Auto-remediation must never take the plain alert down with it: a bug here degrades to a
+  // short "auto-remediation itself failed" note appended to the findings Tim would have gotten
+  // anyway.
+  let remediationSection = "";
+  try {
+    remediationSection = await runRemediationPhase({
+      payload: payload.value,
+      options,
+      host,
+      remoteDir,
+    });
+  } catch (error) {
+    remediationSection = formatRemediationReport([
+      {
+        target: null,
+        outcome: OUTCOMES.error,
+        message: `auto-remediation wrapper failed: ${redactSecrets(preview(error instanceof Error ? error.message : String(error)))}`,
+      },
+    ]);
+  }
+
+  if (findings.length === 0 && !remediationSection) {
     process.exit(0);
   }
 
-  console.log(formatAlert({ checkedAt: payload.value.checkedAt, host, remoteDir, findings }));
+  const alert = formatAlert({ checkedAt: payload.value.checkedAt, host, remoteDir, findings });
+  console.log(remediationSection ? `${alert}\n${remediationSection}` : alert);
+}
+
+/**
+ * Interpret the safety switches. Remediation is ON by default; `--no-remediate` or
+ * MUSH_DEVOPS_AUTO_REMEDIATE=0/false/off turns it off, and `--dry-run-remediation` keeps every
+ * mutation (and the cooldown state write) off while still reporting what would have happened.
+ */
+export function parseCliOptions(argv = [], env = {}) {
+  const args = Array.isArray(argv) ? argv.map((value) => String(value)) : [];
+  const dryRun = args.includes("--dry-run-remediation");
+  const autoRemediate =
+    !args.includes("--no-remediate") && parseBooleanFlag(env.MUSH_DEVOPS_AUTO_REMEDIATE, true);
+  return {
+    autoRemediate,
+    dryRun,
+    cooldownMinutes: parsePositiveNumber(env.MUSH_DEVOPS_REMEDIATION_COOLDOWN_MIN, DEFAULT_COOLDOWN_MINUTES),
+    remediationTimeoutSec: parsePositiveNumber(
+      env.MUSH_DEVOPS_REMEDIATION_TIMEOUT_SEC,
+      DEFAULT_REMEDIATION_TIMEOUT_SEC,
+    ),
+    gatewaySshOverride: String(env.MUSH_DEVOPS_GPU_GATEWAY_SSH || "").trim() || null,
+  };
+}
+
+export function parseBooleanFlag(value, fallback) {
+  if (value == null || String(value).trim() === "") return fallback;
+  const normalized = String(value).trim().toLowerCase();
+  if (["0", "false", "off", "no"].includes(normalized)) return false;
+  if (["1", "true", "on", "yes"].includes(normalized)) return true;
+  return fallback;
+}
+
+/**
+ * Detect the "GPU box's remote-inference died" signature, apply the safety switches and the
+ * cooldown, run the restart, and render the report section. Returns "" when nothing matched.
+ */
+async function runRemediationPhase({ payload, options, host, remoteDir }) {
+  const httpCheck = Array.isArray(payload?.results)
+    ? payload.results.find((result) => result?.key === "http")
+    : null;
+  const detected = detectGpuRemediationTargets(httpCheck, {
+    gatewaySshOverride: options.gatewaySshOverride,
+  });
+  if (detected.length === 0) return "";
+
+  const selected = detected.slice(0, MAX_TARGETS_PER_RUN);
+  const notes = [];
+  if (detected.length > selected.length) {
+    notes.push(
+      `${detected.length - selected.length} additional unhealthy GPU backend(s) were not remediated in this run (cap of ${MAX_TARGETS_PER_RUN} per run).`,
+    );
+  }
+  if (options.dryRun) {
+    notes.push("Dry run: nothing on the GPU boxes or in the cooldown state file was modified.");
+  }
+
+  if (!options.autoRemediate) {
+    return formatRemediationReport(
+      selected.map((target) => ({
+        target,
+        outcome: OUTCOMES.skippedDisabled,
+        message:
+          "auto-remediation is disabled (MUSH_DEVOPS_AUTO_REMEDIATE=0 or --no-remediate); restart remote-inference manually.",
+      })),
+      notes,
+    );
+  }
+
+  const state = await readRemediationState(REMEDIATION_STATE_PATH);
+  const cooldownMs = options.cooldownMinutes * 60 * 1000;
+  const nowMs = Date.now();
+
+  const byBackend = new Map();
+  const pending = [];
+  for (const target of selected) {
+    const gate = shouldAttemptRemediation(state, target.backendId, nowMs, cooldownMs);
+    if (gate.allowed) {
+      pending.push(target);
+      continue;
+    }
+    byBackend.set(target.backendId, {
+      target,
+      outcome: OUTCOMES.skippedCooldown,
+      message:
+        `auto-remediation skipped: the last attempt at ${gate.lastAttemptAt} ended "${gate.lastOutcome || "unknown"}" ` +
+        `and the ${options.cooldownMinutes}-minute cooldown runs until ${gate.retryAfter}. Restart remote-inference manually if this is urgent.`,
+    });
+  }
+
+  const results = await runGpuRemediation({
+    targets: pending,
+    exec: runCommand,
+    jumpHost: host,
+    remoteDir,
+    dryRun: options.dryRun,
+    timeoutSec: options.remediationTimeoutSec,
+  });
+  for (const result of results) {
+    if (result?.target?.backendId) byBackend.set(result.target.backendId, result);
+  }
+
+  if (!options.dryRun) {
+    let nextState = state;
+    let dirty = false;
+    for (const result of results) {
+      if (!result?.target?.backendId || result.outcome === OUTCOMES.dryRun) continue;
+      nextState = recordRemediationAttempt(
+        nextState,
+        result.target.backendId,
+        result.outcome,
+        new Date().toISOString(),
+      );
+      dirty = true;
+    }
+    if (dirty) await writeRemediationState(REMEDIATION_STATE_PATH, nextState);
+  }
+
+  const ordered = selected.map((target) => byBackend.get(target.backendId)).filter(Boolean);
+  return formatRemediationReport(ordered, notes);
 }
 
 export function parsePositiveNumber(value, fallback) {

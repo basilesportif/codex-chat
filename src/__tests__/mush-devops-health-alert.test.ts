@@ -5,11 +5,24 @@ type HealthAlertModule = {
   parsePositiveNumber(value: unknown, fallback: number): number;
   isSkippedCheck(check: unknown): boolean;
   collectCaddyFindings(check: unknown, findings: string[]): void;
+  parseBooleanFlag(value: unknown, fallback: boolean): boolean;
+  parseCliOptions(argv?: string[], env?: Record<string, string | undefined>): {
+    autoRemediate: boolean;
+    dryRun: boolean;
+    cooldownMinutes: number;
+    remediationTimeoutSec: number;
+    gatewaySshOverride: string | null;
+  };
 };
 
-const { collectCaddyFindings, collectFindings, isSkippedCheck, parsePositiveNumber } = await import(
-  "../../scripts/mush-devops-health-alert.mjs"
-) as HealthAlertModule;
+const {
+  collectCaddyFindings,
+  collectFindings,
+  isSkippedCheck,
+  parseBooleanFlag,
+  parseCliOptions,
+  parsePositiveNumber
+} = await import("../../scripts/mush-devops-health-alert.mjs") as HealthAlertModule;
 
 const VAST_DNS_SKIP = {
   status: "skipped",
@@ -451,5 +464,56 @@ describe("caddy configuration state findings", () => {
     expect(collectFindings(payload, { lowBalanceThreshold: 5 })).toEqual([
       "Caddy config state indeterminate for inference-load-balancer (root@inference-load-balancer.ssh.invalid): host-unavailable - ssh: connect to host 178.105.107.43 port 22: Connection timed out"
     ]);
+  });
+});
+
+describe("auto-remediation safety switches", () => {
+  test("auto-remediation is on by default", () => {
+    const options = parseCliOptions([], {});
+    expect(options.autoRemediate).toBe(true);
+    expect(options.dryRun).toBe(false);
+    expect(options.cooldownMinutes).toBe(45);
+    expect(options.remediationTimeoutSec).toBe(180);
+    expect(options.gatewaySshOverride).toBeNull();
+  });
+
+  test("--no-remediate and MUSH_DEVOPS_AUTO_REMEDIATE turn it off", () => {
+    expect(parseCliOptions(["--no-remediate"], {}).autoRemediate).toBe(false);
+    for (const value of ["0", "false", "off", "no", "OFF"]) {
+      expect(parseCliOptions([], { MUSH_DEVOPS_AUTO_REMEDIATE: value }).autoRemediate).toBe(false);
+    }
+    for (const value of ["1", "true", "on", "yes", "", undefined, "weird"]) {
+      expect(parseCliOptions([], { MUSH_DEVOPS_AUTO_REMEDIATE: value }).autoRemediate).toBe(true);
+    }
+  });
+
+  test("--dry-run-remediation is recognized", () => {
+    expect(parseCliOptions(["--dry-run-remediation"], {}).dryRun).toBe(true);
+    expect(parseCliOptions(["--dry-run-remediation", "--no-remediate"], {})).toMatchObject({
+      dryRun: true,
+      autoRemediate: false
+    });
+  });
+
+  test("reads the cooldown, timeout, and gateway overrides", () => {
+    expect(
+      parseCliOptions([], {
+        MUSH_DEVOPS_REMEDIATION_COOLDOWN_MIN: "10",
+        MUSH_DEVOPS_REMEDIATION_TIMEOUT_SEC: "90",
+        MUSH_DEVOPS_GPU_GATEWAY_SSH: " root@10.0.0.9 "
+      })
+    ).toMatchObject({ cooldownMinutes: 10, remediationTimeoutSec: 90, gatewaySshOverride: "root@10.0.0.9" });
+
+    // Nonsense values fall back to the defaults rather than disabling the cooldown.
+    expect(
+      parseCliOptions([], { MUSH_DEVOPS_REMEDIATION_COOLDOWN_MIN: "0" }).cooldownMinutes
+    ).toBe(45);
+  });
+
+  test("parses boolean flags with a fallback", () => {
+    expect(parseBooleanFlag("no", true)).toBe(false);
+    expect(parseBooleanFlag("YES", false)).toBe(true);
+    expect(parseBooleanFlag("  ", false)).toBe(false);
+    expect(parseBooleanFlag(undefined, true)).toBe(true);
   });
 });

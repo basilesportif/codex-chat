@@ -4,9 +4,10 @@ type HealthAlertModule = {
   collectFindings(payload: unknown, options?: { lowBalanceThreshold?: number }): string[];
   parsePositiveNumber(value: unknown, fallback: number): number;
   isSkippedCheck(check: unknown): boolean;
+  collectCaddyFindings(check: unknown, findings: string[]): void;
 };
 
-const { collectFindings, isSkippedCheck, parsePositiveNumber } = await import(
+const { collectCaddyFindings, collectFindings, isSkippedCheck, parsePositiveNumber } = await import(
   "../../scripts/mush-devops-health-alert.mjs"
 ) as HealthAlertModule;
 
@@ -80,6 +81,41 @@ function healthPayload(vastStatus: Record<string, unknown>, httpVastAi?: Record<
         parsed: { drifted: false, comparisons: [] }
       }
     ]
+  };
+}
+
+function caddyAlias(alias: string, overrides: Record<string, unknown> = {}) {
+  return {
+    alias,
+    sshTarget: `root@${alias}.ssh.invalid`,
+    publicIp: "203.0.113.7",
+    accessPath: "direct",
+    configuredAccessPath: "dev server direct SSH",
+    status: "in-sync",
+    diff: "",
+    warnings: [],
+    error: null,
+    ...overrides
+  };
+}
+
+function caddyCheck(results: Array<Record<string, unknown>>, overrides: Record<string, unknown> = {}) {
+  return {
+    key: "caddyDrift",
+    label: "Caddy configuration state",
+    exitCode: 1,
+    stdout: JSON.stringify({ checkedAt: "2026-08-03T15:00:00.000Z", results }),
+    stderr: "",
+    parsed: {
+      checkedAt: "2026-08-03T15:00:00.000Z",
+      host: null,
+      passing: false,
+      status: "indeterminate",
+      driftDetected: false,
+      indeterminate: true,
+      results
+    },
+    ...overrides
   };
 }
 
@@ -242,6 +278,178 @@ describe("mush devops health alert", () => {
 
     expect(collectFindings(payload, { lowBalanceThreshold: 5 })).toEqual([
       "HTTP health unhealthy: Remote inference / backend-3 at http://example.invalid/health. HTTP 502."
+    ]);
+  });
+});
+
+describe("caddy configuration state findings", () => {
+  test("names the alias and diff when a host has drifted", () => {
+    const findings: string[] = [];
+    collectCaddyFindings(
+      caddyCheck([
+        caddyAlias("production-backend-load-balancer", {
+          status: "drift",
+          diff: "- reverse_proxy 10.0.0.1:8080\n+ reverse_proxy 10.0.0.2:8080"
+        })
+      ]),
+      findings
+    );
+
+    expect(findings).toEqual([
+      "Caddy config drift on production-backend-load-balancer (root@production-backend-load-balancer.ssh.invalid). - reverse_proxy 10.0.0.1:8080 + reverse_proxy 10.0.0.2:8080"
+    ]);
+  });
+
+  test("names the alias, reason, and error when a host is indeterminate", () => {
+    const findings: string[] = [];
+    collectCaddyFindings(
+      caddyCheck([
+        caddyAlias("staging-backend-load-balancer", {
+          status: "indeterminate",
+          reason: "host-unavailable",
+          error: "ssh: connect to host 178.105.107.43 port 22: Connection timed out"
+        })
+      ]),
+      findings
+    );
+
+    expect(findings).toEqual([
+      "Caddy config state indeterminate for staging-backend-load-balancer (root@staging-backend-load-balancer.ssh.invalid): host-unavailable - ssh: connect to host 178.105.107.43 port 22: Connection timed out"
+    ]);
+  });
+
+  test("falls back to a generic error note when an indeterminate alias has no error text", () => {
+    const findings: string[] = [];
+    collectCaddyFindings(
+      caddyCheck([caddyAlias("edge-lb", { status: "indeterminate", reason: "inspection-error", error: null })]),
+      findings
+    );
+
+    expect(findings).toEqual([
+      "Caddy config state indeterminate for edge-lb (root@edge-lb.ssh.invalid): inspection-error - no error detail"
+    ]);
+  });
+
+  test("reports unknown statuses rather than dropping them", () => {
+    const findings: string[] = [];
+    collectCaddyFindings(caddyCheck([caddyAlias("edge-lb", { status: "exploded", error: "boom" })]), findings);
+
+    expect(findings).toEqual(["Caddy config state exploded for edge-lb (root@edge-lb.ssh.invalid): boom"]);
+  });
+
+  test("mentions only the failing alias in a mixed payload", () => {
+    const findings: string[] = [];
+    collectCaddyFindings(
+      caddyCheck([
+        caddyAlias("production-backend-load-balancer"),
+        caddyAlias("staging-backend-load-balancer"),
+        caddyAlias("inference-load-balancer", {
+          status: "indeterminate",
+          reason: "host-unavailable",
+          error: "ssh: Could not resolve hostname"
+        })
+      ]),
+      findings
+    );
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toContain("inference-load-balancer");
+    expect(findings.join("\n")).not.toContain("production-backend-load-balancer");
+    expect(findings.join("\n")).not.toContain("staging-backend-load-balancer");
+  });
+
+  test("names the failing alias even when it is last in a realistic six-alias payload", () => {
+    const results = [
+      caddyAlias("production-backend-load-balancer"),
+      caddyAlias("production-frontend-load-balancer"),
+      caddyAlias("staging-backend-load-balancer"),
+      caddyAlias("staging-frontend-load-balancer"),
+      caddyAlias("inference-load-balancer"),
+      caddyAlias("legacy-edge-load-balancer", {
+        status: "indeterminate",
+        reason: "inspection-error",
+        error: "caddy adapt failed: adapting config using caddyfile: /etc/caddy/Caddyfile:12 - unrecognized directive"
+      })
+    ];
+    const check = caddyCheck(results);
+
+    // The raw stdout is long enough that the old 500-character preview never reached the
+    // failing alias, which is exactly the truncation this collector replaces.
+    expect(check.stdout.indexOf("legacy-edge-load-balancer")).toBeGreaterThan(500);
+
+    const findings: string[] = [];
+    collectCaddyFindings(check, findings);
+
+    expect(findings).toEqual([
+      "Caddy config state indeterminate for legacy-edge-load-balancer (root@legacy-edge-load-balancer.ssh.invalid): inspection-error - caddy adapt failed: adapting config using caddyfile: /etc/caddy/Caddyfile:12 - unrecognized directive"
+    ]);
+  });
+
+  test("falls back to the raw output when the check output could not be parsed", () => {
+    const findings: string[] = [];
+    collectCaddyFindings(
+      {
+        key: "caddyDrift",
+        label: "Caddy configuration state",
+        exitCode: 2,
+        stdout: "",
+        stderr: "Error: caddy inspector crashed"
+      },
+      findings
+    );
+
+    expect(findings).toEqual(["Caddy configuration state failed: Error: caddy inspector crashed"]);
+  });
+
+  test("falls back when the exit code is nonzero but every alias parsed as in-sync", () => {
+    const findings: string[] = [];
+    collectCaddyFindings(
+      caddyCheck([caddyAlias("production-backend-load-balancer"), caddyAlias("staging-backend-load-balancer")], {
+        exitCode: 1,
+        stderr: "warning: 1 alias could not be summarized"
+      }),
+      findings
+    );
+
+    expect(findings).toEqual([
+      "Caddy configuration state failed: warning: 1 alias could not be summarized"
+    ]);
+  });
+
+  test("stays silent when the check is absent, skipped, or entirely in-sync", () => {
+    const missing: string[] = [];
+    collectCaddyFindings(undefined, missing);
+    expect(missing).toEqual([]);
+
+    const skipped: string[] = [];
+    collectCaddyFindings(caddyCheck([caddyAlias("edge-lb", { status: "drift" })], { status: "skipped" }), skipped);
+    expect(skipped).toEqual([]);
+
+    const clean: string[] = [];
+    collectCaddyFindings(
+      caddyCheck([caddyAlias("production-backend-load-balancer"), caddyAlias("staging-backend-load-balancer")], {
+        exitCode: 0
+      }),
+      clean
+    );
+    expect(clean).toEqual([]);
+  });
+
+  test("is wired into collectFindings without double-reporting the raw output", () => {
+    const payload = skippedVastPayload();
+    payload.results.push(
+      caddyCheck([
+        caddyAlias("production-backend-load-balancer"),
+        caddyAlias("inference-load-balancer", {
+          status: "indeterminate",
+          reason: "host-unavailable",
+          error: "ssh: connect to host 178.105.107.43 port 22: Connection timed out"
+        })
+      ]) as unknown as (typeof payload.results)[number]
+    );
+
+    expect(collectFindings(payload, { lowBalanceThreshold: 5 })).toEqual([
+      "Caddy config state indeterminate for inference-load-balancer (root@inference-load-balancer.ssh.invalid): host-unavailable - ssh: connect to host 178.105.107.43 port 22: Connection timed out"
     ]);
   });
 });

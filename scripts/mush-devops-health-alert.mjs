@@ -144,9 +144,10 @@ export function collectFindings(payload, options = {}) {
   collectVastStatusFindings(checks.get("vastStatus"), findings, lowBalanceThreshold);
   collectVastBalanceFallbackFindings(payload, checks, findings, lowBalanceThreshold);
   collectVastDriftFindings(checks.get("vastDrift"), findings);
+  collectCaddyFindings(checks.get("caddyDrift"), findings);
 
   for (const check of payload.results) {
-    if (["http", "vastStatus", "vastDrift"].includes(check.key)) continue;
+    if (["http", "vastStatus", "vastDrift", "caddyDrift"].includes(check.key)) continue;
     if (isSkippedCheck(check)) continue;
     if (Number(check.exitCode) !== 0) {
       findings.push(`${check.label || check.key || "Check"} failed: ${preview(check.stderr || check.stdout)}`);
@@ -280,6 +281,61 @@ function collectVastDriftFindings(check, findings) {
   } else if (Number(check.exitCode) !== 0) {
     findings.push(`Vast drift exited ${check.exitCode}: ${preview(check.stderr || check.stdout)}`);
   }
+}
+
+/**
+ * The Caddy config drift check emits one entry per load-balancer alias. Its raw stdout is a
+ * verbose JSON document that leads with the healthy ("in-sync") aliases, so the generic
+ * nonzero-exit fallback used to truncate the preview long before reaching the alias that
+ * actually failed. Report the failing aliases by name instead.
+ *
+ * A missing check is legitimate here (the caddy checks are conditionally enabled remotely),
+ * so absence never raises a finding.
+ */
+export function collectCaddyFindings(check, findings) {
+  if (!check) return;
+  if (isSkippedCheck(check)) return;
+
+  if (!check.parsed || !Array.isArray(check.parsed.results)) {
+    if (Number(check.exitCode) !== 0) {
+      findings.push(`Caddy configuration state failed: ${preview(check.stderr || check.stdout)}`);
+    }
+    return;
+  }
+
+  let reported = 0;
+  for (const result of check.parsed.results) {
+    if (!result || result.status === "in-sync") continue;
+    findings.push(formatCaddyFinding(result));
+    reported += 1;
+  }
+
+  if (reported === 0 && Number(check.exitCode) !== 0) {
+    findings.push(`Caddy configuration state failed: ${preview(check.stderr || check.stdout)}`);
+  }
+}
+
+function formatCaddyFinding(result) {
+  const target = formatCaddyAlias(result);
+
+  if (result.status === "drift") {
+    const diff = String(result.diff || "").trim();
+    return `Caddy config drift on ${target}.${diff ? ` ${preview(diff)}` : ""}`;
+  }
+
+  const reason = result.reason ? `${result.reason} - ` : "";
+  const error = String(result.error || "").trim() ? preview(result.error) : "no error detail";
+
+  if (result.status === "indeterminate") {
+    return `Caddy config state indeterminate for ${target}: ${reason}${error}`;
+  }
+
+  return `Caddy config state ${result.status || "unknown"} for ${target}: ${reason}${error}`;
+}
+
+function formatCaddyAlias(result) {
+  const alias = result.alias || "unknown alias";
+  return result.sshTarget ? `${alias} (${result.sshTarget})` : alias;
 }
 
 function formatHttpFinding(result) {

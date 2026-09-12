@@ -17,7 +17,21 @@ import path from "node:path";
 export const BACKEND_UNHEALTHY_PREFIX = "Enabled backend(s) unhealthy:";
 export const DEFAULT_COOLDOWN_MINUTES = 45;
 export const DEFAULT_REMEDIATION_TIMEOUT_SEC = 180;
-export const MAX_TARGETS_PER_RUN = 2;
+/**
+ * CORRELATED-FAILURE GUARD (the live cap).
+ *
+ * At most ONE backend may be auto-remediated per run, and when more than one GPU backend is
+ * unhealthy in the same run nothing is remediated at all (see `OUTCOMES.skippedCorrelated`).
+ *
+ * Rationale: there are only two GPU boxes, so "2 unhealthy" means "all of them unhealthy", which
+ * is far more likely to be an upstream cause (gateway down, network, Vast-side outage) than two
+ * independent per-box crashes in the same minute. Restarting even one box on a correlated failure
+ * is action without evidence, and restarting both would take 100% of inference capacity down.
+ * Alerting only is strictly recoverable: Tim can still restart by hand in a minute.
+ */
+export const MAX_REMEDIATION_TARGETS_PER_RUN = 1;
+/** Circuit breaker: stop auto-remediating a backend after this many consecutive failed attempts. */
+export const MAX_CONSECUTIVE_FAILURES = 3;
 export const REDACTED = "[redacted]";
 
 export const OUTCOMES = Object.freeze({
@@ -25,19 +39,35 @@ export const OUTCOMES = Object.freeze({
   succeeded: "succeeded",
   partial: "partial",
   failed: "failed",
+  inProgress: "in-progress",
   skippedCooldown: "skipped-cooldown",
   skippedDisabled: "skipped-disabled",
+  skippedCircuitOpen: "skipped-circuit-open",
+  skippedCorrelated: "skipped-correlated-failure",
+  skippedMismatch: "skipped-target-mismatch",
   dryRun: "dry-run",
   error: "error",
 });
 
-/** Outcomes that did not mutate anything, so they must not start a cooldown window. */
+/**
+ * Outcomes that did not mutate anything, so they must not start a cooldown window and must not
+ * count against the circuit breaker.
+ *
+ * `in-progress` is deliberately NOT in this set: it is the marker written just BEFORE a restart,
+ * so it must hold the cooldown door shut if the process dies mid-restart.
+ */
 const NON_COOLDOWN_OUTCOMES = new Set([
   OUTCOMES.selfRecovered,
   OUTCOMES.skippedCooldown,
   OUTCOMES.skippedDisabled,
+  OUTCOMES.skippedCircuitOpen,
+  OUTCOMES.skippedCorrelated,
+  OUTCOMES.skippedMismatch,
   OUTCOMES.dryRun,
 ]);
+
+/** Outcomes that prove the backend is healthy again, so the failure streak resets. */
+const FAILURE_STREAK_RESET_OUTCOMES = new Set([OUTCOMES.succeeded, OUTCOMES.selfRecovered]);
 
 /** Verbatim contents of /root/start-remote-inference.sh as it exists on a healthy GPU box. */
 export const START_SCRIPT_CONTENT = `#!/bin/bash
@@ -224,6 +254,39 @@ export function detectGpuRemediationTargets(check, options = {}) {
   return targets;
 }
 
+/**
+ * Did this run actually OBSERVE the state of the GPU backends?
+ *
+ * The circuit-breaker auto-reset in `clearRecoveredBackends` infers "this backend recovered" from
+ * "this backend was not named in this run's unhealthy list". That inference is only sound when the
+ * gateway actually answered: a backend absent from an enumeration we received is positively
+ * healthy, but an enumeration we never received tells us nothing at all.
+ *
+ * True only when a parsed http result array contains a GPU-component result that is either
+ *   (a) `healthy` — the gateway answered and every enabled backend behind it is healthy; or
+ *   (b) failing WITH a `BACKEND_UNHEALTHY_PREFIX` enumeration — the gateway answered and named
+ *       exactly which backends are unhealthy, so every other backend is positively healthy.
+ *
+ * False for everything else: no parsed results array, no GPU-component result at all, a `skipped`
+ * GPU result, or a GPU result that failed for a reason that is not an enumeration (ECONNREFUSED,
+ * timeout, DNS failure, non-JSON body). Those all mean "we could not see the backends".
+ */
+export function gpuBackendEnumerationIsTrustworthy(check) {
+  const results = check?.parsed?.results;
+  if (!Array.isArray(results)) return false;
+
+  for (const result of results) {
+    if (!result || typeof result !== "object") continue;
+    if (!isGpuComponent(result)) continue;
+    if (result.status === "skipped") continue;
+    if (result.status === "healthy") return true;
+    const error = typeof result.error === "string" ? result.error : "";
+    if (error.includes(BACKEND_UNHEALTHY_PREFIX)) return true;
+  }
+
+  return false;
+}
+
 /** Human label used in alert text, e.g. "gpu-gateway/gpu-1 (182.224.239.168:63571)". */
 export function describeTarget(target) {
   const service = target?.gatewayService ? `${target.gatewayService}/` : "";
@@ -274,6 +337,10 @@ export function resolveBackendEndpoint(driftPayload, backendId) {
   const expected = match.expected && typeof match.expected === "object" ? match.expected : null;
   const host = firstNonEmptyString(actual?.host, expected?.host);
   const sshPort = firstPositiveInt(actual?.sshPort, expected?.sshPort);
+  // The authoritative service port, used to cross-check the IP:port parsed out of alert text.
+  const actualServicePort = firstPositiveInt(actual?.servicePort);
+  const expectedServicePort = firstPositiveInt(expected?.servicePort);
+  const servicePort = actualServicePort ?? expectedServicePort;
 
   if (!host) return { ok: false, error: `vast-drift output has no host for ${backendId}` };
   if (!sshPort) return { ok: false, error: `vast-drift output has no sshPort for ${backendId}` };
@@ -282,6 +349,8 @@ export function resolveBackendEndpoint(driftPayload, backendId) {
     ok: true,
     host,
     sshPort,
+    servicePort,
+    servicePortSource: servicePort == null ? null : actualServicePort != null ? "vast-api" : "stack.json",
     source: actual?.host && actual?.sshPort ? "vast-api" : "stack.json",
     vastInstanceId: match.vastInstanceId ?? actual?.vastInstanceId ?? null,
     instanceStatus: actual?.status ?? null,
@@ -344,31 +413,51 @@ export function normalizeRemediationState(raw) {
   for (const [backendId, entry] of Object.entries(backends)) {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
     const attempts = Number(entry.attempts);
+    const consecutiveFailures = Number(entry.consecutiveFailures);
     state.backends[backendId] = {
       lastAttemptAt: typeof entry.lastAttemptAt === "string" ? entry.lastAttemptAt : null,
       lastOutcome: typeof entry.lastOutcome === "string" ? entry.lastOutcome : null,
       attempts: Number.isFinite(attempts) && attempts > 0 ? Math.floor(attempts) : 0,
+      consecutiveFailures:
+        Number.isFinite(consecutiveFailures) && consecutiveFailures > 0 ? Math.floor(consecutiveFailures) : 0,
     };
   }
   return state;
 }
 
 /**
- * Cooldown gate. Only outcomes that actually mutated the box hold the door shut; a
- * `self-recovered` observation never blocks a later real restart.
+ * Cooldown gate + circuit breaker. Only outcomes that actually mutated the box hold the cooldown
+ * door shut; a `self-recovered` observation never blocks a later real restart. Once a backend has
+ * failed `MAX_CONSECUTIVE_FAILURES` times in a row the breaker opens and stays open until the
+ * backend recovers on its own (or an operator clears the state file).
  */
 export function shouldAttemptRemediation(state, backendId, nowMs, cooldownMs) {
   const entry = normalizeRemediationState(state).backends[backendId];
-  const base = { allowed: true, lastAttemptAt: null, lastOutcome: null, remainingMs: 0, retryAfter: null };
-  if (!entry || !entry.lastAttemptAt) return base;
+  const base = {
+    allowed: true,
+    reason: null,
+    lastAttemptAt: null,
+    lastOutcome: null,
+    consecutiveFailures: 0,
+    remainingMs: 0,
+    retryAfter: null,
+  };
+  if (!entry) return base;
 
-  const lastAttemptMs = Date.parse(entry.lastAttemptAt);
   const info = {
     ...base,
     lastAttemptAt: entry.lastAttemptAt,
     lastOutcome: entry.lastOutcome,
+    consecutiveFailures: entry.consecutiveFailures,
     attempts: entry.attempts,
   };
+
+  if (entry.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+    return { ...info, allowed: false, reason: "circuit-open" };
+  }
+  if (!entry.lastAttemptAt) return info;
+
+  const lastAttemptMs = Date.parse(entry.lastAttemptAt);
   if (!Number.isFinite(lastAttemptMs)) return info;
   if (entry.lastOutcome && NON_COOLDOWN_OUTCOMES.has(entry.lastOutcome)) return info;
 
@@ -381,21 +470,99 @@ export function shouldAttemptRemediation(state, backendId, nowMs, cooldownMs) {
   return {
     ...info,
     allowed: false,
+    reason: "cooldown",
     remainingMs,
     retryAfter: new Date(lastAttemptMs + cooldown).toISOString(),
   };
 }
 
-/** Pure state transition: returns a new state object, never mutates the input. */
-export function recordRemediationAttempt(state, backendId, outcome, nowIso) {
+/**
+ * Preliminary state transition written BEFORE the box is touched: it starts the cooldown window
+ * and charges the attempt against the circuit breaker, so a crash mid-restart cannot produce a
+ * rapid repeat restart on the next run. Pure: returns a new state object.
+ */
+export function beginRemediationAttempt(state, backendId, nowIso) {
   const next = normalizeRemediationState(state);
   const previous = next.backends[backendId];
   next.backends[backendId] = {
     lastAttemptAt: String(nowIso),
-    lastOutcome: String(outcome),
+    lastOutcome: OUTCOMES.inProgress,
     attempts: (previous?.attempts ?? 0) + 1,
+    consecutiveFailures: (previous?.consecutiveFailures ?? 0) + 1,
   };
   return next;
+}
+
+/**
+ * Final state transition written after the attempt resolved. Never double-increments `attempts`
+ * (that already happened in `beginRemediationAttempt`); resets the failure streak when the
+ * backend is healthy again, and rolls the streak increment back for outcomes that changed
+ * nothing at all (skipped-*, dry-run).
+ *
+ * Pure: returns a new state object.
+ */
+export function finalizeRemediationAttempt(state, backendId, outcome, nowIso) {
+  const next = normalizeRemediationState(state);
+  const previous = next.backends[backendId];
+  const outcomeText = String(outcome);
+  const previousFailures = previous?.consecutiveFailures ?? 0;
+
+  let consecutiveFailures = previousFailures;
+  if (FAILURE_STREAK_RESET_OUTCOMES.has(outcomeText)) {
+    consecutiveFailures = 0;
+  } else if (NON_COOLDOWN_OUTCOMES.has(outcomeText)) {
+    // Nothing was changed on the box, so the in-progress marker's increment is rolled back.
+    consecutiveFailures = Math.max(0, previousFailures - 1);
+  }
+
+  next.backends[backendId] = {
+    lastAttemptAt: String(nowIso),
+    lastOutcome: outcomeText,
+    attempts: previous?.attempts ?? 0,
+    consecutiveFailures,
+  };
+  return next;
+}
+
+/**
+ * Pure state transition: returns a new state object, never mutates the input.
+ * Equivalent to a begin+finalize pair, kept for callers that record an attempt in one shot.
+ */
+export function recordRemediationAttempt(state, backendId, outcome, nowIso) {
+  return finalizeRemediationAttempt(
+    beginRemediationAttempt(state, backendId, nowIso),
+    backendId,
+    outcome,
+    nowIso,
+  );
+}
+
+/**
+ * Auto-recovery reset for the circuit breaker: any backend carrying a failure streak that is NOT
+ * in this run's unhealthy set has recovered on its own, so its streak is cleared. Without this the
+ * breaker would stay open forever after three bad days.
+ *
+ * PRECONDITION: `unhealthyBackendIds` must come from an enumeration this run actually received
+ * (see `gpuBackendEnumerationIsTrustworthy`). An empty list because the gateway was unreachable is
+ * NOT evidence of health, and passing it here would silently re-arm every open breaker.
+ *
+ * Pure: returns `{state, cleared, changed}` and never mutates the input.
+ */
+export function clearRecoveredBackends(state, unhealthyBackendIds) {
+  const next = normalizeRemediationState(state);
+  const unhealthy = new Set(
+    (Array.isArray(unhealthyBackendIds) ? unhealthyBackendIds : []).filter(Boolean).map(String),
+  );
+  const cleared = [];
+
+  for (const [backendId, entry] of Object.entries(next.backends)) {
+    if (unhealthy.has(backendId)) continue;
+    if (!entry || entry.consecutiveFailures <= 0) continue;
+    next.backends[backendId] = { ...entry, consecutiveFailures: 0 };
+    cleared.push(backendId);
+  }
+
+  return { state: next, cleared, changed: cleared.length > 0 };
 }
 
 /** Read state from disk, degrading to empty state on any error. */
@@ -660,6 +827,31 @@ async function remediateOne({
   const boxLabel = `${endpoint.host}:${endpoint.sshPort}`;
   plan.push(`resolved ${target.backendId} to root@${boxLabel} via vast-drift (${endpoint.source})`);
 
+  // Sanity check BEFORE any ssh: the IP:port in `target` came out of free-form alert text, while
+  // `endpoint.servicePort` comes from the authoritative stack config / live Vast API. If they
+  // disagree we may be about to restart the wrong box, so stop and hand it to a human.
+  const targetPort = firstPositiveInt(target?.port);
+  if (targetPort != null && endpoint.servicePort != null && targetPort !== endpoint.servicePort) {
+    return {
+      target,
+      outcome: OUTCOMES.skippedMismatch,
+      message:
+        `target mismatch for ${target.backendId}: the alert text names port ${targetPort} but the authoritative ` +
+        `config (${endpoint.servicePortSource}) says the service port is ${endpoint.servicePort}. That is a red flag ` +
+        `that the target resolved from the alert may not be the box the config expects, so nothing was restarted. ` +
+        `Check stack.json / vast-drift against the gateway backend list by hand.`,
+      plan,
+    };
+  }
+  if (endpoint.servicePort == null) {
+    plan.push(
+      `servicePort for ${target.backendId} could not be verified (vast-drift output carries no servicePort); ` +
+        `proceeding without the alert-text cross-check`,
+    );
+  } else {
+    plan.push(`servicePort ${endpoint.servicePort} (${endpoint.servicePortSource}) matches the alert target port`);
+  }
+
   const runOnBox = (remoteCommand, preferredMs) =>
     exec(
       "ssh",
@@ -819,8 +1011,12 @@ const OUTCOME_LABELS = {
   [OUTCOMES.succeeded]: "SUCCEEDED",
   [OUTCOMES.partial]: "PARTIAL",
   [OUTCOMES.failed]: "FAILED",
+  [OUTCOMES.inProgress]: "IN PROGRESS",
   [OUTCOMES.skippedCooldown]: "SKIPPED (cooldown)",
   [OUTCOMES.skippedDisabled]: "SKIPPED (disabled)",
+  [OUTCOMES.skippedCircuitOpen]: "SKIPPED (circuit open)",
+  [OUTCOMES.skippedCorrelated]: "SKIPPED (correlated failure)",
+  [OUTCOMES.skippedMismatch]: "SKIPPED (target mismatch)",
   [OUTCOMES.dryRun]: "DRY RUN",
   [OUTCOMES.error]: "ERROR",
 };
@@ -830,13 +1026,28 @@ const OUTCOME_SUMMARIES = {
   [OUTCOMES.succeeded]: "remote-inference restarted; backend is healthy again.",
   [OUTCOMES.partial]: "restarted, gateway not yet healthy — verify shortly.",
   [OUTCOMES.failed]: "automatic restart did not fix the backend.",
+  [OUTCOMES.inProgress]: "a restart was started and its result was never recorded; verify the box by hand.",
   [OUTCOMES.skippedCooldown]: "auto-remediation skipped because of the cooldown window.",
   [OUTCOMES.skippedDisabled]: "auto-remediation is disabled.",
+  [OUTCOMES.skippedCircuitOpen]:
+    "auto-remediation is suspended for this backend after repeated failures; manual intervention required.",
+  [OUTCOMES.skippedCorrelated]:
+    "several GPU backends went unhealthy at once, which points upstream; nothing was restarted.",
+  [OUTCOMES.skippedMismatch]:
+    "the target port from the alert does not match the authoritative config; nothing was restarted.",
   [OUTCOMES.dryRun]: "no changes were made (dry run).",
   [OUTCOMES.error]: "auto-remediation itself failed.",
 };
 
-const NEEDS_ATTENTION = new Set([OUTCOMES.failed, OUTCOMES.partial, OUTCOMES.error, OUTCOMES.skippedCooldown]);
+const NEEDS_ATTENTION = new Set([
+  OUTCOMES.failed,
+  OUTCOMES.partial,
+  OUTCOMES.error,
+  OUTCOMES.skippedCooldown,
+  OUTCOMES.skippedCircuitOpen,
+  OUTCOMES.skippedCorrelated,
+  OUTCOMES.skippedMismatch,
+]);
 
 /**
  * Render the auto-remediation section appended after the normal findings.
@@ -854,8 +1065,10 @@ export function formatRemediationReport(results, notes = []) {
 
   for (const result of list) {
     const label = OUTCOME_LABELS[result.outcome] || String(result.outcome || "UNKNOWN").toUpperCase();
-    const summary = result.message || OUTCOME_SUMMARIES[result.outcome] || "no details";
-    lines.push(`Auto-remediation: ${describeTarget(result.target)}`);
+    // `result.message` can carry command output or a log tail, so it is redacted here even though
+    // most producers already redact: this is the last gate before the text reaches Telegram.
+    const summary = redactSecrets(result.message || OUTCOME_SUMMARIES[result.outcome] || "no details");
+    lines.push(`Auto-remediation: ${redactSecrets(describeTarget(result.target))}`);
     lines.push(`  Result: ${label} — ${summary}`);
 
     if (result.outcome === OUTCOMES.dryRun || NEEDS_ATTENTION.has(result.outcome)) {

@@ -8,9 +8,15 @@ import { describe, expect, test } from "vitest";
 const mod = await import("../../scripts/lib/gpu-remediation.mjs");
 
 const {
+  MAX_CONSECUTIVE_FAILURES,
+  MAX_REMEDIATION_TARGETS_PER_RUN,
   OUTCOMES,
+  beginRemediationAttempt,
   buildTwoHopSshArgs,
+  clearRecoveredBackends,
+  finalizeRemediationAttempt,
   detectGpuRemediationTargets,
+  gpuBackendEnumerationIsTrustworthy,
   describeTarget,
   formatRemediationReport,
   normalizeRemediationState,
@@ -398,6 +404,7 @@ describe("cooldown state", () => {
       lastAttemptAt: "2026-09-12T13:00:00.000Z",
       lastOutcome: "succeeded",
       attempts: 3,
+      consecutiveFailures: 0,
     });
     expect(STATE.backends["gpu-1"].attempts).toBe(2);
   });
@@ -411,9 +418,21 @@ describe("cooldown state", () => {
     await writeFile(corrupt, "{not json");
     expect(await readRemediationState(corrupt)).toEqual({ version: 1, backends: {} });
 
+    // The persisted shape is the normalized one, which now carries the circuit-breaker counter.
+    const NORMALIZED = {
+      version: 1,
+      backends: {
+        "gpu-1": {
+          lastAttemptAt: "2026-09-12T12:00:00.000Z",
+          lastOutcome: "failed",
+          attempts: 2,
+          consecutiveFailures: 0,
+        },
+      },
+    };
     await writeRemediationState(missing, STATE);
-    expect(JSON.parse(await readFile(missing, "utf8"))).toEqual(STATE);
-    expect(await readRemediationState(missing)).toEqual(STATE);
+    expect(JSON.parse(await readFile(missing, "utf8"))).toEqual(NORMALIZED);
+    expect(await readRemediationState(missing)).toEqual(NORMALIZED);
   });
 });
 
@@ -706,5 +725,381 @@ describe("remediation orchestration (injected exec)", () => {
     const { exec, calls } = makeExec({});
     expect(await runGpuRemediation({ ...base, exec, targets: [] })).toEqual([]);
     expect(calls).toEqual([]);
+  });
+});
+
+describe("circuit breaker", () => {
+  const BASE = Date.parse("2026-09-12T12:00:00.000Z");
+  const COOLDOWN = 45 * 60 * 1000;
+
+  function stateWith(consecutiveFailures: number, lastAttemptAt = "2026-09-12T10:00:00.000Z") {
+    return {
+      version: 1,
+      backends: { "gpu-1": { lastAttemptAt, lastOutcome: "failed", attempts: 9, consecutiveFailures } },
+    };
+  }
+
+  test("opens after three consecutive failures, even once the cooldown has expired", () => {
+    const gate = shouldAttemptRemediation(stateWith(MAX_CONSECUTIVE_FAILURES), "gpu-1", BASE, COOLDOWN);
+    expect(gate.allowed).toBe(false);
+    expect(gate.reason).toBe("circuit-open");
+    expect(gate.consecutiveFailures).toBe(3);
+  });
+
+  test("stays closed below the limit and labels a cooldown block as such", () => {
+    expect(shouldAttemptRemediation(stateWith(2), "gpu-1", BASE, COOLDOWN).allowed).toBe(true);
+
+    const cooling = shouldAttemptRemediation(
+      stateWith(2, "2026-09-12T11:45:00.000Z"),
+      "gpu-1",
+      BASE,
+      COOLDOWN,
+    );
+    expect(cooling.allowed).toBe(false);
+    expect(cooling.reason).toBe("cooldown");
+    expect(cooling.retryAfter).toBe("2026-09-12T12:30:00.000Z");
+  });
+
+  test("coerces a corrupt or missing failure counter to 0 without throwing", () => {
+    for (const corrupt of [undefined, null, "nope", -4, Number.NaN, {}]) {
+      const normalized = normalizeRemediationState({
+        backends: { "gpu-1": { lastAttemptAt: "2026-09-12T10:00:00.000Z", consecutiveFailures: corrupt } },
+      });
+      expect(normalized.backends["gpu-1"].consecutiveFailures).toBe(0);
+    }
+    expect(shouldAttemptRemediation({ backends: { "gpu-1": { consecutiveFailures: "nope" } } }, "gpu-1", BASE, COOLDOWN).allowed).toBe(true);
+  });
+
+  test("the begin marker charges the attempt before the box is touched", () => {
+    const next = beginRemediationAttempt(stateWith(1), "gpu-1", "2026-09-12T12:00:00.000Z");
+    expect(next.backends["gpu-1"]).toEqual({
+      lastAttemptAt: "2026-09-12T12:00:00.000Z",
+      lastOutcome: OUTCOMES.inProgress,
+      attempts: 10,
+      consecutiveFailures: 2,
+    });
+    // The in-progress marker holds the cooldown door shut if the process dies mid-restart.
+    expect(shouldAttemptRemediation(next, "gpu-1", BASE + 60 * 1000, COOLDOWN).allowed).toBe(false);
+  });
+
+  test("finalize never double-increments attempts and resets the streak on recovery", () => {
+    const started = beginRemediationAttempt(stateWith(2), "gpu-1", "2026-09-12T12:00:00.000Z");
+
+    const failed = finalizeRemediationAttempt(started, "gpu-1", OUTCOMES.failed, "2026-09-12T12:03:00.000Z");
+    expect(failed.backends["gpu-1"]).toEqual({
+      lastAttemptAt: "2026-09-12T12:03:00.000Z",
+      lastOutcome: OUTCOMES.failed,
+      attempts: 10,
+      consecutiveFailures: 3,
+    });
+    expect(shouldAttemptRemediation(failed, "gpu-1", BASE + 10 * 60 * 60 * 1000, COOLDOWN).reason).toBe("circuit-open");
+
+    for (const outcome of [OUTCOMES.succeeded, OUTCOMES.selfRecovered]) {
+      const recovered = finalizeRemediationAttempt(started, "gpu-1", outcome, "2026-09-12T12:03:00.000Z");
+      expect(recovered.backends["gpu-1"].consecutiveFailures).toBe(0);
+      expect(recovered.backends["gpu-1"].attempts).toBe(10);
+    }
+  });
+
+  test("finalize rolls the streak back for outcomes that changed nothing", () => {
+    const started = beginRemediationAttempt(stateWith(1), "gpu-1", "2026-09-12T12:00:00.000Z");
+    expect(started.backends["gpu-1"].consecutiveFailures).toBe(2);
+
+    for (const outcome of [
+      OUTCOMES.skippedMismatch,
+      OUTCOMES.skippedCooldown,
+      OUTCOMES.skippedCircuitOpen,
+      OUTCOMES.skippedCorrelated,
+      OUTCOMES.skippedDisabled,
+      OUTCOMES.dryRun,
+    ]) {
+      const finalized = finalizeRemediationAttempt(started, "gpu-1", outcome, "2026-09-12T12:03:00.000Z");
+      expect(finalized.backends["gpu-1"].consecutiveFailures).toBe(1);
+      // ...and none of them holds a cooldown either.
+      expect(shouldAttemptRemediation(finalized, "gpu-1", BASE + 60 * 1000, COOLDOWN).allowed).toBe(true);
+    }
+  });
+
+  test("clearRecoveredBackends resets only backends that are healthy this run", () => {
+    const state = {
+      version: 1,
+      backends: {
+        "gpu-1": { lastAttemptAt: "2026-09-12T10:00:00.000Z", lastOutcome: "failed", attempts: 9, consecutiveFailures: 3 },
+        "gpu-2": { lastAttemptAt: "2026-09-12T10:00:00.000Z", lastOutcome: "failed", attempts: 4, consecutiveFailures: 2 },
+        "gpu-3": { lastAttemptAt: "2026-09-12T10:00:00.000Z", lastOutcome: "succeeded", attempts: 1, consecutiveFailures: 0 },
+      },
+    };
+
+    const recovery = clearRecoveredBackends(state, ["gpu-2"]);
+    expect(recovery.changed).toBe(true);
+    expect(recovery.cleared).toEqual(["gpu-1"]);
+    expect(recovery.state.backends["gpu-1"].consecutiveFailures).toBe(0);
+    expect(recovery.state.backends["gpu-1"].attempts).toBe(9);
+    expect(recovery.state.backends["gpu-2"].consecutiveFailures).toBe(2);
+    // The input is never mutated.
+    expect(state.backends["gpu-1"].consecutiveFailures).toBe(3);
+
+    // Nothing to do => no write is signalled.
+    expect(clearRecoveredBackends(state, ["gpu-1", "gpu-2"]).changed).toBe(false);
+    expect(clearRecoveredBackends(recovery.state, []).changed).toBe(true);
+    expect(clearRecoveredBackends(null, []).changed).toBe(false);
+    expect(clearRecoveredBackends(state, null).cleared).toEqual(["gpu-1", "gpu-2"]);
+  });
+
+  test("a reopened circuit clears once the backend recovers on its own", () => {
+    const open = stateWith(MAX_CONSECUTIVE_FAILURES);
+    expect(shouldAttemptRemediation(open, "gpu-1", BASE, COOLDOWN).allowed).toBe(false);
+    const recovered = clearRecoveredBackends(open, []).state;
+    expect(shouldAttemptRemediation(recovered, "gpu-1", BASE, COOLDOWN).allowed).toBe(true);
+  });
+});
+
+describe("correlated-failure cap", () => {
+  test("only one backend may ever be auto-remediated per run", () => {
+    expect(MAX_REMEDIATION_TARGETS_PER_RUN).toBe(1);
+  });
+
+  test("the new skip outcomes render as manual-intervention findings", () => {
+    const target = { gatewayService: "gpu-gateway", backendId: "gpu-1", address: "1.2.3.4", port: 63571 };
+    for (const outcome of [OUTCOMES.skippedCircuitOpen, OUTCOMES.skippedCorrelated, OUTCOMES.skippedMismatch]) {
+      const report = formatRemediationReport([{ target, outcome }]);
+      expect(report).toContain("⚠️ MANUAL INTERVENTION REQUIRED");
+      expect(report).toContain("Result: SKIPPED (");
+    }
+    expect(formatRemediationReport([{ target, outcome: OUTCOMES.inProgress }])).toContain("Result: IN PROGRESS —");
+  });
+
+  test("redacts result.message and the summary fallback before they reach alert text", () => {
+    const target = { gatewayService: "gpu-gateway", backendId: "gpu-1", address: "1.2.3.4", port: 63571 };
+    const report = formatRemediationReport([
+      {
+        target,
+        outcome: OUTCOMES.failed,
+        message:
+          'boot failed: {"api_key":"sk-live-should-not-leak"} request 0f2b5c1e-11aa-4d33-9f77-8b2a6c4e5d10 ' +
+          "token 8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92 API_KEY=hunter2",
+      },
+    ]);
+
+    expect(report).not.toContain("sk-live-should-not-leak");
+    expect(report).not.toContain("0f2b5c1e-11aa-4d33-9f77-8b2a6c4e5d10");
+    expect(report).not.toContain("8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92");
+    expect(report).not.toContain("hunter2");
+    expect(report).toContain("[redacted]");
+  });
+
+  test("previewRedacted redacts before truncating, so a straddling key cannot half-survive", () => {
+    const UUID = "0f2b5c1e-11aa-4d33-9f77-8b2a6c4e5d10";
+    // 480 characters of noise, so the 36-character uuid starts at index 480 and straddles the
+    // 500-character cutoff: truncate-then-redact would leave the first 20 characters of the key
+    // sitting in the alert text.
+    const noisy = `${"log ".repeat(120)}${UUID} and more trailing output that gets cut off here`;
+    expect(noisy.indexOf(UUID)).toBe(480);
+    const out = mod.previewRedacted(noisy, 500);
+
+    expect(out).not.toContain(UUID);
+    expect(out).not.toContain(UUID.slice(0, 20));
+    expect(out).toContain("[redacted]");
+    expect(out.endsWith("...")).toBe(true);
+  });
+});
+
+describe("servicePort sanity check", () => {
+  const TARGET = {
+    componentId: "remote-inference",
+    componentName: "Remote Inference (GPU Service)",
+    gatewayService: "gpu-gateway",
+    backendId: "gpu-1",
+    address: "182.224.239.168",
+    port: 63571,
+    gatewaySshTarget: "root@162.55.45.186",
+  };
+
+  function drift(servicePort: number | null, where: "actual" | "expected" = "actual") {
+    const actual: Record<string, unknown> = { host: "182.224.239.168", sshPort: 63530, status: "running" };
+    const expected: Record<string, unknown> = { host: "182.224.239.168", sshPort: 63530 };
+    if (servicePort != null) (where === "actual" ? actual : expected).servicePort = servicePort;
+    return JSON.stringify({
+      drifted: false,
+      comparisons: [{ logicalId: "gpu-1", vastInstanceId: 46154118, expected, actual, diffs: [] }],
+    });
+  }
+
+  function ok(stdout: string) {
+    return { exitCode: 0, signal: null, stdout, stderr: "", timedOut: false };
+  }
+
+  function harness(driftJson: string) {
+    const calls: string[] = [];
+    const exec = async (_command: string, args: string[]) => {
+      const command = args[args.length - 1];
+      if (command.includes("vast-drift")) {
+        calls.push("drift");
+        return ok(driftJson);
+      }
+      if (command.includes("admin/backends")) {
+        calls.push("gateway");
+        return ok(JSON.stringify([{ id: "gpu-1", enabled: true, health: { status: "healthy" } }]));
+      }
+      if (command.includes("RI-HEALTH")) {
+        calls.push("poll");
+        return ok("RI-HEALTH:200");
+      }
+      if (command.includes("http_code")) {
+        calls.push("probe");
+        return ok("000");
+      }
+      if (command.includes("RI-FAIL")) {
+        calls.push("restart");
+        return ok("RI:start-script:present\nRI:api-key:present\nRI:venv:present\nRI:deps:present\nRI:tmux:started\nRI:done");
+      }
+      calls.push(`unknown:${command}`);
+      return ok("");
+    };
+    return { exec, calls };
+  }
+
+  const base = {
+    targets: [TARGET],
+    jumpHost: "tim@89.167.72.52",
+    remoteDir: "/home/tim/pkg/mush/mush-devops",
+    sleep: async () => {},
+  };
+
+  test("resolveBackendEndpoint surfaces the authoritative servicePort and its source", () => {
+    expect(resolveBackendEndpoint(JSON.parse(drift(63571)), "gpu-1")).toMatchObject({
+      ok: true,
+      servicePort: 63571,
+      servicePortSource: "vast-api",
+    });
+    expect(resolveBackendEndpoint(JSON.parse(drift(63571, "expected")), "gpu-1")).toMatchObject({
+      servicePort: 63571,
+      servicePortSource: "stack.json",
+    });
+    expect(resolveBackendEndpoint(JSON.parse(drift(null)), "gpu-1")).toMatchObject({
+      servicePort: null,
+      servicePortSource: null,
+    });
+  });
+
+  test("a matching servicePort proceeds to the restart", async () => {
+    const { exec, calls } = harness(drift(63571));
+    const results = await runGpuRemediation({ ...base, exec });
+
+    expect(results[0].outcome).toBe(OUTCOMES.succeeded);
+    expect(calls).toContain("restart");
+    expect(results[0].plan.join("\n")).toContain("servicePort 63571 (vast-api) matches");
+  });
+
+  test("a mismatched servicePort skips without ever ssh-ing to the box", async () => {
+    const { exec, calls } = harness(drift(9999));
+    const results = await runGpuRemediation({ ...base, exec });
+
+    expect(results[0].outcome).toBe(OUTCOMES.skippedMismatch);
+    expect(results[0].message).toContain("63571");
+    expect(results[0].message).toContain("9999");
+    expect(results[0].message).toContain("gpu-1");
+    // Only the vast-drift lookup ran: nothing touched the GPU box.
+    expect(calls).toEqual(["drift"]);
+
+    const report = formatRemediationReport(results);
+    expect(report).toContain("⚠️ MANUAL INTERVENTION REQUIRED");
+    expect(report).toContain("SKIPPED (target mismatch)");
+  });
+
+  test("a missing servicePort does not block, but says so in the plan", async () => {
+    const { exec, calls } = harness(drift(null));
+    const results = await runGpuRemediation({ ...base, exec, dryRun: true });
+
+    expect(results[0].outcome).toBe(OUTCOMES.dryRun);
+    expect(results[0].plan.join("\n")).toContain("could not be verified");
+    expect(calls).toContain("probe");
+  });
+});
+
+describe("gpu backend enumeration trustworthiness", () => {
+  // TRUE: the gateway answered and every enabled backend behind it is healthy.
+  test("a healthy gpu result is positive evidence", () => {
+    expect(
+      gpuBackendEnumerationIsTrustworthy(
+        httpCheck([remoteInferenceResult({ status: "healthy", error: undefined })]),
+      ),
+    ).toBe(true);
+  });
+
+  // TRUE: the gateway answered and named exactly which backends are unhealthy, so any backend it
+  // did NOT name is positively healthy.
+  test("an unhealthy gpu result that enumerates backends is positive evidence", () => {
+    expect(gpuBackendEnumerationIsTrustworthy(httpCheck([remoteInferenceResult()]))).toBe(true);
+    expect(
+      gpuBackendEnumerationIsTrustworthy(
+        httpCheck([
+          {
+            componentId: "gpu-gateway",
+            componentName: "GPU Gateway",
+            status: "failing",
+            error: `something before. ${REAL_ERROR}`,
+          },
+        ]),
+      ),
+    ).toBe(true);
+  });
+
+  // FALSE: the gateway itself was unreachable. The empty unhealthy list is silence, not health.
+  test("a gateway-level failure is NOT evidence", () => {
+    for (const error of [
+      "connect ECONNREFUSED 127.0.0.1:3081",
+      "timeout of 5000ms exceeded",
+      "getaddrinfo ENOTFOUND gateway.internal",
+      "Unexpected token < in JSON at position 0",
+    ]) {
+      expect(
+        gpuBackendEnumerationIsTrustworthy(httpCheck([remoteInferenceResult({ error })])),
+      ).toBe(false);
+    }
+    // ...and an unhealthy gpu result with no error string at all is equally uninformative.
+    expect(
+      gpuBackendEnumerationIsTrustworthy(httpCheck([remoteInferenceResult({ error: undefined })])),
+    ).toBe(false);
+  });
+
+  test("a skipped gpu result is NOT evidence", () => {
+    expect(
+      gpuBackendEnumerationIsTrustworthy(
+        httpCheck([remoteInferenceResult({ status: "skipped", error: undefined })]),
+      ),
+    ).toBe(false);
+  });
+
+  test("a check with no gpu component result at all is NOT evidence", () => {
+    expect(
+      gpuBackendEnumerationIsTrustworthy(
+        httpCheck([
+          { componentId: "ai-stylist-workshop", componentName: "Workshop", status: "healthy" },
+          { componentId: "api", componentName: "API", status: "unhealthy", error: "500" },
+        ]),
+      ),
+    ).toBe(false);
+  });
+
+  test("a check without a parsed results array is NOT evidence", () => {
+    expect(gpuBackendEnumerationIsTrustworthy(undefined)).toBe(false);
+    expect(gpuBackendEnumerationIsTrustworthy(null)).toBe(false);
+    expect(gpuBackendEnumerationIsTrustworthy({})).toBe(false);
+    expect(gpuBackendEnumerationIsTrustworthy({ parsed: {} })).toBe(false);
+    expect(gpuBackendEnumerationIsTrustworthy({ parsed: { results: "nope" } })).toBe(false);
+    expect(gpuBackendEnumerationIsTrustworthy(httpCheck([]))).toBe(false);
+    expect(gpuBackendEnumerationIsTrustworthy(httpCheck([null as any, "junk" as any]))).toBe(false);
+  });
+
+  test("one observable gpu result is enough even next to an unobservable one", () => {
+    expect(
+      gpuBackendEnumerationIsTrustworthy(
+        httpCheck([
+          remoteInferenceResult({ componentId: "other", componentName: "GPU box 2", error: "connect ECONNREFUSED 127.0.0.1:3081" }),
+          remoteInferenceResult(),
+        ]),
+      ),
+    ).toBe(true);
   });
 });

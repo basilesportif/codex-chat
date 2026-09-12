@@ -6,12 +6,17 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   DEFAULT_COOLDOWN_MINUTES,
   DEFAULT_REMEDIATION_TIMEOUT_SEC,
-  MAX_TARGETS_PER_RUN,
+  MAX_CONSECUTIVE_FAILURES,
+  MAX_REMEDIATION_TARGETS_PER_RUN,
   OUTCOMES,
+  beginRemediationAttempt,
+  clearRecoveredBackends,
   detectGpuRemediationTargets,
+  finalizeRemediationAttempt,
   formatRemediationReport,
+  gpuBackendEnumerationIsTrustworthy,
+  previewRedacted,
   readRemediationState,
-  recordRemediationAttempt,
   redactSecrets,
   runGpuRemediation,
   shouldAttemptRemediation,
@@ -100,15 +105,17 @@ async function main() {
 }
 
 /**
- * Interpret the safety switches. Remediation is ON by default; `--no-remediate` or
- * MUSH_DEVOPS_AUTO_REMEDIATE=0/false/off turns it off, and `--dry-run-remediation` keeps every
+ * Interpret the safety switches. Remediation is OFF by default: arming it is an explicit opt-in
+ * via MUSH_DEVOPS_AUTO_REMEDIATE=1/true/on/yes, so a fresh checkout (config/loops.json is
+ * gitignored and does not travel with the repo) never restarts a production box on its own.
+ * `--no-remediate` forces it off regardless of the env, and `--dry-run-remediation` keeps every
  * mutation (and the cooldown state write) off while still reporting what would have happened.
  */
 export function parseCliOptions(argv = [], env = {}) {
   const args = Array.isArray(argv) ? argv.map((value) => String(value)) : [];
   const dryRun = args.includes("--dry-run-remediation");
   const autoRemediate =
-    !args.includes("--no-remediate") && parseBooleanFlag(env.MUSH_DEVOPS_AUTO_REMEDIATE, true);
+    !args.includes("--no-remediate") && parseBooleanFlag(env.MUSH_DEVOPS_AUTO_REMEDIATE, false);
   return {
     autoRemediate,
     dryRun,
@@ -130,92 +137,215 @@ export function parseBooleanFlag(value, fallback) {
 }
 
 /**
- * Detect the "GPU box's remote-inference died" signature, apply the safety switches and the
- * cooldown, run the restart, and render the report section. Returns "" when nothing matched.
+ * Detect the "GPU box's remote-inference died" signature, apply the safety switches, the cooldown
+ * and the circuit breaker, run the restart, persist state, and render the report section.
+ * Returns "" when nothing matched.
+ *
+ * Every side effect is injectable so the whole path can be unit tested without ssh or the real
+ * state file; the defaults are the production wiring.
  */
-async function runRemediationPhase({ payload, options, host, remoteDir }) {
+export async function runRemediationPhase({
+  payload,
+  options,
+  host,
+  remoteDir,
+  statePath = REMEDIATION_STATE_PATH,
+  exec = runCommand,
+  now = () => Date.now(),
+  remediate = runGpuRemediation,
+  readState = readRemediationState,
+  writeState = writeRemediationState,
+}) {
   const httpCheck = Array.isArray(payload?.results)
     ? payload.results.find((result) => result?.key === "http")
     : null;
+  // Did this run actually see the backends? Nothing may be inferred from silence.
+  const enumerationTrustworthy = gpuBackendEnumerationIsTrustworthy(httpCheck);
   const detected = detectGpuRemediationTargets(httpCheck, {
     gatewaySshOverride: options.gatewaySshOverride,
   });
-  if (detected.length === 0) return "";
 
-  const selected = detected.slice(0, MAX_TARGETS_PER_RUN);
   const notes = [];
-  if (detected.length > selected.length) {
-    notes.push(
-      `${detected.length - selected.length} additional unhealthy GPU backend(s) were not remediated in this run (cap of ${MAX_TARGETS_PER_RUN} per run).`,
-    );
-  }
   if (options.dryRun) {
     notes.push("Dry run: nothing on the GPU boxes or in the cooldown state file was modified.");
   }
 
+  // The gate state is also needed for the auto-recovery reset below, which runs even when this
+  // run detected nothing at all.
+  let state = null;
+  if (options.autoRemediate) {
+    state = await readState(statePath);
+
+    // CIRCUIT-BREAKER AUTO-RECOVERY: a backend that is carrying a failure streak but is healthy in
+    // this run recovered on its own, so its breaker is closed again.
+    //
+    // This requires POSITIVE evidence: a backend absent from an enumeration we actually received is
+    // positively healthy, but an enumeration we never received tells us nothing. Without that gate
+    // a gateway-level outage (ECONNREFUSED, timeout, non-JSON body) produces an empty detected list
+    // and would silently re-arm every open breaker — buying the box three more automated restarts
+    // with zero evidence that anything recovered. Never in dry-run mode, which must not write state.
+    if (enumerationTrustworthy && !options.dryRun) {
+      const recovery = clearRecoveredBackends(
+        state,
+        detected.map((target) => target.backendId),
+      );
+      if (recovery.changed) {
+        try {
+          await writeState(statePath, recovery.state);
+          state = recovery.state;
+        } catch (error) {
+          notes.push(
+            `Could not clear the auto-remediation failure counter for ${recovery.cleared.join(", ")} in ${statePath}: ${errorText(error)}.`,
+          );
+        }
+      }
+    }
+  }
+
+  if (detected.length === 0) return "";
+
   if (!options.autoRemediate) {
     return formatRemediationReport(
-      selected.map((target) => ({
+      detected.map((target) => ({
         target,
         outcome: OUTCOMES.skippedDisabled,
         message:
-          "auto-remediation is disabled (MUSH_DEVOPS_AUTO_REMEDIATE=0 or --no-remediate); restart remote-inference manually.",
+          "auto-remediation is disabled (MUSH_DEVOPS_AUTO_REMEDIATE is not set to 1/true/on, or --no-remediate was passed); restart remote-inference manually.",
       })),
       notes,
     );
   }
 
-  const state = await readRemediationState(REMEDIATION_STATE_PATH);
+  // CORRELATED-FAILURE GUARD: with only two GPU boxes, more than one unhealthy backend in the same
+  // run means the shared upstream (gateway, network, Vast) is the likelier cause than two
+  // independent per-box crashes. Restarting even one box would be action without evidence, and the
+  // cap of MAX_REMEDIATION_TARGETS_PER_RUN=1 means we could never fix both anyway. Alert only.
+  if (detected.length > MAX_REMEDIATION_TARGETS_PER_RUN) {
+    return formatRemediationReport(
+      detected.map((target) => ({
+        target,
+        outcome: OUTCOMES.skippedCorrelated,
+        message:
+          `${detected.length} GPU backends (${detected.map((entry) => entry.backendId).join(", ")}) went unhealthy at ` +
+          `the same time. Simultaneous failures point at an upstream or gateway-level cause rather than independent ` +
+          `per-box crashes, so auto-remediation was skipped entirely and no box was restarted. Investigate the ` +
+          `gateway, the network path and Vast.ai before restarting anything by hand.`,
+      })),
+      notes,
+    );
+  }
+
+  const target = detected[0];
   const cooldownMs = options.cooldownMinutes * 60 * 1000;
-  const nowMs = Date.now();
+  const gate = shouldAttemptRemediation(state, target.backendId, now(), cooldownMs);
 
-  const byBackend = new Map();
-  const pending = [];
-  for (const target of selected) {
-    const gate = shouldAttemptRemediation(state, target.backendId, nowMs, cooldownMs);
-    if (gate.allowed) {
-      pending.push(target);
-      continue;
-    }
-    byBackend.set(target.backendId, {
-      target,
-      outcome: OUTCOMES.skippedCooldown,
-      message:
-        `auto-remediation skipped: the last attempt at ${gate.lastAttemptAt} ended "${gate.lastOutcome || "unknown"}" ` +
-        `and the ${options.cooldownMinutes}-minute cooldown runs until ${gate.retryAfter}. Restart remote-inference manually if this is urgent.`,
-    });
+  if (!gate.allowed && gate.reason === "circuit-open") {
+    return formatRemediationReport(
+      [
+        {
+          target,
+          outcome: OUTCOMES.skippedCircuitOpen,
+          message:
+            `MANUAL INTERVENTION NEEDED: auto-remediation is suspended for ${target.backendId} after ` +
+            `${gate.consecutiveFailures} consecutive failed attempts (limit ${MAX_CONSECUTIVE_FAILURES}); the last one ` +
+            `at ${gate.lastAttemptAt} ended "${gate.lastOutcome || "unknown"}". Restarting it again automatically ` +
+            `would just repeat a fix that demonstrably does not work. The suspension clears by itself once the ` +
+            `backend is healthy again in a later check, or immediately if you reset/remove ${statePath}.`,
+        },
+      ],
+      notes,
+    );
   }
 
-  const results = await runGpuRemediation({
-    targets: pending,
-    exec: runCommand,
-    jumpHost: host,
-    remoteDir,
-    dryRun: options.dryRun,
-    timeoutSec: options.remediationTimeoutSec,
-  });
-  for (const result of results) {
-    if (result?.target?.backendId) byBackend.set(result.target.backendId, result);
+  if (!gate.allowed) {
+    return formatRemediationReport(
+      [
+        {
+          target,
+          outcome: OUTCOMES.skippedCooldown,
+          message:
+            `auto-remediation skipped: the last attempt at ${gate.lastAttemptAt} ended "${gate.lastOutcome || "unknown"}" ` +
+            `and the ${options.cooldownMinutes}-minute cooldown runs until ${gate.retryAfter}. Restart remote-inference manually if this is urgent.`,
+        },
+      ],
+      notes,
+    );
   }
 
-  if (!options.dryRun) {
-    let nextState = state;
-    let dirty = false;
-    for (const result of results) {
-      if (!result?.target?.backendId || result.outcome === OUTCOMES.dryRun) continue;
-      nextState = recordRemediationAttempt(
-        nextState,
-        result.target.backendId,
-        result.outcome,
-        new Date().toISOString(),
+  const runRemediation = async () => {
+    try {
+      const results = await remediate({
+        targets: [target],
+        exec,
+        jumpHost: host,
+        remoteDir,
+        dryRun: options.dryRun,
+        timeoutSec: options.remediationTimeoutSec,
+      });
+      return (
+        (Array.isArray(results) ? results : []).find(Boolean) || {
+          target,
+          outcome: OUTCOMES.error,
+          message: "auto-remediation returned no result for this backend.",
+        }
       );
-      dirty = true;
+    } catch (error) {
+      return {
+        target,
+        outcome: OUTCOMES.error,
+        message: `auto-remediation crashed: ${preview(errorText(error))}`,
+      };
     }
-    if (dirty) await writeRemediationState(REMEDIATION_STATE_PATH, nextState);
+  };
+
+  if (options.dryRun) {
+    return formatRemediationReport([await runRemediation()], notes);
   }
 
-  const ordered = selected.map((target) => byBackend.get(target.backendId)).filter(Boolean);
-  return formatRemediationReport(ordered, notes);
+  // ORDERING: the cooldown marker is written BEFORE the box is touched, so a crash mid-restart
+  // still blocks a rapid repeat on the next run. If that write fails we fail CLOSED and never
+  // restart, because an unrecorded restart could repeat every few minutes.
+  const startedAt = new Date(now()).toISOString();
+  const startedState = beginRemediationAttempt(state, target.backendId, startedAt);
+  try {
+    await writeState(statePath, startedState);
+  } catch (error) {
+    return formatRemediationReport(
+      [
+        {
+          target,
+          outcome: OUTCOMES.error,
+          message:
+            `auto-remediation did not run: the cooldown marker could not be written to ${statePath} ` +
+            `(${errorText(error)}). Restarting without a recorded cooldown risks a restart loop, so nothing was ` +
+            `touched. Fix the state file, or restart remote-inference manually.`,
+        },
+      ],
+      notes,
+    );
+  }
+
+  const result = await runRemediation();
+
+  // The restart already happened: its outcome is reported no matter what the final write does.
+  try {
+    await writeState(
+      statePath,
+      finalizeRemediationAttempt(startedState, target.backendId, result.outcome, new Date(now()).toISOString()),
+    );
+  } catch (error) {
+    notes.push(
+      `The result above is real, but the auto-remediation state file ${statePath} could not be updated ` +
+        `(${errorText(error)}). The in-progress marker written before the restart still holds the cooldown, ` +
+        `so the next run will not restart this backend immediately.`,
+    );
+  }
+
+  return formatRemediationReport([result], notes);
+}
+
+function errorText(error) {
+  return redactSecrets(error instanceof Error ? error.message : String(error));
 }
 
 export function parsePositiveNumber(value, fallback) {
@@ -532,20 +662,35 @@ function parseFiniteNumber(value) {
   return Number.NaN;
 }
 
+/**
+ * Truncating BEFORE redacting used to let a secret that straddles the 500-character cutoff survive
+ * as a partially intact prefix, so this delegates to the library helper, which redacts first and
+ * only then truncates. Empty input still renders as "no details".
+ */
 function preview(value) {
-  const normalized = String(value || "").replace(/\s+/g, " ").trim();
-  if (!normalized) return "no details";
-  return normalized.length > 500 ? `${normalized.slice(0, 500)}...` : normalized;
+  return previewRedacted(value || "", 500);
 }
 
-function formatAlert({ checkedAt, host, remoteDir, findings }) {
-  return [
-    "Mush DevOps health check alert",
-    `Checked at: ${checkedAt || new Date().toISOString()}`,
-    `Target: ${host}:${remoteDir}`,
-    "",
-    ...findings.map((finding) => `- ${finding}`),
-  ].join("\n");
+/**
+ * SECURITY: the findings are the last unredacted path from remote output to Telegram —
+ * `formatHttpFinding` interpolates `result.error`/`result.url` raw and `formatDriftComparison`
+ * does the same for `comparison.diffs`, and the gateway body behind those errors embeds the live
+ * gateway API key. The whole rendered block therefore goes through `redactSecrets()` once more.
+ * Over-redaction is the desired failure mode: a mangled diagnostic beats a leaked key.
+ *
+ * The remediation section is NOT passed through here — `main()` concatenates it separately and
+ * `formatRemediationReport` already redacts every line it emits.
+ */
+export function formatAlert({ checkedAt, host, remoteDir, findings }) {
+  return redactSecrets(
+    [
+      "Mush DevOps health check alert",
+      `Checked at: ${checkedAt || new Date().toISOString()}`,
+      `Target: ${host}:${remoteDir}`,
+      "",
+      ...findings.map((finding) => `- ${finding}`),
+    ].join("\n"),
+  );
 }
 
 function printCommandFailure({ host, remoteDir, timeoutSec, run, reason }) {

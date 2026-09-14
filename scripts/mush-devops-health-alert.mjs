@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -25,6 +26,19 @@ import {
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const REMEDIATION_STATE_PATH = path.join(REPO_ROOT, "data/state/mush_devops_remediation.json");
+/**
+ * Dedupe ledger for BENIGN Vast SSH-port renumbering (see `collectBenignDriftNotices`). Lives next
+ * to the remediation state and follows the same conventions: JSON, versioned, atomically replaced.
+ */
+export const VAST_DRIFT_NOTICE_STATE_PATH = path.join(
+  REPO_ROOT,
+  "data/state/mush_devops_vast_drift_notices.json",
+);
+/** Hard ceiling on ledger entries so a pathological producer cannot grow the file without bound. */
+export const MAX_DRIFT_NOTICE_ENTRIES = 32;
+/** Comparison classes emitted by mush-devops `scripts/vast/vast-drift.js --json`. */
+export const DRIFT_CLASS_BENIGN = "ssh-port-renumber";
+export const DRIFT_CLASS_UNEXPECTED = "unexpected";
 
 const DEFAULT_HOST = "tim@89.167.72.52";
 const DEFAULT_REMOTE_DIR = "/home/tim/pkg/mush/mush-devops";
@@ -419,6 +433,13 @@ function jsonCandidates(value) {
   return candidates;
 }
 
+/**
+ * Turn a full-health-check payload into alert findings.
+ *
+ * `options.driftNoticeStatePath` / `readDriftNoticeState` / `writeDriftNoticeState` / `now` exist so
+ * the benign-drift debounce ledger can be pointed at a temp file in tests; production uses the
+ * defaults (`VAST_DRIFT_NOTICE_STATE_PATH` and the real synchronous, atomic file helpers).
+ */
 export function collectFindings(payload, options = {}) {
   const lowBalanceThreshold = parsePositiveNumber(
     options.lowBalanceThreshold,
@@ -435,7 +456,12 @@ export function collectFindings(payload, options = {}) {
   collectHttpFindings(checks.get("http"), findings);
   collectVastStatusFindings(checks.get("vastStatus"), findings, lowBalanceThreshold);
   collectVastBalanceFallbackFindings(payload, checks, findings, lowBalanceThreshold);
-  collectVastDriftFindings(checks.get("vastDrift"), findings);
+  collectVastDriftFindings(checks.get("vastDrift"), findings, {
+    driftNoticeStatePath: options.driftNoticeStatePath,
+    readDriftNoticeState: options.readDriftNoticeState,
+    writeDriftNoticeState: options.writeDriftNoticeState,
+    now: options.now,
+  });
   collectCaddyFindings(checks.get("caddyDrift"), findings);
 
   for (const check of payload.results) {
@@ -547,7 +573,22 @@ function formatLowBalanceFinding(status, lowBalanceThreshold) {
   return `Vast balance low: balance ${formatMoney(balance)} is below threshold ${formatMoney(lowBalanceThreshold)}${hours}.`;
 }
 
-function collectVastDriftFindings(check, findings) {
+/**
+ * Vast drift findings.
+ *
+ * Two very different things arrive on this check:
+ *
+ *  - ACTIONABLE drift (`driftClass: "unexpected"`): the host moved, the service port moved, the SSH
+ *    mode flipped, the instance identity does not match, ... Something is genuinely wrong and Tim is
+ *    paged every run until it is fixed. No debounce, ever.
+ *  - BENIGN drift (`driftClass: "ssh-port-renumber"`): Vast rebuilt the box and handed the same
+ *    instance a new direct-SSH host port. stack.json wants reconciling, but nothing is broken. Paging
+ *    every 15 minutes for that is pure noise, so it is debounced to ONE notice per rebuild event via
+ *    a small state ledger (see `collectBenignDriftNotices`).
+ *
+ * `parsed.drifted` stays true for both, so it must never again be the thing that decides to alert.
+ */
+export function collectVastDriftFindings(check, findings, options = {}) {
   if (!check) {
     findings.push("Vast drift check did not run.");
     return;
@@ -562,17 +603,300 @@ function collectVastDriftFindings(check, findings) {
     return;
   }
 
-  if (check.parsed.drifted === true) {
-    const diffs = Array.isArray(check.parsed.comparisons)
-      ? check.parsed.comparisons
-          .filter((comparison) => comparison.drifted)
-          .slice(0, 5)
-          .map(formatDriftComparison)
-      : [];
-    findings.push(["Vast drift detected.", ...diffs].filter(Boolean).join(" "));
-  } else if (Number(check.exitCode) !== 0) {
+  const parsed = check.parsed;
+  const comparisons = Array.isArray(parsed.comparisons) ? parsed.comparisons : [];
+
+  // BACKWARD COMPATIBILITY: an older mush-devops (mid-rollout, or after a rollback) emits no
+  // `actionableDrift` field at all. Version skew must never silently suppress drift, so fall back
+  // to exactly the previous behavior: any drift alerts.
+  if (parsed.actionableDrift === undefined) {
+    if (parsed.drifted === true) {
+      findings.push(formatActionableDriftFinding(comparisons.filter((comparison) => comparison?.drifted)));
+    } else if (Number(check.exitCode) !== 0) {
+      findings.push(`Vast drift exited ${check.exitCode}: ${preview(check.stderr || check.stdout)}`);
+    }
+    return;
+  }
+
+  const benign = [];
+  const unexpected = [];
+  for (const comparison of comparisons) {
+    if (isBenignRenumber(comparison)) {
+      // A benign classification we cannot key or whose new port is missing cannot be deduped
+      // safely. Fail loud rather than invent an identity.
+      if (benignNoticeIdentity(comparison)) benign.push(comparison);
+      else unexpected.push(comparison);
+      continue;
+    }
+    if (isUnexpectedDrift(comparison)) unexpected.push(comparison);
+  }
+
+  // Actionable drift wins outright: it fires unconditionally and a benign renumber is never allowed
+  // to pad or obscure it. `unexpected.length > 0` is a deliberate belt-and-braces second trigger, so
+  // a producer that drifts a comparison without flagging `actionableDrift` still pages.
+  if (parsed.actionableDrift === true || unexpected.length > 0) {
+    const reportable = unexpected.length > 0 ? unexpected : comparisons.filter((comparison) => comparison?.drifted);
+    findings.push(formatActionableDriftFinding(reportable));
+    return;
+  }
+
+  // The ledger is maintained even when nothing is benign in this run: rebuilding it from the current
+  // benign set is exactly what prunes an instance that was reconciled (or vanished), so its next
+  // rebuild raises a fresh notice instead of being suppressed forever.
+  try {
+    collectBenignDriftNotices(benign, findings, options);
+  } catch (error) {
+    // Bookkeeping must never cost us the signal, and must never crash the health check.
+    for (const comparison of benign.slice(0, MAX_REPORTED_DRIFT_COMPARISONS)) {
+      findings.push(
+        `${formatBenignDriftNotice(comparison)} (Drift-notice bookkeeping failed: ${errorText(error)}; ` +
+          `this notice may repeat until that is fixed.)`,
+      );
+    }
+  }
+
+  // The nonzero-exit fallback is deliberately skipped when a benign renumber explains the run: the
+  // exit code (0 under the current contract, 1 under a producer that still exits on any drift) says
+  // nothing the notice above does not already say, and repeating it every run would reinstate the
+  // exact noise this debounce exists to remove.
+  if (benign.length > 0) return;
+
+  if (Number(check.exitCode) !== 0) {
     findings.push(`Vast drift exited ${check.exitCode}: ${preview(check.stderr || check.stdout)}`);
   }
+}
+
+const MAX_REPORTED_DRIFT_COMPARISONS = 5;
+
+function formatActionableDriftFinding(comparisons) {
+  const diffs = (Array.isArray(comparisons) ? comparisons : [])
+    .slice(0, MAX_REPORTED_DRIFT_COMPARISONS)
+    .map(formatDriftComparison);
+  return ["Vast drift detected.", ...diffs].filter(Boolean).join(" ");
+}
+
+function isBenignRenumber(comparison) {
+  if (!comparison || typeof comparison !== "object") return false;
+  if (comparison.drifted === false) return false;
+  return comparison.driftClass === DRIFT_CLASS_BENIGN;
+}
+
+/**
+ * Anything that drifted and is not a confirmed benign renumber is unexpected — including a drifted
+ * comparison carrying no `driftClass` at all, which is a producer bug we must not swallow.
+ */
+function isUnexpectedDrift(comparison) {
+  if (!comparison || typeof comparison !== "object") return false;
+  if (comparison.driftClass === DRIFT_CLASS_BENIGN) return false;
+  if (comparison.driftClass === DRIFT_CLASS_UNEXPECTED) return true;
+  return comparison.drifted === true;
+}
+
+/**
+ * Identity of one benign rebuild event: the instance, plus the newly observed SSH port. A new port
+ * is a new rebuild and earns one notice; the same port is the same event we already reported.
+ */
+function benignNoticeIdentity(comparison) {
+  const rawId = comparison?.vastInstanceId ?? comparison?.logicalId;
+  const key = String(rawId ?? "").trim();
+  const sshPort = positiveInt(comparison?.actual?.sshPort);
+  if (!key || sshPort == null) return null;
+  return { key, sshPort };
+}
+
+/**
+ * Emit at most ONE finding per rebuild event and keep the ledger honest.
+ *
+ * The ledger is rebuilt from scratch out of this run's benign set, which prunes two cases at once:
+ * an instance that stopped reporting benign drift (someone ran `--update`, so a future rebuild must
+ * alert again) and an instance that disappeared from the comparison list entirely.
+ *
+ * Failure modes all degrade to "alert once, loudly": an unreadable or corrupt ledger is treated as
+ * empty (so the notice fires), and a failed write is reported inline (so Tim knows the notice may
+ * repeat) rather than silently dropping drift.
+ */
+function collectBenignDriftNotices(benign, findings, options = {}) {
+  const statePath = options.driftNoticeStatePath || VAST_DRIFT_NOTICE_STATE_PATH;
+  const readState = options.readDriftNoticeState || readDriftNoticeState;
+  const writeState = options.writeDriftNoticeState || writeDriftNoticeState;
+  const nowIso = new Date(typeof options.now === "function" ? options.now() : Date.now()).toISOString();
+
+  let previous = emptyDriftNoticeState();
+  let readError = null;
+  try {
+    const read = readState(statePath);
+    previous = normalizeDriftNoticeState(read?.state);
+    readError = read?.error || null;
+  } catch (error) {
+    readError = errorText(error);
+  }
+
+  const next = emptyDriftNoticeState();
+  const fresh = [];
+  for (const comparison of benign) {
+    const identity = benignNoticeIdentity(comparison);
+    if (!identity) continue;
+    const known = previous.notices[identity.key];
+    const alreadyReported = Boolean(known) && known.sshPort === identity.sshPort;
+    next.notices[identity.key] = {
+      sshPort: identity.sshPort,
+      logicalId: comparison?.logicalId ? String(comparison.logicalId) : null,
+      reportedAt: alreadyReported ? known.reportedAt || nowIso : nowIso,
+      lastSeenAt: nowIso,
+    };
+    if (!alreadyReported) fresh.push(comparison);
+  }
+
+  const capped = capDriftNoticeState(next);
+  let writeError = null;
+  if (readError || !driftNoticeStateEquals(previous, capped)) {
+    try {
+      writeState(statePath, capped);
+    } catch (error) {
+      writeError = errorText(error);
+    }
+  }
+
+  if (fresh.length === 0) return;
+
+  const notes = [];
+  if (readError) {
+    notes.push(
+      `The drift-notice state file ${statePath} could not be read (${readError}), so this notice was raised ` +
+        `rather than risk swallowing the drift; it has been rewritten from scratch.`,
+    );
+  }
+  if (writeError) {
+    notes.push(
+      `The drift-notice state file ${statePath} could not be written (${writeError}), so this notice will ` +
+        `repeat on every check until that is fixed.`,
+    );
+  }
+
+  fresh.slice(0, MAX_REPORTED_DRIFT_COMPARISONS).forEach((comparison, index) => {
+    const suffix = index === 0 && notes.length > 0 ? ` ${notes.join(" ")}` : "";
+    findings.push(`${formatBenignDriftNotice(comparison)}${suffix}`);
+  });
+}
+
+/**
+ * Low-urgency, actionable-by-choice wording. It has to carry three things: this is expected Vast
+ * churn, what actually changed, and why leaving it unreconciled still matters (deploy-systemd.sh
+ * reads stack.json, not live Vast data, so it would dial the stale port).
+ */
+function formatBenignDriftNotice(comparison) {
+  const name = comparison?.logicalId ? String(comparison.logicalId) : "an unnamed instance";
+  const instance =
+    comparison?.vastInstanceId == null ? "" : ` (Vast instance ${comparison.vastInstanceId})`;
+  const from = positiveInt(comparison?.expected?.sshPort);
+  const to = positiveInt(comparison?.actual?.sshPort);
+  const ports = from == null ? `a new SSH port ${to ?? "unknown"}` : `SSH port ${from} -> ${to ?? "unknown"}`;
+  return (
+    `Vast drift notice (low urgency, no action needed right now): ${name}${instance} came back from a Vast ` +
+    `rebuild on ${ports}. Host, service port and direct SSH mode are all unchanged, so this is the expected ` +
+    `Vast port churn rather than an incident. stack.json still records the old port, and deploy-systemd.sh ` +
+    `reads stack.json instead of live Vast data, so a deploy would dial the stale port until it is reconciled: ` +
+    `run "node scripts/vast/vast-drift.js --update" on the mush-devops box when convenient. Reported once per ` +
+    `rebuild; later checks stay quiet until the port changes again.`
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Benign drift notice ledger
+//
+// Schema (mirrors data/state/mush_devops_remediation.json's conventions):
+//   { "version": 1,
+//     "notices": {
+//       "<vastInstanceId or logicalId>": {
+//         "sshPort": 63530,            // the port this instance was last REPORTED on
+//         "logicalId": "gpu-1",        // human label, informational only
+//         "reportedAt": "<iso>",       // when the notice for this port fired
+//         "lastSeenAt": "<iso>"        // last run that still saw this benign drift
+//       } } }
+//
+// The dedupe key is effectively "<instance>:<sshPort>": an entry whose stored `sshPort` differs
+// from the newly observed one is a NEW rebuild and gets a fresh notice.
+// ---------------------------------------------------------------------------
+
+export function emptyDriftNoticeState() {
+  return { version: 1, notices: {} };
+}
+
+/** Coerce anything (including a corrupt file) into the documented shape. Never throws. */
+export function normalizeDriftNoticeState(raw) {
+  const state = emptyDriftNoticeState();
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return state;
+  const notices = raw.notices;
+  if (!notices || typeof notices !== "object" || Array.isArray(notices)) return state;
+
+  for (const [key, entry] of Object.entries(notices)) {
+    if (!key || !entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const sshPort = positiveInt(entry.sshPort);
+    // An entry without a usable port can never suppress anything, so it is dropped rather than
+    // kept as a half-record that might match "undefined === undefined" later.
+    if (sshPort == null) continue;
+    state.notices[key] = {
+      sshPort,
+      logicalId: typeof entry.logicalId === "string" ? entry.logicalId : null,
+      reportedAt: typeof entry.reportedAt === "string" ? entry.reportedAt : null,
+      lastSeenAt: typeof entry.lastSeenAt === "string" ? entry.lastSeenAt : null,
+    };
+  }
+  return state;
+}
+
+/** Keep the most recently seen entries only, so the file cannot grow without bound. */
+export function capDriftNoticeState(state, limit = MAX_DRIFT_NOTICE_ENTRIES) {
+  const normalized = normalizeDriftNoticeState(state);
+  const entries = Object.entries(normalized.notices);
+  const max = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : MAX_DRIFT_NOTICE_ENTRIES;
+  if (entries.length <= max) return normalized;
+
+  entries.sort((a, b) => driftNoticeTimestamp(b[1]) - driftNoticeTimestamp(a[1]));
+  const capped = emptyDriftNoticeState();
+  for (const [key, entry] of entries.slice(0, max)) capped.notices[key] = entry;
+  return capped;
+}
+
+function driftNoticeTimestamp(entry) {
+  const parsed = Date.parse(entry?.lastSeenAt || entry?.reportedAt || "");
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function driftNoticeStateEquals(left, right) {
+  return (
+    JSON.stringify(normalizeDriftNoticeState(left)) === JSON.stringify(normalizeDriftNoticeState(right))
+  );
+}
+
+/**
+ * Read the ledger. Returns `{state, error}`: a MISSING file is normal (no error), while a corrupt or
+ * unreadable one degrades to empty state WITH an error, which makes the caller alert once and say so.
+ * Synchronous on purpose — `collectFindings` is a synchronous pure-ish function and every caller and
+ * test depends on that.
+ */
+export function readDriftNoticeState(filePath) {
+  try {
+    return { state: normalizeDriftNoticeState(JSON.parse(readFileSync(filePath, "utf8"))), error: null };
+  } catch (error) {
+    if (error && error.code === "ENOENT") return { state: emptyDriftNoticeState(), error: null };
+    return { state: emptyDriftNoticeState(), error: errorText(error) };
+  }
+}
+
+/** Atomic write (temp file + rename), matching `writeRemediationState`. Throws on failure. */
+export function writeDriftNoticeState(filePath, state) {
+  const dir = path.dirname(filePath);
+  mkdirSync(dir, { recursive: true, mode: 0o755 });
+  const tmp = path.join(dir, `.${path.basename(filePath)}.${process.pid}.${Date.now()}.tmp`);
+  writeFileSync(tmp, `${JSON.stringify(capDriftNoticeState(state), null, 2)}\n`, { mode: 0o644 });
+  renameSync(tmp, filePath);
+}
+
+function positiveInt(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return Math.round(parsed);
 }
 
 /**

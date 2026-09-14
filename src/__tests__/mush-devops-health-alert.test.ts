@@ -4,7 +4,17 @@ import path from "node:path";
 import { describe, expect, test } from "vitest";
 
 type HealthAlertModule = {
-  collectFindings(payload: unknown, options?: { lowBalanceThreshold?: number }): string[];
+  collectFindings(
+    payload: unknown,
+    options?: {
+      lowBalanceThreshold?: number;
+      driftNoticeStatePath?: string;
+      readDriftNoticeState?: (filePath: string) => { state: unknown; error: string | null };
+      writeDriftNoticeState?: (filePath: string, state: unknown) => void;
+      now?: () => number;
+    }
+  ): string[];
+  capDriftNoticeState(state: unknown, limit?: number): { version: number; notices: Record<string, unknown> };
   parsePositiveNumber(value: unknown, fallback: number): number;
   isSkippedCheck(check: unknown): boolean;
   collectCaddyFindings(check: unknown, findings: string[]): void;
@@ -26,6 +36,7 @@ type HealthAlertModule = {
 };
 
 const {
+  capDriftNoticeState,
   collectCaddyFindings,
   collectFindings,
   formatAlert,
@@ -1223,5 +1234,339 @@ describe("alert rendering redaction", () => {
     expect(alert).toContain("Mush DevOps health check alert");
     expect(alert).toContain("Target: tim@89.167.72.52:/home/tim/pkg/mush/mush-devops");
     expect(alert).toContain("Remote Inference (GPU Service)");
+  });
+});
+
+/**
+ * Vast rebuilds a GPU box and hands the same instance a new direct-SSH host port. That is routine
+ * churn, not an incident, and used to page every 15 minutes forever. It is now debounced to one
+ * notice per rebuild event, while genuinely wrong drift stays loud.
+ */
+describe("benign Vast SSH-port renumbering is debounced", () => {
+  async function tmpNoticeStatePath() {
+    const dir = await mkdtemp(path.join(tmpdir(), "vast-drift-notices-"));
+    return path.join(dir, "mush_devops_vast_drift_notices.json");
+  }
+
+  async function readNotices(statePath: string) {
+    return JSON.parse(await readFile(statePath, "utf8"));
+  }
+
+  // gpu-1 as it really is today: 182.224.239.168, sshPort 63530, servicePort 63571, instance 46154118.
+  function benign(overrides: Record<string, unknown> = {}, actualSshPort = 63999) {
+    return {
+      logicalId: "gpu-1",
+      vastInstanceId: 46154118,
+      drifted: true,
+      driftClass: "ssh-port-renumber",
+      diffs: [`sshPort: 63530 -> ${actualSshPort}`],
+      expected: { host: "182.224.239.168", sshPort: 63530, servicePort: 63571, sshMode: "direct" },
+      actual: {
+        host: "182.224.239.168",
+        sshPort: actualSshPort,
+        servicePort: 63571,
+        sshMode: "direct",
+        status: "running"
+      },
+      ...overrides
+    };
+  }
+
+  // gpu-2 with a moved service port: not a clean renumber, so it must page.
+  function unexpected(overrides: Record<string, unknown> = {}) {
+    return {
+      logicalId: "gpu-2",
+      vastInstanceId: 46153242,
+      drifted: true,
+      driftClass: "unexpected",
+      diffs: ["servicePort: 61754 -> 61999", "host: 182.224.239.168 -> 91.0.0.7"],
+      expected: { host: "182.224.239.168", sshPort: 61785, servicePort: 61754, sshMode: "direct" },
+      actual: { host: "91.0.0.7", sshPort: 61785, servicePort: 61999, sshMode: "direct", status: "running" },
+      ...overrides
+    };
+  }
+
+  function clean() {
+    return {
+      logicalId: "gpu-1",
+      vastInstanceId: 46154118,
+      drifted: false,
+      driftClass: "none",
+      diffs: [],
+      expected: { host: "182.224.239.168", sshPort: 63530, servicePort: 63571, sshMode: "direct" },
+      actual: { host: "182.224.239.168", sshPort: 63530, servicePort: 63571, sshMode: "direct" }
+    };
+  }
+
+  function driftPayload(parsed: Record<string, unknown>, exitCode = 0) {
+    return {
+      checkedAt: "2026-09-14T12:00:00.000Z",
+      results: [
+        { key: "http", label: "HTTP health", exitCode: 0, parsed: { results: [] } },
+        { key: "vastStatus", label: "Vast status", exitCode: 0, parsed: { healthy: true, balance: 42 } },
+        {
+          key: "vastDrift",
+          label: "Vast drift",
+          exitCode,
+          stdout: JSON.stringify(parsed),
+          stderr: "",
+          parsed
+        }
+      ]
+    };
+  }
+
+  function noticeOnly(comparisons: Array<Record<string, unknown>>) {
+    return driftPayload({
+      drifted: comparisons.some((comparison) => comparison.drifted === true),
+      actionableDrift: false,
+      benignDrift: comparisons.some((comparison) => comparison.driftClass === "ssh-port-renumber"),
+      driftSeverity: comparisons.some((comparison) => comparison.driftClass === "ssh-port-renumber")
+        ? "notice"
+        : "none",
+      comparisons
+    });
+  }
+
+  function run(payload: unknown, driftNoticeStatePath: string) {
+    return collectFindings(payload, { lowBalanceThreshold: 5, driftNoticeStatePath });
+  }
+
+  test("first observation of a rebuild raises exactly one low-urgency notice and records it", async () => {
+    const statePath = await tmpNoticeStatePath();
+
+    const findings = run(noticeOnly([benign()]), statePath);
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toContain("Vast drift notice (low urgency, no action needed right now)");
+    expect(findings[0]).toContain("gpu-1 (Vast instance 46154118)");
+    expect(findings[0]).toContain("SSH port 63530 -> 63999");
+    expect(findings[0]).toContain('run "node scripts/vast/vast-drift.js --update"');
+    expect(findings[0]).toContain("deploy-systemd.sh");
+    // Never dressed up as an incident.
+    expect(findings[0]).not.toContain("Vast drift detected.");
+
+    const persisted = await readNotices(statePath);
+    expect(persisted).toMatchObject({
+      version: 1,
+      notices: { "46154118": { sshPort: 63999, logicalId: "gpu-1" } }
+    });
+  });
+
+  test("the same rebuilt port stays quiet on every later check", async () => {
+    const statePath = await tmpNoticeStatePath();
+
+    expect(run(noticeOnly([benign()]), statePath)).toHaveLength(1);
+    expect(run(noticeOnly([benign()]), statePath)).toEqual([]);
+    expect(run(noticeOnly([benign()]), statePath)).toEqual([]);
+
+    expect((await readNotices(statePath)).notices["46154118"].sshPort).toBe(63999);
+  });
+
+  test("a second rebuild onto a new port is a new event and notifies again", async () => {
+    const statePath = await tmpNoticeStatePath();
+
+    expect(run(noticeOnly([benign()]), statePath)).toHaveLength(1);
+    expect(run(noticeOnly([benign()]), statePath)).toEqual([]);
+
+    const second = run(noticeOnly([benign({ diffs: ["sshPort: 63530 -> 64100"] }, 64100)]), statePath);
+    expect(second).toHaveLength(1);
+    expect(second[0]).toContain("SSH port 63530 -> 64100");
+
+    expect((await readNotices(statePath)).notices["46154118"].sshPort).toBe(64100);
+  });
+
+  test("a reconciled instance is pruned, so the same port alerts again if it comes back", async () => {
+    const statePath = await tmpNoticeStatePath();
+
+    expect(run(noticeOnly([benign()]), statePath)).toHaveLength(1);
+
+    // Someone ran vast-drift.js --update: the box stops reporting drift, and the ledger is emptied.
+    expect(run(noticeOnly([clean()]), statePath)).toEqual([]);
+    expect((await readNotices(statePath)).notices).toEqual({});
+
+    // Same port comes back later (a fresh rebuild that happened to land on it): loud again.
+    expect(run(noticeOnly([benign()]), statePath)).toHaveLength(1);
+  });
+
+  test("an instance that vanishes from the comparison list is pruned too", async () => {
+    const statePath = await tmpNoticeStatePath();
+
+    expect(run(noticeOnly([benign()]), statePath)).toHaveLength(1);
+    expect(run(noticeOnly([]), statePath)).toEqual([]);
+    expect((await readNotices(statePath)).notices).toEqual({});
+  });
+
+  test("actionable drift always pages, even when a benign notice for it was already recorded", async () => {
+    const statePath = await tmpNoticeStatePath();
+    await writeFile(
+      statePath,
+      JSON.stringify({
+        version: 1,
+        notices: {
+          "46154118": {
+            sshPort: 63999,
+            logicalId: "gpu-1",
+            reportedAt: "2026-09-14T11:00:00.000Z",
+            lastSeenAt: "2026-09-14T11:45:00.000Z"
+          }
+        }
+      })
+    );
+
+    const payload = driftPayload({
+      drifted: true,
+      actionableDrift: true,
+      benignDrift: false,
+      driftSeverity: "alert",
+      comparisons: [benign({ logicalId: "gpu-1", driftClass: "unexpected", diffs: ["sshMode: direct -> proxy"] })]
+    });
+
+    // Every run pages: no debounce is ever applied to actionable drift.
+    for (let tick = 0; tick < 3; tick += 1) {
+      expect(run(payload, statePath)).toEqual(["Vast drift detected. gpu-1: sshMode: direct -> proxy"]);
+    }
+  });
+
+  test("a benign renumber never pads or obscures actionable drift in the same payload", async () => {
+    const statePath = await tmpNoticeStatePath();
+
+    const findings = run(
+      driftPayload({
+        drifted: true,
+        actionableDrift: true,
+        benignDrift: true,
+        driftSeverity: "alert",
+        comparisons: [benign(), unexpected()]
+      }),
+      statePath
+    );
+
+    expect(findings).toEqual([
+      "Vast drift detected. gpu-2: servicePort: 61754 -> 61999; host: 182.224.239.168 -> 91.0.0.7"
+    ]);
+    expect(findings[0]).not.toContain("gpu-1");
+    expect(findings[0]).not.toContain("low urgency");
+  });
+
+  test("a drifted comparison with no driftClass is treated as actionable, not swallowed", async () => {
+    const statePath = await tmpNoticeStatePath();
+
+    const findings = run(
+      driftPayload({
+        drifted: true,
+        actionableDrift: false,
+        benignDrift: false,
+        driftSeverity: "none",
+        comparisons: [{ logicalId: "gpu-2", drifted: true, diffs: ["host: a -> b"] }]
+      }),
+      statePath
+    );
+
+    expect(findings).toEqual(["Vast drift detected. gpu-2: host: a -> b"]);
+  });
+
+  test("backward compatible: a payload without actionableDrift still alerts on any drift", async () => {
+    const statePath = await tmpNoticeStatePath();
+
+    const findings = run(
+      driftPayload({
+        drifted: true,
+        comparisons: [
+          {
+            logicalId: "gpu-1",
+            vastInstanceId: 46154118,
+            drifted: true,
+            diffs: ["sshPort: 63530 -> 63999"]
+          }
+        ]
+      }),
+      statePath
+    );
+
+    // Exactly the pre-contract behavior, repeated on every run: version skew must never suppress drift.
+    expect(findings).toEqual(["Vast drift detected. gpu-1: sshPort: 63530 -> 63999"]);
+    expect(run(noticeOnly([]), statePath)).toEqual([]);
+  });
+
+  test("a corrupt state file degrades to alerting once and then repairs itself", async () => {
+    const statePath = await tmpNoticeStatePath();
+    await writeFile(statePath, "{ this is not json");
+
+    const findings = run(noticeOnly([benign()]), statePath);
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toContain("Vast drift notice");
+    expect(findings[0]).toContain("could not be read");
+
+    // The ledger was rewritten, so the very next check is quiet again.
+    expect(run(noticeOnly([benign()]), statePath)).toEqual([]);
+  });
+
+  test("an unreadable and unwritable state file still alerts and never throws", async () => {
+    // A directory where the ledger should be: every read AND every write fails.
+    const statePath = await mkdtemp(path.join(tmpdir(), "vast-drift-notice-dir-"));
+
+    let findings: string[] = [];
+    expect(() => {
+      findings = run(noticeOnly([benign()]), statePath);
+    }).not.toThrow();
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toContain("Vast drift notice");
+    expect(findings[0]).toContain("could not be read");
+    expect(findings[0]).toContain("could not be written");
+
+    // Nothing was recorded, so it keeps alerting rather than silently swallowing the drift.
+    expect(run(noticeOnly([benign()]), statePath)).toHaveLength(1);
+  });
+
+  test("a state-writer that throws still lets the notice through", async () => {
+    const findings = collectFindings(noticeOnly([benign()]), {
+      lowBalanceThreshold: 5,
+      driftNoticeStatePath: "/tmp/never-touched.json",
+      readDriftNoticeState: () => ({ state: { version: 1, notices: {} }, error: null }),
+      writeDriftNoticeState: () => {
+        throw new Error("disk on fire");
+      }
+    });
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toContain("could not be written");
+    expect(findings[0]).toContain("disk on fire");
+  });
+
+  test("a nonzero exit with no drift at all is still reported", async () => {
+    const statePath = await tmpNoticeStatePath();
+
+    const findings = run(
+      driftPayload(
+        { drifted: false, actionableDrift: false, benignDrift: false, driftSeverity: "none", comparisons: [] },
+        2
+      ),
+      statePath
+    );
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toContain("Vast drift exited 2");
+  });
+
+  test("the ledger is bounded: only the most recently seen entries survive", () => {
+    const notices: Record<string, unknown> = {};
+    for (let index = 0; index < 100; index += 1) {
+      notices[`instance-${index}`] = {
+        sshPort: 60000 + index,
+        logicalId: `gpu-${index}`,
+        reportedAt: "2026-09-14T10:00:00.000Z",
+        lastSeenAt: new Date(Date.parse("2026-09-14T10:00:00.000Z") + index * 1000).toISOString()
+      };
+    }
+
+    const capped = capDriftNoticeState({ version: 1, notices });
+    const keys = Object.keys(capped.notices);
+
+    expect(keys).toHaveLength(32);
+    expect(keys).toContain("instance-99");
+    expect(keys).not.toContain("instance-0");
   });
 });

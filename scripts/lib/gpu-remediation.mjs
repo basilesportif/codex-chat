@@ -729,6 +729,92 @@ function failure(target, message, extra = {}) {
 }
 
 /**
+ * Connection-level ssh failures that justify ONE fresh re-resolution + retry.
+ *
+ * These are all "the TCP connection never got established" errors, which is exactly what a Vast
+ * container restart looks like from the outside: the DNAT rule for the mapped SSH port disappears
+ * from the shared machine IP while the container is down, and reappears (often on a NEW port) once
+ * it comes back. Treating that single shot as terminal is what burned a circuit-breaker failure and
+ * a 45-minute cooldown on 2026-09-13.
+ *
+ * Authentication failures are deliberately NOT in this set: "Permission denied" / "Host key
+ * verification failed" mean we reached the box and it rejected us, which retrying cannot fix.
+ */
+const TRANSIENT_SSH_PATTERNS = [
+  /no route to host/i,
+  /connection refused/i,
+  /connection timed out/i,
+  /network is unreachable/i,
+  /host is down/i,
+  /connection closed by remote host/i,
+  /kex_exchange_identification/i,
+  /operation timed out/i,
+  /port \d+: .*unreachable/i,
+];
+
+const TERMINAL_SSH_PATTERNS = [/permission denied/i, /host key verification failed/i];
+
+/**
+ * Minimum remaining budget (ms) below which the fresh re-resolution + retry is NOT attempted.
+ *
+ * Arithmetic against the default `timeoutSec = 180` window: the retry costs a second vast-drift
+ * query (clamped to 60s, normally a few seconds) plus a second health probe (clamped to 30s), and
+ * only then does the remediation proper start -- a restart script clamped to 120s followed by a
+ * local health poll of `healthPollAttempts * healthPollIntervalSec + 20` = 65s at the defaults.
+ * Because `clampTimeout` shrinks every later step to whatever is left, the previous 5s threshold
+ * authorized a retry that could leave the restart script ~6s before ssh got SIGTERMed mid-script --
+ * strictly worse than not retrying, since a half-run restart leaves tmux/venv state behind.
+ * 90s is the floor at which a retry can still plausibly COMPLETE a remediation rather than merely
+ * start one: a few seconds of drift query and probe still leave ~80s, which covers the restart
+ * script's normal path (tmux start is seconds, not minutes) plus a truncated but real health poll.
+ * Below that we decline the retry and report the original ssh error instead.
+ */
+const MIN_RERESOLVE_BUDGET_MS = 90_000;
+
+/**
+ * True when `run` (an exec result) failed at the connection level rather than at the application
+ * or authentication level. Exported so the classification is directly unit-testable.
+ */
+export function isTransientSshFailure(run) {
+  if (!run || typeof run !== "object") return false;
+  if (run.timedOut) return true;
+  if (run.exitCode === 0) return false;
+
+  // An HTTP code in stdout means the remote command actually ran, so the ssh hop succeeded.
+  // It has to look like an actual 3-digit code: any other stdout proves nothing about the hop.
+  const httpCode = String(run.stdout ?? "").trim().slice(-3);
+  if (/^\d{3}$/.test(httpCode)) return false;
+
+  const text = `${String(run.stderr ?? "")}\n${String(run.stdout ?? "")}`;
+  if (TERMINAL_SSH_PATTERNS.some((pattern) => pattern.test(text))) return false;
+  return TRANSIENT_SSH_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+/**
+ * Run `vast-drift.js --json` on the devops box and parse it. Never throws: returns
+ * `{payload, error}` where exactly one side is populated.
+ */
+async function fetchDriftPayload({ exec, jumpHost, remoteDir, deadlineMs, now }) {
+  let payload = null;
+  let error = null;
+  try {
+    const driftRun = await exec(
+      "ssh",
+      buildJumpSshArgs({ jumpHost, command: buildVastDriftCommand(remoteDir) }),
+      clampTimeout(deadlineMs, now, 60000),
+    );
+    try {
+      payload = JSON.parse(driftRun.stdout.slice(driftRun.stdout.indexOf("{")));
+    } catch {
+      error = `vast-drift output was not valid JSON: ${previewRedacted(driftRun.stderr || driftRun.stdout, 200)}`;
+    }
+  } catch (caught) {
+    error = `vast-drift lookup failed: ${previewRedacted(caught instanceof Error ? caught.message : String(caught), 200)}`;
+  }
+  return { payload, error };
+}
+
+/**
  * Remediate each target in turn. `exec(command, args, timeoutMs)` must resolve to
  * `{exitCode, signal, stdout, stderr, timedOut}` (the alert script's `runCommand`).
  *
@@ -755,22 +841,14 @@ export async function runGpuRemediation({
 
   const deadlineMs = now() + Math.max(10, timeoutSec) * 1000;
 
-  let driftPayload = null;
-  let driftError = null;
-  try {
-    const driftRun = await exec(
-      "ssh",
-      buildJumpSshArgs({ jumpHost, command: buildVastDriftCommand(remoteDir) }),
-      clampTimeout(deadlineMs, now, 60000),
-    );
-    try {
-      driftPayload = JSON.parse(driftRun.stdout.slice(driftRun.stdout.indexOf("{")));
-    } catch {
-      driftError = `vast-drift output was not valid JSON: ${previewRedacted(driftRun.stderr || driftRun.stdout, 200)}`;
-    }
-  } catch (error) {
-    driftError = `vast-drift lookup failed: ${previewRedacted(error instanceof Error ? error.message : String(error), 200)}`;
-  }
+  const driftContext = { exec, jumpHost, remoteDir, deadlineMs, now };
+  const { payload: driftPayload, error: driftError } = await fetchDriftPayload(driftContext);
+  /**
+   * A genuinely fresh, live vast-drift query, used at most once per target after a connection-level
+   * ssh failure. The snapshot taken above can be minutes stale by the time a probe fails, and a
+   * Vast container restart -- the very event this feature exists to handle -- moves the SSH port.
+   */
+  const reresolveDrift = () => fetchDriftPayload(driftContext);
 
   for (const target of pending) {
     try {
@@ -782,6 +860,7 @@ export async function runGpuRemediation({
           dryRun,
           driftPayload,
           driftError,
+          reresolveDrift,
           deadlineMs,
           now,
           sleep,
@@ -810,6 +889,7 @@ async function remediateOne({
   dryRun,
   driftPayload,
   driftError,
+  reresolveDrift = null,
   deadlineMs,
   now,
   sleep,
@@ -821,10 +901,12 @@ async function remediateOne({
   const plan = [];
 
   if (driftError) return failure(target, driftError);
-  const endpoint = resolveBackendEndpoint(driftPayload, target.backendId);
+  // Rebindable: a connection-level ssh failure below triggers ONE fresh re-resolution, and a Vast
+  // container restart can legitimately move the host/sshPort of the very same instance.
+  let endpoint = resolveBackendEndpoint(driftPayload, target.backendId);
   if (!endpoint.ok) return failure(target, `could not resolve the live SSH endpoint: ${endpoint.error}`);
 
-  const boxLabel = `${endpoint.host}:${endpoint.sshPort}`;
+  let boxLabel = `${endpoint.host}:${endpoint.sshPort}`;
   plan.push(`resolved ${target.backendId} to root@${boxLabel} via vast-drift (${endpoint.source})`);
 
   // Sanity check BEFORE any ssh: the IP:port in `target` came out of free-form alert text, while
@@ -852,36 +934,179 @@ async function remediateOne({
     plan.push(`servicePort ${endpoint.servicePort} (${endpoint.servicePortSource}) matches the alert target port`);
   }
 
-  const runOnBox = (remoteCommand, preferredMs) =>
+  const makeRunOnBox = (resolved) => (remoteCommand, preferredMs) =>
     exec(
       "ssh",
       buildTwoHopSshArgs({
         jumpHost,
-        target: `root@${endpoint.host}`,
-        sshPort: endpoint.sshPort,
+        target: `root@${resolved.host}`,
+        sshPort: resolved.sshPort,
         remoteCommand,
       }),
       clampTimeout(deadlineMs, now, preferredMs),
     );
+  let runOnBox = makeRunOnBox(endpoint);
 
   // (b) pre-check: if the service already answers, do not touch anything.
-  const probe = await runOnBox(buildLocalHealthProbeCommand(), 30000);
-  const probeCode = probe.stdout.trim().slice(-3);
+  let probe = await runOnBox(buildLocalHealthProbeCommand(), 30000);
+  let probeCode = String(probe.stdout ?? "").trim().slice(-3);
+
+  // (b2) ONE fresh re-resolution + retry on a connection-level failure. See `isTransientSshFailure`.
+  let retryNote = "";
+  // Appended to the SUCCESS-path messages too: a recovered port change is drift Tim must know about,
+  // and `formatRemediationReport` does not render `plan` lines for succeeded/partial/selfRecovered.
+  let portChangeNote = "";
+  if (typeof reresolveDrift === "function" && isTransientSshFailure(probe)) {
+    const sshError = probe.timedOut
+      ? "ssh timed out during the health pre-check"
+      : previewRedacted(probe.stderr || probe.stdout, 200);
+    const staleLabel = boxLabel;
+    const compound = (detail) =>
+      `health pre-check over ssh to root@${staleLabel} failed: ${sshError}; ` +
+      `a fresh vast-drift re-resolution to check for a changed SSH port also failed: ${detail}`;
+
+    if (deadlineMs - now() <= MIN_RERESOLVE_BUDGET_MS) {
+      return failure(
+        target,
+        `health pre-check over ssh to root@${staleLabel} failed: ${sshError}; there was no time budget left ` +
+          `in the remediation window to re-resolve the SSH port against the live Vast API, so no retry was attempted.`,
+        { plan },
+      );
+    }
+
+    let fresh;
+    try {
+      fresh = await reresolveDrift();
+    } catch (caught) {
+      fresh = {
+        payload: null,
+        error: `vast-drift lookup failed: ${previewRedacted(caught instanceof Error ? caught.message : String(caught), 200)}`,
+      };
+    }
+    // Graceful degradation: never silently fall back to the stale/expected endpoint.
+    if (!fresh || fresh.error) {
+      return failure(target, compound(fresh?.error || "vast-drift returned nothing"), { plan });
+    }
+
+    const freshEndpoint = resolveBackendEndpoint(fresh.payload, target.backendId);
+    if (!freshEndpoint.ok) {
+      return failure(target, compound(`could not resolve the live SSH endpoint: ${freshEndpoint.error}`), { plan });
+    }
+
+    // PROVENANCE GUARD: `resolveBackendEndpoint` falls back to stack.json's `expected` values when
+    // the live Vast API carries no `actual` for this instance. On the retry path that fallback is
+    // exactly the failure mode this feature exists to prevent: a stale port on a shared machine IP
+    // (gpu-1 and gpu-2 both live on 182.224.239.168) can be a LIVE port belonging to a different
+    // container, so acting on it risks restarting the wrong box. Only live data may be trusted here.
+    if (freshEndpoint.source !== "vast-api") {
+      return failure(
+        target,
+        `health pre-check over ssh to root@${staleLabel} failed: ${sshError}; a fresh vast-drift ` +
+          `re-resolution returned no live Vast API data for ${target.backendId} (only stale stack.json ` +
+          `config), so the current SSH port could not be confirmed; nothing was restarted rather than risk ` +
+          `acting on a stale port that may now belong to a different container on the same machine IP.`,
+        { plan },
+      );
+    }
+
+    // Identity guard: a changed vastInstanceId means this is a DIFFERENT box, not a re-mapped one.
+    const firstInstanceId = endpoint.vastInstanceId;
+    const freshInstanceId = freshEndpoint.vastInstanceId;
+    if (firstInstanceId != null && freshInstanceId != null && String(firstInstanceId) !== String(freshInstanceId)) {
+      return {
+        target,
+        outcome: OUTCOMES.skippedMismatch,
+        message:
+          `instance identity for ${target.backendId} changed between the first vast-drift lookup ` +
+          `(vastInstanceId ${firstInstanceId}) and the fresh re-resolution after a transient ssh failure ` +
+          `(vastInstanceId ${freshInstanceId}), so the box answering for this backend may not be the one the ` +
+          `alert named; nothing was restarted. Check vast-drift / stack.json against the gateway backend list by hand.`,
+        plan,
+      };
+    }
+
+    const freshLabel = `${freshEndpoint.host}:${freshEndpoint.sshPort}`;
+    // Accepting a CHANGED endpoint requires POSITIVE identity, not merely the absence of a
+    // mismatch: a null vastInstanceId on either side is not proof that this is the same box.
+    if (freshLabel !== staleLabel && (firstInstanceId == null || freshInstanceId == null)) {
+      const missingSide =
+        firstInstanceId == null && freshInstanceId == null
+          ? "neither the first vast-drift lookup nor the fresh re-resolution reported a vastInstanceId"
+          : firstInstanceId == null
+            ? "the first vast-drift lookup reported no vastInstanceId"
+            : "the fresh re-resolution reported no vastInstanceId";
+      return {
+        target,
+        outcome: OUTCOMES.skippedMismatch,
+        message:
+          `the SSH endpoint for ${target.backendId} changed from ${staleLabel} to ${freshLabel} between the ` +
+          `first vast-drift lookup and the fresh re-resolution after a transient ssh failure, but ${missingSide}, ` +
+          `so the box now answering at ${freshLabel} could not be positively confirmed as the same Vast ` +
+          `instance; nothing was restarted. Check vast-drift / stack.json against the gateway backend list by hand.`,
+        plan,
+      };
+    }
+    if (freshLabel === staleLabel) {
+      plan.push(
+        `re-confirmed ${target.backendId} at root@${boxLabel} against the live Vast API after a transient ssh ` +
+          `failure; the SSH port did not change`,
+      );
+      retryNote =
+        `. The SSH port ${endpoint.sshPort} was re-confirmed against the live Vast API at retry time, so this is ` +
+        `not a stale-port problem: the box itself was unreachable (the Vast container is likely down or rebooting).`;
+    } else {
+      plan.push(
+        `re-resolved ${target.backendId} to root@${freshLabel} after a transient ssh failure (was ${staleLabel}); ` +
+          `the Vast SSH port changed since the first lookup`,
+      );
+      if (
+        endpoint.servicePort != null &&
+        freshEndpoint.servicePort != null &&
+        endpoint.servicePort !== freshEndpoint.servicePort
+      ) {
+        // After a real container restart the SSH port and the service port move together, so
+        // re-applying the alert-text servicePort cross-check would block exactly this recovery.
+        // The matching vastInstanceId settles identity more strongly than the alert text can.
+        plan.push(
+          `servicePort moved from ${endpoint.servicePort} to ${freshEndpoint.servicePort}; the alert-text ` +
+            `cross-check is superseded by the matching vastInstanceId (${freshInstanceId ?? firstInstanceId})`,
+        );
+      }
+      retryNote =
+        `. The SSH port was re-resolved to ${freshEndpoint.sshPort} at retry time (was ${endpoint.sshPort}), ` +
+        `and the box was still unreachable there.`;
+      portChangeNote =
+        ` Note: the Vast SSH port for ${target.backendId} moved from ${endpoint.sshPort} to ` +
+        `${freshEndpoint.sshPort} during this run (stack.json may now be drifted; re-check it).`;
+      endpoint = freshEndpoint;
+      boxLabel = freshLabel;
+      runOnBox = makeRunOnBox(freshEndpoint);
+    }
+
+    // At most once: straight-line, never a loop.
+    probe = await runOnBox(buildLocalHealthProbeCommand(), 30000);
+    probeCode = String(probe.stdout ?? "").trim().slice(-3);
+  }
+
   if (probe.timedOut) {
-    return failure(target, `could not reach root@${boxLabel} (ssh timed out during the health pre-check)`, { plan });
+    return failure(
+      target,
+      `could not reach root@${boxLabel} (ssh timed out during the health pre-check)${retryNote}`,
+      { plan },
+    );
   }
   if (probeCode === "200") {
     return {
       target,
       outcome: OUTCOMES.selfRecovered,
-      message: `${LOCAL_HEALTH_URL} on root@${boxLabel} already returns 200; no action taken.`,
+      message: `${LOCAL_HEALTH_URL} on root@${boxLabel} already returns 200; no action taken.${portChangeNote}`,
       plan,
     };
   }
   if (probe.exitCode !== 0 && !probeCode) {
     return failure(
       target,
-      `health pre-check over ssh to root@${boxLabel} failed: ${previewRedacted(probe.stderr || probe.stdout, 200)}`,
+      `health pre-check over ssh to root@${boxLabel} failed: ${previewRedacted(probe.stderr || probe.stdout, 200)}${retryNote}`,
       { plan },
     );
   }
@@ -951,7 +1176,9 @@ async function remediateOne({
     return {
       target,
       outcome: OUTCOMES.succeeded,
-      message: `remote-inference restarted on root@${boxLabel}; the gateway reports ${target.backendId} healthy again.`,
+      message:
+        `remote-inference restarted on root@${boxLabel}; the gateway reports ${target.backendId} healthy ` +
+        `again.${portChangeNote}`,
       plan,
     };
   }
@@ -961,7 +1188,8 @@ async function remediateOne({
     outcome: OUTCOMES.partial,
     message:
       `remote-inference restarted on root@${boxLabel} and answers locally, but the gateway still reports ` +
-      `${target.backendId} as ${gatewayStatus?.status || gatewayStatus?.error || "not healthy"}; verify shortly.`,
+      `${target.backendId} as ${gatewayStatus?.status || gatewayStatus?.error || "not healthy"}; verify ` +
+      `shortly.${portChangeNote}`,
     plan,
   };
 }

@@ -17,6 +17,7 @@ const {
   finalizeRemediationAttempt,
   detectGpuRemediationTargets,
   gpuBackendEnumerationIsTrustworthy,
+  isTransientSshFailure,
   describeTarget,
   formatRemediationReport,
   normalizeRemediationState,
@@ -1101,5 +1102,533 @@ describe("gpu backend enumeration trustworthiness", () => {
         ]),
       ),
     ).toBe(true);
+  });
+});
+
+describe("transient ssh classification", () => {
+  function run(overrides: Record<string, unknown> = {}) {
+    return { exitCode: 255, signal: null, stdout: "", stderr: "", timedOut: false, ...overrides };
+  }
+
+  test("connection-level ssh errors are transient", () => {
+    for (const stderr of [
+      "ssh: connect to host 182.224.239.168 port 63530: No route to host",
+      "ssh: connect to host 182.224.239.168 port 63530: Connection refused",
+      "ssh: connect to host 182.224.239.168 port 63530: Connection timed out",
+      "ssh: connect to host 1.2.3.4 port 22: Network is unreachable",
+      "ssh: connect to host 1.2.3.4 port 22: Host is down",
+      "Connection closed by remote host",
+      "kex_exchange_identification: read: Connection reset by peer",
+      "ssh: connect to host 1.2.3.4 port 22: Operation timed out",
+      "connect to host 1.2.3.4 port 63530: destination unreachable",
+      "SSH: CONNECT TO HOST 1.2.3.4 PORT 63530: NO ROUTE TO HOST",
+    ]) {
+      expect(isTransientSshFailure(run({ stderr }))).toBe(true);
+    }
+    // A timeout reported by the runner itself is transient regardless of output.
+    expect(isTransientSshFailure(run({ timedOut: true, exitCode: null }))).toBe(true);
+    expect(isTransientSshFailure(run({ timedOut: true, exitCode: 0 }))).toBe(true);
+  });
+
+  test("authentication and application failures are terminal, never retried", () => {
+    for (const stderr of [
+      "root@182.224.239.168: Permission denied (publickey).",
+      "Host key verification failed.",
+      "ssh: Could not resolve hostname nope: Name or service not known",
+      "bash: line 1: curl: command not found",
+      "",
+    ]) {
+      expect(isTransientSshFailure(run({ stderr }))).toBe(false);
+    }
+    // Even a transient-looking phrase is NOT transient once the remote command actually ran:
+    // an http code in stdout proves the ssh hop succeeded.
+    expect(
+      isTransientSshFailure(run({ stdout: "000", stderr: "No route to host" })),
+    ).toBe(false);
+    // A clean exit is never a connection failure.
+    expect(isTransientSshFailure(run({ exitCode: 0, stderr: "No route to host" }))).toBe(false);
+    // Junk input never throws.
+    expect(isTransientSshFailure(undefined)).toBe(false);
+    expect(isTransientSshFailure(null)).toBe(false);
+    expect(isTransientSshFailure("nope")).toBe(false);
+  });
+});
+
+/**
+ * Regression cover for the 2026-09-13 02:00 UTC gpu-1 incident: the single vast-drift snapshot
+ * taken at the top of the run went stale during the remediation window, and a one-shot pre-check
+ * turned "No route to host" into a terminal failure that burned a circuit-breaker strike.
+ */
+describe("fresh re-resolution + single retry after a transient ssh failure", () => {
+  const TARGET = {
+    componentId: "remote-inference",
+    componentName: "Remote Inference (GPU Service)",
+    gatewayService: "gpu-gateway",
+    backendId: "gpu-1",
+    address: "182.224.239.168",
+    port: 63571,
+    gatewaySshTarget: "root@162.55.45.186",
+  };
+
+  const HOST = "182.224.239.168";
+
+  function driftJson({
+    sshPort = 63530,
+    servicePort = 63571,
+    vastInstanceId = 46154118,
+    host = HOST,
+  }: { sshPort?: number; servicePort?: number; vastInstanceId?: number | null; host?: string } = {}) {
+    return JSON.stringify({
+      drifted: false,
+      comparisons: [
+        {
+          logicalId: "gpu-1",
+          vastInstanceId,
+          expected: { host, sshPort, servicePort },
+          actual: { host, sshPort, servicePort, status: "running" },
+          diffs: [],
+        },
+      ],
+    });
+  }
+
+  function ok(stdout: string) {
+    return { exitCode: 0, signal: null, stdout, stderr: "", timedOut: false };
+  }
+
+  /** The verbatim failure from the archived alert. */
+  function noRouteToHost(port = 63530) {
+    return {
+      exitCode: 255,
+      signal: null,
+      stdout: "",
+      stderr: `ssh: connect to host ${HOST} port ${port}: No route to host`,
+      timedOut: false,
+    };
+  }
+
+  type Handler = (callNumber: number) => unknown;
+
+  function makeExec(handlers: {
+    drift?: Handler;
+    probe?: Handler;
+    restart?: Handler;
+    poll?: Handler;
+    gateway?: Handler;
+    logTail?: Handler;
+  }) {
+    const calls: string[] = [];
+    const counts: Record<string, number> = { drift: 0, probe: 0, restart: 0, poll: 0, gateway: 0, logTail: 0 };
+    const sshArgs: Array<{ kind: string; args: string[] }> = [];
+
+    const dispatch = (kind: string, args: string[], handler: Handler | undefined, fallback: unknown) => {
+      counts[kind] += 1;
+      calls.push(kind);
+      sshArgs.push({ kind, args: [...args] });
+      return handler ? handler(counts[kind]) : fallback;
+    };
+
+    const exec = async (_command: string, args: string[], _timeoutMs?: number) => {
+      const command = args[args.length - 1];
+      if (command.includes("vast-drift")) return dispatch("drift", args, handlers.drift, ok(driftJson()));
+      if (command.includes("admin/backends")) {
+        return dispatch(
+          "gateway",
+          args,
+          handlers.gateway,
+          ok(JSON.stringify([{ id: "gpu-1", enabled: true, health: { status: "healthy" } }])),
+        );
+      }
+      if (command.includes("RI-HEALTH")) return dispatch("poll", args, handlers.poll, ok("RI-HEALTH:200"));
+      if (command.includes("http_code")) return dispatch("probe", args, handlers.probe, ok("000"));
+      if (command.includes("RI-FAIL")) {
+        return dispatch(
+          "restart",
+          args,
+          handlers.restart,
+          ok("RI:start-script:present\nRI:api-key:present\nRI:venv:present\nRI:deps:present\nRI:tmux:started\nRI:done"),
+        );
+      }
+      if (command.includes("tail -n")) return dispatch("logTail", args, handlers.logTail, ok("boot log"));
+      calls.push(`unknown:${command}`);
+      return ok("");
+    };
+
+    /** The inner two-hop ssh command for the nth (1-based) call of a given kind. */
+    const innerCommand = (kind: string, nth: number) => {
+      const entry = sshArgs.filter((item) => item.kind === kind)[nth - 1];
+      return entry ? entry.args[entry.args.length - 1] : "";
+    };
+
+    return { exec, calls, counts, sshArgs, innerCommand };
+  }
+
+  const base = {
+    targets: [TARGET],
+    jumpHost: "tim@89.167.72.52",
+    remoteDir: "/home/tim/pkg/mush/mush-devops",
+    sleep: async () => {},
+  };
+
+  // THE headline regression: the Vast container restarted mid-window and the SSH port moved.
+  test("re-resolves a changed Vast SSH port and remediates the box on the new port", async () => {
+    const { exec, counts, innerCommand } = makeExec({
+      drift: (n) =>
+        ok(n === 1 ? driftJson({ sshPort: 63530, servicePort: 63571 }) : driftJson({ sshPort: 64111, servicePort: 64150 })),
+      probe: (n) => (n === 1 ? noRouteToHost(63530) : ok("000")),
+    });
+
+    const results = await runGpuRemediation({ ...base, exec });
+
+    // A genuinely fresh, live vast-drift query ran at retry time.
+    expect(counts.drift).toBe(2);
+    expect(counts.probe).toBe(2);
+
+    // The first probe used the stale port; the retry used the freshly resolved one.
+    expect(innerCommand("probe", 1)).toContain("-p '63530'");
+    expect(innerCommand("probe", 2)).toContain("-p '64111'");
+    expect(innerCommand("probe", 2)).not.toContain("63530");
+
+    // ...and so did the restart: the stale port must never be used to mutate a box.
+    expect(counts.restart).toBe(1);
+    expect(innerCommand("restart", 1)).toContain("-p '64111'");
+    expect(innerCommand("restart", 1)).not.toContain("63530");
+    expect(innerCommand("poll", 1)).toContain("-p '64111'");
+
+    expect(results[0].outcome).toBe(OUTCOMES.succeeded);
+    const plan = results[0].plan.join("\n");
+    expect(plan).toContain("re-resolved gpu-1 to root@182.224.239.168:64111 after a transient ssh failure");
+    expect(plan).toContain("(was 182.224.239.168:63530)");
+    expect(plan).toContain("the Vast SSH port changed since the first lookup");
+    // The alert-text servicePort cross-check is explicitly superseded, not silently dropped.
+    expect(plan).toContain("servicePort moved from 63571 to 64150");
+    expect(plan).toContain("superseded by the matching vastInstanceId");
+    expect(results[0].message).toContain("root@182.224.239.168:64111");
+  });
+
+  test("a failed fresh re-query degrades gracefully and names BOTH errors", async () => {
+    const thrown = makeExec({
+      drift: (n) => {
+        if (n === 1) return ok(driftJson());
+        throw new Error("ssh exploded during re-resolution");
+      },
+      probe: () => noRouteToHost(),
+    });
+    const results = await runGpuRemediation({ ...base, exec: thrown.exec });
+
+    expect(results[0].outcome).toBe(OUTCOMES.failed);
+    expect(results[0].outcome).not.toBe(OUTCOMES.error);
+    expect(results[0].message).toContain("No route to host");
+    expect(results[0].message).toContain("a fresh vast-drift re-resolution to check for a changed SSH port also failed");
+    expect(results[0].message).toContain("ssh exploded during re-resolution");
+    // Nothing was mutated, and no stale/expected endpoint was silently used instead.
+    expect(thrown.counts.restart).toBe(0);
+    expect(thrown.counts.probe).toBe(1);
+    expect(thrown.counts.drift).toBe(2);
+
+    // Same treatment when the fresh query answers with garbage instead of throwing.
+    const garbage = makeExec({
+      drift: (n) => ok(n === 1 ? driftJson() : "ssh: connect to host failed"),
+      probe: () => noRouteToHost(),
+    });
+    const garbled = await runGpuRemediation({ ...base, exec: garbage.exec });
+    expect(garbled[0].outcome).toBe(OUTCOMES.failed);
+    expect(garbled[0].message).toContain("No route to host");
+    expect(garbled[0].message).toContain("was not valid JSON");
+    expect(garbage.counts.restart).toBe(0);
+
+    // ...and when the fresh payload no longer describes this backend at all.
+    const missing = makeExec({
+      drift: (n) => ok(n === 1 ? driftJson() : JSON.stringify({ comparisons: [] })),
+      probe: () => noRouteToHost(),
+    });
+    const unresolved = await runGpuRemediation({ ...base, exec: missing.exec });
+    expect(unresolved[0].outcome).toBe(OUTCOMES.failed);
+    expect(unresolved[0].message).toContain("no instance matching gpu-1");
+    expect(missing.counts.restart).toBe(0);
+  });
+
+  // The diagnostic payoff: this is the message that would have saved the manual forensics.
+  test("an unchanged port yields a diagnosis that explicitly rules out a stale port", async () => {
+    const { exec, counts, calls } = makeExec({
+      drift: () => ok(driftJson({ sshPort: 63530, servicePort: 63571 })),
+      probe: () => noRouteToHost(),
+    });
+    const results = await runGpuRemediation({ ...base, exec });
+
+    expect(results[0].outcome).toBe(OUTCOMES.failed);
+    // Exactly one retry: no loop.
+    expect(counts.drift).toBe(2);
+    expect(counts.probe).toBe(2);
+    expect(calls).toEqual(["drift", "probe", "drift", "probe"]);
+    expect(counts.restart).toBe(0);
+
+    expect(results[0].message).toContain("No route to host");
+    expect(results[0].message).toContain(
+      "The SSH port 63530 was re-confirmed against the live Vast API at retry time, so this is not a stale-port problem",
+    );
+    expect(results[0].message).toContain("the box itself was unreachable");
+    expect(results[0].message).toContain("the Vast container is likely down or rebooting");
+    expect(results[0].plan.join("\n")).toContain("the SSH port did not change");
+
+    const report = formatRemediationReport(results);
+    expect(report).toContain("⚠️ MANUAL INTERVENTION REQUIRED");
+    expect(report).toContain("not a stale-port problem");
+  });
+
+  test("a changed vastInstanceId is a different box: skip without ssh-ing anywhere", async () => {
+    const { exec, counts } = makeExec({
+      drift: (n) =>
+        ok(
+          n === 1
+            ? driftJson({ sshPort: 63530, vastInstanceId: 46154118 })
+            : driftJson({ sshPort: 64111, servicePort: 64150, vastInstanceId: 47999999 }),
+        ),
+      probe: () => noRouteToHost(),
+    });
+    const results = await runGpuRemediation({ ...base, exec });
+
+    expect(results[0].outcome).toBe(OUTCOMES.skippedMismatch);
+    expect(results[0].message).toContain("46154118");
+    expect(results[0].message).toContain("47999999");
+    expect(results[0].message).toContain("nothing was restarted");
+    expect(counts.restart).toBe(0);
+    // No second probe either: we do not ssh to a box whose identity changed under us.
+    expect(counts.probe).toBe(1);
+    expect(counts.drift).toBe(2);
+    expect(formatRemediationReport(results)).toContain("SKIPPED (target mismatch)");
+  });
+
+  test("an auth failure is terminal: no re-resolution, no retry", async () => {
+    const { exec, counts, calls } = makeExec({
+      probe: () => ({
+        exitCode: 255,
+        signal: null,
+        stdout: "",
+        stderr: "root@182.224.239.168: Permission denied (publickey).",
+        timedOut: false,
+      }),
+    });
+    const results = await runGpuRemediation({ ...base, exec });
+
+    expect(results[0].outcome).toBe(OUTCOMES.failed);
+    expect(counts.drift).toBe(1);
+    expect(counts.probe).toBe(1);
+    expect(calls).toEqual(["drift", "probe"]);
+    expect(results[0].message).toContain("Permission denied");
+    expect(results[0].message).not.toContain("re-confirmed");
+  });
+
+  test("the retry is skipped when too little time budget is left to complete a remediation", async () => {
+    const { exec, counts } = makeExec({ probe: () => noRouteToHost() });
+    // A monotonic clock, not a call-count trick: the deadline is taken from the first now() and
+    // every later call has burned another 25s of a 100s window, so by the time the budget check
+    // runs there is well under the documented minimum left no matter how many now() calls the
+    // implementation happens to make.
+    let elapsedMs = 0;
+    const now = () => {
+      const value = elapsedMs;
+      elapsedMs += 25_000;
+      return value;
+    };
+    const results = await runGpuRemediation({ ...base, exec, timeoutSec: 100, now });
+
+    expect(results[0].outcome).toBe(OUTCOMES.failed);
+    expect(counts.drift).toBe(1);
+    expect(counts.probe).toBe(1);
+    expect(counts.restart).toBe(0);
+    expect(results[0].message).toContain("No route to host");
+    expect(results[0].message).toContain("no time budget left");
+  });
+
+  // The counterpart: a full window DOES authorize the retry, so the test above is pinned to the
+  // budget rule and not to "the retry never happens with a stubbed clock".
+  test("a full remediation window still authorizes the retry", async () => {
+    const { exec, counts } = makeExec({ probe: () => noRouteToHost() });
+    let elapsedMs = 0;
+    const now = () => {
+      const value = elapsedMs;
+      elapsedMs += 100;
+      return value;
+    };
+    const results = await runGpuRemediation({ ...base, exec, timeoutSec: 180, now });
+
+    expect(results[0].outcome).toBe(OUTCOMES.failed);
+    expect(counts.drift).toBe(2);
+    expect(counts.probe).toBe(2);
+    expect(results[0].message).not.toContain("no time budget left");
+  });
+
+  test("the retry path never leaks secret material into messages or plan lines", async () => {
+    const UUID = "0f2b5c1e-11aa-4d33-9f77-8b2a6c4e5d10";
+    const HEX = "8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92";
+    const { exec } = makeExec({
+      drift: (n) =>
+        n === 1
+          ? ok(driftJson())
+          : ok(`vast-drift crashed: {"api_key":"sk-live-should-not-leak"} request ${UUID} token ${HEX} API_KEY=hunter2`),
+      probe: () => ({
+        exitCode: 255,
+        signal: null,
+        stdout: "",
+        stderr: `ssh: connect to host ${HOST} port 63530: No route to host (session ${UUID} API_KEY=hunter2)`,
+        timedOut: false,
+      }),
+    });
+    const results = await runGpuRemediation({ ...base, exec });
+
+    expect(results[0].outcome).toBe(OUTCOMES.failed);
+    const report = formatRemediationReport(results);
+    for (const blob of [report, results[0].message, results[0].plan.join("\n")]) {
+      expect(blob).not.toContain("sk-live-should-not-leak");
+      expect(blob).not.toContain(UUID);
+      expect(blob).not.toContain(HEX);
+      expect(blob).not.toContain("hunter2");
+    }
+    expect(report).toContain("[redacted]");
+    expect(report).toContain("No route to host");
+  });
+
+  /**
+   * BLOCKER regression: `resolveBackendEndpoint` falls back to stack.json's `expected` values when
+   * the live Vast API has no `actual` for an instance. On the retry path that fallback would hand
+   * back a STALE port dressed up as a fresh one -- and since gpu-1 and gpu-2 share the machine IP
+   * 182.224.239.168, a stale port there can be a live port belonging to a different container.
+   */
+  function driftJsonWithoutActual({
+    sshPort = 63500,
+    servicePort = 63571,
+    vastInstanceId = null,
+    host = HOST,
+  }: {
+    sshPort?: number;
+    servicePort?: number;
+    vastInstanceId?: number | null;
+    host?: string;
+  } = {}) {
+    return JSON.stringify({
+      drifted: true,
+      comparisons: [
+        {
+          logicalId: "gpu-1",
+          vastInstanceId,
+          expected: { host, sshPort, servicePort },
+          actual: null,
+          diffs: ["sshPort"],
+        },
+      ],
+    });
+  }
+
+  test("a fresh payload with no live Vast data is refused, never silently downgraded to stack.json", async () => {
+    const { exec, counts, sshArgs } = makeExec({
+      drift: (n) => ok(n === 1 ? driftJson({ sshPort: 63530 }) : driftJsonWithoutActual({ sshPort: 63500 })),
+      probe: () => noRouteToHost(63530),
+    });
+    const results = await runGpuRemediation({ ...base, exec });
+
+    expect(results[0].outcome).toBe(OUTCOMES.failed);
+    expect(results[0].message).toContain("No route to host");
+    expect(results[0].message).toContain("no live Vast API data");
+    expect(results[0].message).toContain("only stale stack.json");
+    expect(results[0].message).toContain("nothing was restarted");
+    // It must NOT claim a live confirmation it never obtained.
+    expect(results[0].message).not.toContain("re-confirmed against the live Vast API");
+
+    // Nothing was mutated, and no second ssh was attempted at all.
+    expect(counts.restart).toBe(0);
+    expect(counts.probe).toBe(1);
+    expect(counts.drift).toBe(2);
+
+    // The decisive assertion: the stack.json port never reached an ssh argv.
+    const everyArg = sshArgs.flatMap((entry) => entry.args).join("\n");
+    expect(everyArg).not.toContain("63500");
+  });
+
+  test("a changed endpoint with no vastInstanceId on the fresh side is skipped, not accepted", async () => {
+    const { exec, counts } = makeExec({
+      drift: (n) =>
+        ok(
+          n === 1
+            ? driftJson({ sshPort: 63530, vastInstanceId: 46154118 })
+            : driftJson({ sshPort: 64111, servicePort: 64150, vastInstanceId: null }),
+        ),
+      probe: () => noRouteToHost(),
+    });
+    const results = await runGpuRemediation({ ...base, exec });
+
+    expect(results[0].outcome).toBe(OUTCOMES.skippedMismatch);
+    expect(results[0].message).toContain("the fresh re-resolution reported no vastInstanceId");
+    expect(results[0].message).toContain("could not be positively confirmed as the same Vast instance");
+    expect(results[0].message).toContain("nothing was restarted");
+    expect(counts.restart).toBe(0);
+    expect(counts.probe).toBe(1);
+  });
+
+  test("a changed endpoint with no vastInstanceId on the FIRST side is skipped, not accepted", async () => {
+    const { exec, counts } = makeExec({
+      drift: (n) =>
+        ok(
+          n === 1
+            ? driftJson({ sshPort: 63530, vastInstanceId: null })
+            : driftJson({ sshPort: 64111, servicePort: 64150, vastInstanceId: 46154118 }),
+        ),
+      probe: () => noRouteToHost(),
+    });
+    const results = await runGpuRemediation({ ...base, exec });
+
+    expect(results[0].outcome).toBe(OUTCOMES.skippedMismatch);
+    expect(results[0].message).toContain("the first vast-drift lookup reported no vastInstanceId");
+    expect(results[0].message).toContain("nothing was restarted");
+    expect(counts.restart).toBe(0);
+    expect(counts.probe).toBe(1);
+  });
+
+  test("a stack.json-only fresh payload never claims the port was re-confirmed, even when it matches", async () => {
+    const { exec, counts } = makeExec({
+      drift: (n) => ok(n === 1 ? driftJson({ sshPort: 63530 }) : driftJsonWithoutActual({ sshPort: 63530 })),
+      probe: () => noRouteToHost(),
+    });
+    const results = await runGpuRemediation({ ...base, exec });
+
+    expect(results[0].outcome).toBe(OUTCOMES.failed);
+    expect(results[0].message).not.toContain("re-confirmed against the live Vast API");
+    expect(results[0].message).not.toContain("not a stale-port problem");
+    expect(results[0].message).toContain("no live Vast API data");
+    expect(results[0].plan.join("\n")).not.toContain("the SSH port did not change");
+    expect(counts.restart).toBe(0);
+  });
+
+  // SHOULD-FIX 2: a recovered port change must be visible in Tim's Telegram message, not buried in
+  // `plan` lines that `formatRemediationReport` only renders for dry runs and failures.
+  test("a successful port-change recovery reports the drift in the success message", async () => {
+    const { exec } = makeExec({
+      drift: (n) =>
+        ok(n === 1 ? driftJson({ sshPort: 63530, servicePort: 63571 }) : driftJson({ sshPort: 64111, servicePort: 64150 })),
+      probe: (n) => (n === 1 ? noRouteToHost(63530) : ok("000")),
+    });
+    const results = await runGpuRemediation({ ...base, exec });
+
+    expect(results[0].outcome).toBe(OUTCOMES.succeeded);
+    expect(results[0].message).toContain(
+      "Note: the Vast SSH port for gpu-1 moved from 63530 to 64111 during this run (stack.json may now be drifted; re-check it).",
+    );
+
+    const report = formatRemediationReport(results);
+    expect(report).toContain("SUCCEEDED");
+    expect(report).toContain("the Vast SSH port for gpu-1 moved from 63530 to 64111 during this run");
+    expect(report).toContain("stack.json may now be drifted");
+  });
+
+  test("a box that finished booting during the retry is left alone (self-recovered)", async () => {
+    const { exec, counts } = makeExec({
+      probe: (n) => (n === 1 ? noRouteToHost() : ok("200")),
+    });
+    const results = await runGpuRemediation({ ...base, exec });
+
+    expect(results[0].outcome).toBe(OUTCOMES.selfRecovered);
+    expect(counts.drift).toBe(2);
+    expect(counts.probe).toBe(2);
+    expect(counts.restart).toBe(0);
   });
 });

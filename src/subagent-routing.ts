@@ -117,14 +117,13 @@ const EFFORT_RANK: Record<string, number> = { none: 0, minimal: 1, low: 2, mediu
 /**
  * Claude-mode Opus enforcement applied to directives that otherwise pass
  * through untouched (Claude overrides): a superseded Opus the user did not
- * name is upgraded to Opus 5.5, and an Opus 5.5 coding dispatch whose effort
- * exceeds the rubric (medium for coding, high for intensive work) without the
- * user asking for an effort is lowered to the rubric level.
+ * name is upgraded to Opus 5.5, and any Opus 5.5 dispatch (whatever the
+ * workload) whose effort exceeds the rubric (high for intensive work, medium
+ * otherwise) without the user asking for an effort is lowered to that level.
  */
 function enforceClaudeOpusDefaults(
   action: DispatchSubagentAction,
-  originText: string,
-  workload: SubagentWorkload
+  originText: string
 ): DispatchSubagentAction {
   let next = action;
   const olderVersion = supersededOpusVersion(next.model);
@@ -132,7 +131,7 @@ function enforceClaudeOpusDefaults(
     next = { ...next, model: CLAUDE_CODING_MODEL };
   }
   const intensive = isIntensiveWork(next);
-  if (isOpus55(next.model) && (workload === "coding" || intensive) && !explicitlyRequestsEffort(originText)) {
+  if (isOpus55(next.model) && !explicitlyRequestsEffort(originText)) {
     const target = intensive ? "high" : "medium";
     if ((EFFORT_RANK[next.effort] ?? 0) > EFFORT_RANK[target]) {
       next = { ...next, effort: target };
@@ -174,14 +173,14 @@ export function normalizeSubagentRouting(
     // is rewritten to the workload default like any other non-explicit choice.
     const unrequestedFable = isFableModel(action.model) && !explicitlyRequestsFable(originText);
     if (!unrequestedFable && isClaudeOrProviderOverride(action)) {
-      const enforced = enforceClaudeOpusDefaults(action, originText, workload);
+      const enforced = enforceClaudeOpusDefaults(action, originText);
       return { action: enforced, changed: changedByFableDefault || enforced !== action, workload };
     }
 
     if (unrequestedFable || !explicitlyRequestsModel(originText)) {
       // Coding runs on Opus 5.5 at medium; very intensive work keeps Opus 5.5
       // at high; everything else runs on Sonnet 5 at high.
-      const defaults = isIntensiveWork(action)
+      const defaults = workload === "coding" && isIntensiveWork(action)
         ? { model: CLAUDE_CODING_MODEL, effort: "high" as const }
         : workload === "coding"
           ? { model: CLAUDE_CODING_MODEL, effort: "medium" as const }

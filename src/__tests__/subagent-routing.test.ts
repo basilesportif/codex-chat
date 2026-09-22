@@ -205,6 +205,31 @@ describe("Claude-main Opus 5.5 enforcement", () => {
     expect(result.changed).toBe(expectedModel !== model || expectedEffort !== effort);
   });
 
+  test("a non-coding Opus directive is still capped at Opus 5.5 medium", () => {
+    const input = action({
+      profile: "operator",
+      prompt: "Look up the next event on the football calendar.",
+      model: "claude-opus-5",
+      effort: "high",
+      serviceTier: "standard",
+      backend: "claude_agent_sdk"
+    });
+    const result = normalizeSubagentRouting(input, "what's next on the football calendar", "claude_agent_sdk");
+    expect(result).toMatchObject({ changed: true, workload: "routine_non_coding" });
+    expect(result.action).toMatchObject({ model: "claude-opus-5-5", effort: "medium" });
+  });
+
+  test.each([
+    // [label, profile, prompt, expected workload, expected model, expected effort]
+    ["non-coding risky work stays on Sonnet high", "operator", "Risky cleanup of the calendar invites.", "routine_non_coding", "claude-sonnet-5", "high"],
+    ["coding high-stakes work goes to Opus 5.5 high", undefined, "High-stakes refactor of the service code.", "coding", "claude-opus-5-5", "high"]
+  ] as const)("default path: %s", (_label, profile, prompt, workload, expectedModel, expectedEffort) => {
+    const input = action({ ...(profile ? { profile } : {}), prompt, model: "gpt-5.6-sol" });
+    const result = normalizeSubagentRouting(input, "do it", "claude_agent_sdk");
+    expect(result).toMatchObject({ changed: true, workload });
+    expect(result.action).toMatchObject({ model: expectedModel, effort: expectedEffort, backend: "claude_agent_sdk" });
+  });
+
   test("Codex mode leaves the same claude-opus-5/high directive untouched", () => {
     const input = action({ prompt: "Fix the bug in src/service.ts.", model: "claude-opus-5", effort: "high", backend: "claude_agent_sdk" });
     expect(normalizeSubagentRouting(input, "fix it")).toEqual({ action: input, changed: false, workload: "coding" });

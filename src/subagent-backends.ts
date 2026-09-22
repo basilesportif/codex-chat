@@ -99,7 +99,7 @@ function claudeNativeAgents(cfg: ClaudeSubagentConfig): Record<string, ClaudeAge
     implementer: {
       description: "Implement a bounded, well-specified coding task: write/edit files and run tests.",
       model: cfg.implementerModel,
-      effort: "high",
+      effort: cfg.implementerEffort,
       background: false,
       tools: ["Read", "Glob", "Grep", "Bash", "Write", "Edit", "MultiEdit"],
       prompt: [
@@ -114,7 +114,7 @@ function claudeNativeAgents(cfg: ClaudeSubagentConfig): Record<string, ClaudeAge
     investigator: {
       description: "Investigate code/repos/logs and report findings; read-only.",
       model: cfg.investigatorModel,
-      effort: "medium",
+      effort: cfg.investigatorEffort,
       background: false,
       tools: ["Read", "Glob", "Grep", "Bash"],
       disallowedTools: ["Write", "Edit", "MultiEdit"],
@@ -128,7 +128,7 @@ function claudeNativeAgents(cfg: ClaudeSubagentConfig): Record<string, ClaudeAge
     reviewer: {
       description: "Review code changes for bugs, regressions, missing tests, and operational risks.",
       model: cfg.reviewerModel,
-      effort: "high",
+      effort: cfg.reviewerEffort,
       background: false,
       tools: ["Read", "Glob", "Grep", "Bash"],
       disallowedTools: ["Write", "Edit", "MultiEdit"],
@@ -167,7 +167,8 @@ function uniqueToolNames(tools: string[]): string[] {
 }
 
 /**
- * Claude fast mode is a premium speed tier available only on Opus models (Opus 5, 4.8, 4.7).
+ * Claude fast mode is a premium speed tier available only on Opus models
+ * (Opus 5.5 and 5 via the `claude-opus-5` prefix, 4.8, 4.7).
  * An empty model means the SDK default — treat it as supported and let the
  * SDK decide. A serviceTier of "fast" on any other Claude model runs at the
  * standard tier; callers surface that downgrade in user-facing status.

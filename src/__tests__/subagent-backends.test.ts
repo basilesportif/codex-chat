@@ -125,6 +125,9 @@ function enableClaude(config: AppConfig): AppConfig {
     implementerModel: "sonnet",
     investigatorModel: "sonnet",
     reviewerModel: "claude-opus-4-8",
+    implementerEffort: "medium",
+    investigatorEffort: "medium",
+    reviewerEffort: "medium",
     permissionMode: "bypassPermissions",
     allowDangerouslySkipPermissions: true,
     allowedTools: ["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep"],
@@ -569,7 +572,7 @@ describe("Claude Agent SDK subagent backend", () => {
       implementer: {
         description: expect.stringContaining("Implement a bounded"),
         model: "haiku",
-        effort: "high",
+        effort: "medium",
         tools: ["Read", "Glob", "Grep", "Bash", "Write", "Edit", "MultiEdit"]
       },
       investigator: {
@@ -582,7 +585,7 @@ describe("Claude Agent SDK subagent backend", () => {
       reviewer: {
         description: expect.stringContaining("Review code changes"),
         model: "claude-opus-4-8",
-        effort: "high",
+        effort: "medium",
         tools: ["Read", "Glob", "Grep", "Bash"],
         disallowedTools: ["Write", "Edit", "MultiEdit"],
         prompt: expect.stringContaining("findings first")
@@ -716,6 +719,7 @@ describe("Claude Agent SDK subagent backend", () => {
   test("fast mode is only applied on models that support it", async () => {
     vi.resetModules();
     const { claudeFastModeSupported } = await import("../subagent-backends.js");
+    expect(claudeFastModeSupported("claude-opus-5-5")).toBe(true); // covered by the claude-opus-5 prefix
     expect(claudeFastModeSupported("claude-opus-5")).toBe(true);
     expect(claudeFastModeSupported("claude-opus-4-8")).toBe(true);
     expect(claudeFastModeSupported("claude-opus-4-7")).toBe(true);

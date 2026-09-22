@@ -274,18 +274,19 @@ definitions, and this repo has no `.claude/agents/` directory.
 built programmatically by `claudeNativeAgents()` in `src/subagent-backends.ts`
 as a `Record<string, AgentDefinition>` passed to the Claude Agent SDK. Each one
 carries its own effort level, tool allowlist, and system prompt, and its model
-comes from `[subagents.claude]` in `config/codex-chat.toml` (schema
+and effort come from `[subagents.claude]` in `config/codex-chat.toml` (schema
 `claudeSubagentSchema` in `src/config.ts`; template in
 `config/codex-chat.example.toml`):
 
-- `implementerModel` = `claude-opus-5`
-- `investigatorModel` = `sonnet`
-- `reviewerModel` = `claude-opus-5`
+- `implementerModel` = `claude-opus-5-5`, `implementerEffort` = `medium`
+- `investigatorModel` = `sonnet`, `investigatorEffort` = `medium`
+- `reviewerModel` = `claude-opus-5-5`, `reviewerEffort` = `medium`
 
 Each can be overridden per-process with
 `CODEX_CHAT_SUBAGENTS_CLAUDE_IMPLEMENTER_MODEL`,
-`CODEX_CHAT_SUBAGENTS_CLAUDE_INVESTIGATOR_MODEL`, and
-`CODEX_CHAT_SUBAGENTS_CLAUDE_REVIEWER_MODEL`.
+`CODEX_CHAT_SUBAGENTS_CLAUDE_INVESTIGATOR_MODEL`,
+`CODEX_CHAT_SUBAGENTS_CLAUDE_REVIEWER_MODEL`, and the matching
+`CODEX_CHAT_SUBAGENTS_CLAUDE_{IMPLEMENTER,INVESTIGATOR,REVIEWER}_EFFORT`.
 
 These three exist only inside dispatched child jobs running on the
 `claude_agent_sdk` backend. The primary Claude main-loop session intentionally
@@ -476,6 +477,16 @@ net. It preserves explicit user model/effort/tier requests and Claude/provider
 overrides. For example, a CRM follow-up mutation emitted accidentally as
 Astra/high is corrected to Sol/medium/standard, while fixing a bug in the CRM
 script is Astra/high/standard.
+
+With the Claude main loop (`main provider claude_agent_sdk`) the same safety
+net keeps coding on Opus 5.5: coding defaults to `claude-opus-5-5`/`medium`,
+very intensive/risky/high-stakes/large-scope work to `claude-opus-5-5`/`high`,
+and everything else to `claude-sonnet-5`/`high`. Claude directives are
+otherwise authoritative, except that a superseded Opus (`claude-opus-5`,
+`claude-opus-4-*`) the user did not name is upgraded to `claude-opus-5-5`, and
+an Opus 5.5 coding dispatch at `high`/`xhigh` effort the user did not ask for
+is lowered to `medium` (`high` for intensive work). Rewrites are logged as
+`routing_normalized`.
 
 The service does not enforce this policy by keyword-blocking final main-loop
 replies. The main Codex loop must choose the route up front, then either reply

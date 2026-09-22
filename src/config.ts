@@ -108,12 +108,19 @@ const employeeDefinitionSchema = z
   })
   .strict();
 
+const claudeNestedEffortSchema = z.enum(["low", "medium", "high", "xhigh"]);
+
 const claudeSubagentSchema = z.object({
   enabled: z.boolean().default(false),
   pathToClaudeCodeExecutable: z.string().default(""),
-  implementerModel: z.string().default("sonnet"),
+  implementerModel: z.string().default("claude-opus-5-5"),
   investigatorModel: z.string().default("sonnet"),
-  reviewerModel: z.string().default("claude-opus-5"),
+  reviewerModel: z.string().default("claude-opus-5-5"),
+  // Reasoning effort for the native nested agents. Medium across the board:
+  // Opus 5.5 at medium is the coding default; raise per role only deliberately.
+  implementerEffort: claudeNestedEffortSchema.default("medium"),
+  investigatorEffort: claudeNestedEffortSchema.default("medium"),
+  reviewerEffort: claudeNestedEffortSchema.default("medium"),
   permissionMode: claudePermissionModeSchema.default("bypassPermissions"),
   allowDangerouslySkipPermissions: z.boolean().default(true),
   allowedTools: z.array(z.string()).default(["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep"]),
@@ -654,6 +661,9 @@ export const ENV_OVERRIDE_SPECS: EnvOverrideSpec[] = [
     { name: "CODEX_CHAT_SUBAGENTS_CLAUDE_IMPLEMENTER_MODEL", path: ["subagents", "claude", "implementerModel"] },
     { name: "CODEX_CHAT_SUBAGENTS_CLAUDE_INVESTIGATOR_MODEL", path: ["subagents", "claude", "investigatorModel"] },
     { name: "CODEX_CHAT_SUBAGENTS_CLAUDE_REVIEWER_MODEL", path: ["subagents", "claude", "reviewerModel"] },
+    { name: "CODEX_CHAT_SUBAGENTS_CLAUDE_IMPLEMENTER_EFFORT", path: ["subagents", "claude", "implementerEffort"] },
+    { name: "CODEX_CHAT_SUBAGENTS_CLAUDE_INVESTIGATOR_EFFORT", path: ["subagents", "claude", "investigatorEffort"] },
+    { name: "CODEX_CHAT_SUBAGENTS_CLAUDE_REVIEWER_EFFORT", path: ["subagents", "claude", "reviewerEffort"] },
     { name: "CODEX_CHAT_SUBAGENTS_CLAUDE_PERMISSION_MODE", path: ["subagents", "claude", "permissionMode"] },
     { name: "CODEX_CHAT_SUBAGENTS_CLAUDE_ALLOWED_TOOLS", path: ["subagents", "claude", "allowedTools"], parse: splitCsvEnv },
     { name: "CODEX_CHAT_SUBAGENTS_CLAUDE_DISALLOWED_TOOLS", path: ["subagents", "claude", "disallowedTools"], parse: splitCsvEnv },

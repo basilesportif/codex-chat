@@ -28,7 +28,7 @@ Use full model IDs in codex-chat dispatches and config examples when pinning beh
 | Purpose | Full Claude API / Agent SDK model string | Claude Code alias notes |
 | --- | --- | --- |
 | Most capable generally available model | `claude-fable-5-1` | `fable`; `best` uses Fable 5.1 when available, otherwise latest Opus. Successor to Fable 5 since 2026-09-01: 1M token context window by default, 128k max output tokens, $10/$50 per MTok with cache reads at $0.25 per MTok. `claude-fable-5` remains available as a pinned older snapshot. Fable may trigger safety fallback for some cyber/bio requests. |
-| Complex agentic coding / enterprise work | `claude-opus-5` | Flagship since 2026-07-24; near-Fable intelligence at half the price, supports fast mode. `opus` resolves to Opus 5 (verified live 2026-07-31). `claude-opus-4-8` remains available as a pinned older snapshot. |
+| Complex agentic coding / enterprise work | `claude-opus-5-5` | Current flagship Opus and the Claude-mode coding default (medium effort; high for very intensive work). Supports fast mode. `opus` resolves to Opus 5.5 on Claude Code 2.1.280+ (Agent SDK 0.3.280+; older bundled CLIs map `opus` to Opus 5). `claude-opus-5` and `claude-opus-4-8` remain available as pinned older snapshots. |
 | Daily coding / speed-intelligence balance | `claude-sonnet-5` | `sonnet` currently resolves to Sonnet 5 on the Anthropic API. |
 | Fast, efficient work | `claude-haiku-4-5-20251001` | alias `claude-haiku-4-5`; Claude Code alias `haiku`. |
 
@@ -37,7 +37,7 @@ Anthropic's current model-ID convention for Claude 4.6 and later uses dateless p
 ## codex-chat dispatch semantics
 
 - `backend: "claude_agent_sdk"` in a `dispatch_subagent` directive routes that single job to Claude. Aliases `"claude"`, `"claude_code"`, and `"claude-agent-sdk"` normalize to the canonical kind. Jobs without a `backend` field use the configured/override default. Explicitly routed queued jobs keep their backend when the runtime override changes.
-- `model` is passed through to the Claude Agent SDK unchanged. For Opus 5, dispatch with `model: "claude-opus-5"`; for Fable 5.1, dispatch with `model: "claude-fable-5-1"`.
+- `model` is passed through to the Claude Agent SDK unchanged. For Opus 5.5, dispatch with `model: "claude-opus-5-5"`; for Fable 5.1, dispatch with `model: "claude-fable-5-1"`.
 - `effort` maps to the Claude SDK `effort` option for `low`, `medium`, `high`, and `xhigh`.
 - `effort: "none"` or `"minimal"` disables Claude thinking. Do not use those with `claude-fable-5-1`, because Fable 5.1 has always-on adaptive thinking and rejects explicit disabled thinking. Prefer `high` for most Fable work and `xhigh` only for the most capability-sensitive workloads.
 - Claude has no Codex `serviceTier` equivalent. codex-chat records the requested tier for observability. When `serviceTier: "fast"` and `[subagents.claude].fastMode = true`, codex-chat passes Claude Code fast-mode settings when the installed SDK supports them; otherwise tier is ignored.
@@ -50,11 +50,11 @@ These are distinct from the `behavior/subagents/*.md` dispatch profiles; see "Di
 
 Every Claude-backed codex-chat child session gets the SDK-native `Agent` tool and three programmatic agent definitions:
 
-- `implementer` writes and edits code, runs relevant tests/builds, and uses `high` effort. Its model comes from `[subagents.claude].implementerModel` (default `sonnet`).
-- `investigator` performs read-only code, repository, and log research with `medium` effort. Its model comes from `[subagents.claude].investigatorModel` (default `sonnet`), and edit tools are explicitly disallowed.
-- `reviewer` performs findings-first, read-only code review with `high` effort. Its model comes from `[subagents.claude].reviewerModel` (default `claude-opus-5`).
+- `implementer` writes and edits code and runs relevant tests/builds. Its model comes from `[subagents.claude].implementerModel` (default `claude-opus-5-5`) and its effort from `implementerEffort` (default `medium`).
+- `investigator` performs read-only code, repository, and log research. Its model comes from `[subagents.claude].investigatorModel` (default `sonnet`) and its effort from `investigatorEffort` (default `medium`); edit tools are explicitly disallowed.
+- `reviewer` performs findings-first, read-only code review. Its model comes from `[subagents.claude].reviewerModel` (default `claude-opus-5-5`) and its effort from `reviewerEffort` (default `medium`).
 
-The corresponding environment overrides are `CODEX_CHAT_SUBAGENTS_CLAUDE_IMPLEMENTER_MODEL`, `CODEX_CHAT_SUBAGENTS_CLAUDE_INVESTIGATOR_MODEL`, and `CODEX_CHAT_SUBAGENTS_CLAUDE_REVIEWER_MODEL`. Aliases and full Claude model IDs are passed through to the SDK unchanged.
+The corresponding environment overrides are `CODEX_CHAT_SUBAGENTS_CLAUDE_IMPLEMENTER_MODEL`, `CODEX_CHAT_SUBAGENTS_CLAUDE_INVESTIGATOR_MODEL`, and `CODEX_CHAT_SUBAGENTS_CLAUDE_REVIEWER_MODEL` (plus `..._IMPLEMENTER_EFFORT`, `..._INVESTIGATOR_EFFORT`, `..._REVIEWER_EFFORT`). Aliases and full Claude model IDs are passed through to the SDK unchanged.
 
 Before the backend pushes the first user message, it appends generated guidance naming these agents, their configured models, their capabilities, the preferred implement-review orchestration pattern, and the foreground/no-early-report rules below. The stored `SubagentJob` prompt is not changed, and later steering messages are not augmented.
 

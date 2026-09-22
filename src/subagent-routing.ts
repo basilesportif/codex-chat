@@ -75,6 +75,72 @@ function explicitlyRequestsFable(text: string): boolean {
   return /\bfable\b/i.test(text);
 }
 
+/** Current flagship Opus for Claude-mode coding/intensive subagents. */
+export const CLAUDE_CODING_MODEL = "claude-opus-5-5";
+
+const INTENSIVE_WORK = /\b(?:very intensive|intensive|high[- ]stakes|risky|large[- ]scope)\b/i;
+
+/**
+ * True when the dispatch describes very intensive / risky / high-stakes /
+ * large-scope work, which keeps high effort on Opus 5.5 (the rubric's
+ * "intensive" tier) instead of the medium coding default.
+ */
+function isIntensiveWork(action: DispatchSubagentAction): boolean {
+  return INTENSIVE_WORK.test(`${action.summary}\n${action.prompt}`);
+}
+
+/**
+ * Version token of an Opus model older than Opus 5.5 (`"5"` for
+ * `claude-opus-5`, `"4-8"` for `claude-opus-4-8`), or undefined when the
+ * model is not a superseded Opus. `claude-opus-5-5`, later Opus releases, and
+ * the `opus` alias (which tracks the newest Opus) are not superseded.
+ */
+function supersededOpusVersion(model: string | undefined): string | undefined {
+  const normalized = (model ?? "").trim().toLowerCase().replace(/\[1m\]$/, "");
+  const match = /^claude-opus-(5|4(?:-\d+)?)(?:-\d{8})?$/.exec(normalized);
+  return match?.[1];
+}
+
+/** True when the user's own message named that specific older Opus. */
+function explicitlyRequestsOpusVersion(version: string, text: string): boolean {
+  // "claude-opus-5" / "Opus 5" must not match inside "claude-opus-5-5" / "Opus 5.5".
+  const versionPattern = version.split("-").join("[.-]");
+  return new RegExp(`\\b(?:claude-)?opus[\\s-]?${versionPattern}(?![.-]?\\d)`, "i").test(text);
+}
+
+function isOpus55(model: string | undefined): boolean {
+  return (model ?? "").trim().toLowerCase().startsWith(CLAUDE_CODING_MODEL);
+}
+
+const EFFORT_RANK: Record<string, number> = { none: 0, minimal: 1, low: 2, medium: 3, high: 4, xhigh: 5 };
+
+/**
+ * Claude-mode Opus enforcement applied to directives that otherwise pass
+ * through untouched (Claude overrides): a superseded Opus the user did not
+ * name is upgraded to Opus 5.5, and an Opus 5.5 coding dispatch whose effort
+ * exceeds the rubric (medium for coding, high for intensive work) without the
+ * user asking for an effort is lowered to the rubric level.
+ */
+function enforceClaudeOpusDefaults(
+  action: DispatchSubagentAction,
+  originText: string,
+  workload: SubagentWorkload
+): DispatchSubagentAction {
+  let next = action;
+  const olderVersion = supersededOpusVersion(next.model);
+  if (olderVersion && !explicitlyRequestsOpusVersion(olderVersion, originText)) {
+    next = { ...next, model: CLAUDE_CODING_MODEL };
+  }
+  const intensive = isIntensiveWork(next);
+  if (isOpus55(next.model) && (workload === "coding" || intensive) && !explicitlyRequestsEffort(originText)) {
+    const target = intensive ? "high" : "medium";
+    if ((EFFORT_RANK[next.effort] ?? 0) > EFFORT_RANK[target]) {
+      next = { ...next, effort: target };
+    }
+  }
+  return next;
+}
+
 export interface NormalizedSubagentRouting {
   action: DispatchSubagentAction;
   changed: boolean;
@@ -108,13 +174,18 @@ export function normalizeSubagentRouting(
     // is rewritten to the workload default like any other non-explicit choice.
     const unrequestedFable = isFableModel(action.model) && !explicitlyRequestsFable(originText);
     if (!unrequestedFable && isClaudeOrProviderOverride(action)) {
-      return { action, changed: changedByFableDefault, workload };
+      const enforced = enforceClaudeOpusDefaults(action, originText, workload);
+      return { action: enforced, changed: changedByFableDefault || enforced !== action, workload };
     }
 
     if (unrequestedFable || !explicitlyRequestsModel(originText)) {
-      const defaults = workload === "coding"
-        ? { model: "claude-opus-5", effort: "high" as const }
-        : { model: "claude-sonnet-5", effort: "high" as const };
+      // Coding runs on Opus 5.5 at medium; very intensive work keeps Opus 5.5
+      // at high; everything else runs on Sonnet 5 at high.
+      const defaults = isIntensiveWork(action)
+        ? { model: CLAUDE_CODING_MODEL, effort: "high" as const }
+        : workload === "coding"
+          ? { model: CLAUDE_CODING_MODEL, effort: "medium" as const }
+          : { model: "claude-sonnet-5", effort: "high" as const };
       const normalized: DispatchSubagentAction = {
         ...action,
         model: defaults.model,

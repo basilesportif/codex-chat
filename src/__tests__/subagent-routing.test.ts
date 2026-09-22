@@ -39,7 +39,7 @@ describe("Claude-main subagent routing enforcement", () => {
     });
   });
 
-  test("rewrites a Sol implementer dispatch for coding work to Opus 5", () => {
+  test("rewrites a Sol implementer dispatch for coding work to Opus 5.5 medium", () => {
     const input = action({
       prompt: "Implement the service code change and run the tests.",
       model: "gpt-5.6-sol",
@@ -51,8 +51,8 @@ describe("Claude-main subagent routing enforcement", () => {
       changed: true,
       workload: "coding",
       action: {
-        model: "claude-opus-5",
-        effort: "high",
+        model: "claude-opus-5-5",
+        effort: "medium",
         serviceTier: "standard",
         backend: "claude_agent_sdk"
       }
@@ -70,7 +70,7 @@ describe("Claude-main subagent routing enforcement", () => {
     expect(normalizeSubagentRouting(coding, "Implement the service code change", "claude_agent_sdk")).toMatchObject({
       changed: true,
       workload: "coding",
-      action: { model: "claude-opus-5", effort: "high", serviceTier: "standard", backend: "claude_agent_sdk" }
+      action: { model: "claude-opus-5-5", effort: "medium", serviceTier: "standard", backend: "claude_agent_sdk" }
     });
 
     const routine = action({
@@ -167,6 +167,47 @@ describe("Claude-main subagent routing enforcement", () => {
       changed: false,
       workload: "unknown"
     });
+  });
+});
+
+describe("Claude-main Opus 5.5 enforcement", () => {
+  test("a main-loop coding directive naming claude-opus-5/high is rewritten to Opus 5.5 medium", () => {
+    const input = action({
+      summary: "Fix the dispatch bug",
+      prompt: "Fix the bug in src/service.ts and run the tests.",
+      model: "claude-opus-5",
+      effort: "high",
+      serviceTier: "standard",
+      backend: "claude_agent_sdk"
+    });
+    expect(normalizeSubagentRouting(input, "please fix that bug", "claude_agent_sdk")).toEqual({
+      action: { ...input, model: "claude-opus-5-5", effort: "medium" },
+      changed: true,
+      workload: "coding"
+    });
+  });
+
+  test.each([
+    // [label, model, effort, prompt, origin, expected model, expected effort]
+    ["older Opus 4.8 upgraded", "claude-opus-4-8", "medium", "Fix the bug in the parser.", "fix it", "claude-opus-5-5", "medium"],
+    ["origin names Opus 5 explicitly", "claude-opus-5", "high", "Fix the bug in the parser.", "use claude-opus-5 for this", "claude-opus-5", "high"],
+    ["origin names Opus 4.8 in prose", "claude-opus-4-8", "high", "Fix the bug in the parser.", "use Opus 4.8 please", "claude-opus-4-8", "high"],
+    ["Opus 5.5 in origin does not count as naming Opus 5", "claude-opus-5", "high", "Fix the bug in the parser.", "use Opus 5.5", "claude-opus-5-5", "medium"],
+    ["opus alias passes through", "opus", "high", "Fix the bug in the parser.", "fix it", "opus", "high"],
+    ["Opus 5.5 coding high lowered to medium", "claude-opus-5-5", "high", "Fix the bug in the parser.", "fix it", "claude-opus-5-5", "medium"],
+    ["explicit effort request preserved", "claude-opus-5-5", "high", "Fix the bug in the parser.", "fix it with high effort", "claude-opus-5-5", "high"],
+    ["intensive work keeps high", "claude-opus-5", "high", "High-stakes refactor of the service code.", "do it", "claude-opus-5-5", "high"],
+    ["intensive xhigh lowered to high", "claude-opus-5-5", "xhigh", "Risky refactor of the service code.", "do it", "claude-opus-5-5", "high"]
+  ] as const)("%s", (_label, model, effort, prompt, origin, expectedModel, expectedEffort) => {
+    const input = action({ summary: prompt, prompt, model, effort, serviceTier: "standard", backend: "claude_agent_sdk" });
+    const result = normalizeSubagentRouting(input, origin, "claude_agent_sdk");
+    expect(result.action).toMatchObject({ model: expectedModel, effort: expectedEffort });
+    expect(result.changed).toBe(expectedModel !== model || expectedEffort !== effort);
+  });
+
+  test("Codex mode leaves the same claude-opus-5/high directive untouched", () => {
+    const input = action({ prompt: "Fix the bug in src/service.ts.", model: "claude-opus-5", effort: "high", backend: "claude_agent_sdk" });
+    expect(normalizeSubagentRouting(input, "fix it")).toEqual({ action: input, changed: false, workload: "coding" });
   });
 });
 

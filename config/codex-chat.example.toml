@@ -163,7 +163,8 @@ cleanupArtifacts = true
 #
 # Model strings are passed through unchanged to the Claude Agent SDK. Prefer
 # pinned Claude IDs for reproducible subagent launches:
-#   claude-opus-5     # Opus 5 (flagship since 2026-07-24); Claude Code alias `opus`
+#   claude-opus-5-5   # Opus 5.5 (current flagship; coding default); Claude Code alias `opus`
+#   claude-opus-5     # Opus 5 (pinned older snapshot)
 #   claude-opus-4-8   # Opus 4.8
 #   claude-fable-5-1  # Fable 5.1 (current Fable since 2026-09-01); Claude Code alias `fable`
 #   claude-fable-5    # Fable 5 (pinned older snapshot)
@@ -176,17 +177,21 @@ cleanupArtifacts = true
 enabled = false
 pathToClaudeCodeExecutable = ""
 # Implementer model alias or full ID; 'sonnet'/'haiku'/'opus'/'fable' resolve to the current family.
-implementerModel = "sonnet"
+implementerModel = "claude-opus-5-5"
 # Investigator model alias or full ID; 'sonnet'/'haiku'/'opus'/'fable' resolve to the current family.
 investigatorModel = "sonnet"
 # Reviewer model alias or full ID; 'sonnet'/'haiku'/'opus'/'fable' resolve to the current family.
-reviewerModel = "claude-opus-5"
+reviewerModel = "claude-opus-5-5"
+# Nested agent reasoning effort (low|medium|high|xhigh). Defaults: medium for all three.
+implementerEffort = "medium"
+investigatorEffort = "medium"
+reviewerEffort = "medium"
 permissionMode = "bypassPermissions"
 allowDangerouslySkipPermissions = true
 # codex-chat also injects the Claude SDK native "Agent" tool for all
 # Claude-backed jobs so they can launch service-owned programmatic SDK agents.
 # The built-in implementer, investigator, and reviewer models are configured
-# above; each definition has a role-specific effort and tool set.
+# above; each definition has its configured effort and a role-specific tool set.
 allowedTools = ["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep"]
 disallowedTools = []
 maxTurns = 100

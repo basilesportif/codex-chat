@@ -146,9 +146,12 @@ userIds = [12345]
     expect(config.subagents.claude).toMatchObject({
       enabled: false,
       pathToClaudeCodeExecutable: "",
-      implementerModel: "sonnet",
+      implementerModel: "claude-opus-5-5",
       investigatorModel: "sonnet",
-      reviewerModel: "claude-opus-5",
+      reviewerModel: "claude-opus-5-5",
+      implementerEffort: "medium",
+      investigatorEffort: "medium",
+      reviewerEffort: "medium",
       permissionMode: "bypassPermissions",
       allowDangerouslySkipPermissions: true,
       allowedTools: ["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep"],
@@ -193,9 +196,12 @@ maxThreadMessages = 5
     expect(config.subagents.claude).toEqual({
       enabled: false,
       pathToClaudeCodeExecutable: "",
-      implementerModel: "sonnet",
+      implementerModel: "claude-opus-5-5",
       investigatorModel: "sonnet",
-      reviewerModel: "claude-opus-5",
+      reviewerModel: "claude-opus-5-5",
+      implementerEffort: "medium",
+      investigatorEffort: "medium",
+      reviewerEffort: "medium",
       permissionMode: "bypassPermissions",
       allowDangerouslySkipPermissions: true,
       allowedTools: ["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep"],
@@ -448,6 +454,7 @@ fastMode = false
     process.env.CODEX_CHAT_SUBAGENTS_CLAUDE_IMPLEMENTER_MODEL = "haiku";
     process.env.CODEX_CHAT_SUBAGENTS_CLAUDE_INVESTIGATOR_MODEL = "claude-sonnet-5";
     process.env.CODEX_CHAT_SUBAGENTS_CLAUDE_REVIEWER_MODEL = "opus";
+    process.env.CODEX_CHAT_SUBAGENTS_CLAUDE_REVIEWER_EFFORT = "high";
     process.env.CODEX_CHAT_SUBAGENTS_CLAUDE_PERMISSION_MODE = "plan";
     process.env.CODEX_CHAT_SUBAGENTS_CLAUDE_ALLOWED_TOOLS = "Read, Glob";
     process.env.CODEX_CHAT_SUBAGENTS_CLAUDE_DISALLOWED_TOOLS = "Bash";
@@ -463,6 +470,7 @@ fastMode = false
       implementerModel: "haiku",
       investigatorModel: "claude-sonnet-5",
       reviewerModel: "opus",
+      reviewerEffort: "high",
       permissionMode: "plan",
       allowedTools: ["Read", "Glob"],
       disallowedTools: ["Bash"],

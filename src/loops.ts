@@ -66,6 +66,15 @@ export type LoopDefinition = z.infer<typeof loopSchema>;
 export type LoopsConfig = z.infer<typeof loopsConfigSchema>;
 
 const LOOP_SHUTDOWN_DRAIN_MS = 10_000;
+export const LOOP_ALREADY_RUNNING_NOTIFY_THROTTLE_MS = 60 * 60 * 1000;
+export const LOOP_UNEXPECTED_ERROR_NOTIFY_THROTTLE_MS = 15 * 60 * 1000;
+
+export class LoopAlreadyRunningError extends Error {
+  constructor(readonly loopId: string) {
+    super(`Loop already running: ${loopId}`);
+    this.name = "LoopAlreadyRunningError";
+  }
+}
 
 interface LoopCallbacks {
   enqueueMain(text: string, metadata?: Record<string, unknown>): Promise<void>;
@@ -182,6 +191,7 @@ export class LoopManager {
   private readonly activeLoopIds = new Set<string>();
   private readonly activeCommandChildren = new Set<ChildProcess>();
   private readonly activeRunPromises = new Set<Promise<void>>();
+  private readonly unexpectedErrorNotifiedAt = new Map<string, number>();
   private shuttingDown = false;
 
   constructor(
@@ -246,13 +256,17 @@ export class LoopManager {
     if (!loop) throw new Error(`Loop not found or disabled: ${loopId}`);
     const route = (loop.route ?? loops.defaults.route ?? "return_to_main") as Route;
     const lock = loop.lock ?? loops.defaults.lock;
-    if (lock) {
-      if (this.activeLoopIds.has(loop.id)) throw new Error(`Loop already running: ${loop.id}`);
-      this.activeLoopIds.add(loop.id);
-    }
     const run: LoopRun = { id: makeId("loop"), loopId, status: "running", scheduledAt, startedAt: nowIso(), route };
-    await this.state.saveLoopRun(run);
+    // Overlap check must not touch the lock: it belongs to the other, still-running invocation.
+    if (lock && this.activeLoopIds.has(loop.id)) throw new LoopAlreadyRunningError(loop.id);
+    let acquired = false;
+    let failureNotified = false;
+    if (lock) {
+      this.activeLoopIds.add(loop.id);
+      acquired = true;
+    }
     try {
+      await this.state.saveLoopRun(run);
       if (loop.type === "prompt") await this.handlePrompt(loop, route, run, loops.defaults);
       if (loop.type === "command") await this.handleCommand(loop, route, run, loops.defaults);
       if (loop.type === "dispatch_subagent") await this.handleDispatch(loop, route, run, loops.defaults);
@@ -265,13 +279,57 @@ export class LoopManager {
         this.logger.info({ component: "loops", event: "run_interrupted", loopId, error }, "loop interrupted by service shutdown");
       } else {
         run.status = "failed";
-        if (loop.notifyOnFailure) await this.callbacks.sendAdmins(`Loop ${loop.id} failed: ${run.error}`);
         this.logger.error({ component: "loops", event: "run_failed", loopId, error }, "loop failed");
+        if (loop.notifyOnFailure) {
+          failureNotified = true;
+          await this.safeSendAdmins(`Loop ${loop.id} failed: ${run.error}`, loopId);
+        }
       }
     } finally {
-      if (lock) this.activeLoopIds.delete(loop.id);
+      if (acquired) this.activeLoopIds.delete(loop.id);
       run.completedAt = nowIso();
-      await this.state.saveLoopRun(run);
+      try {
+        await this.state.saveLoopRun(run);
+      } catch (saveError) {
+        this.logger.error({ component: "loops", event: "run_save_failed", loopId, runId: run.id, status: run.status, error: saveError }, "failed to persist final loop run state");
+        if (loop.notifyOnFailure && !failureNotified) {
+          const message = saveError instanceof Error ? saveError.message : String(saveError);
+          await this.safeSendAdmins(`Loop ${loop.id} run ${run.status} but its final state could not be saved: ${message}`, loopId);
+        }
+      }
+    }
+  }
+
+  /**
+   * Throttled admin notification for loop invocations that failed outside the
+   * normal run-failure path (e.g. lock already held, config missing). Never throws.
+   * LoopAlreadyRunningError is throttled hourly per loop so a legitimately long run
+   * doesn't spam, while a persistently stuck lock still re-alerts every hour.
+   */
+  async notifyUnexpectedRunError(loopId: string, error: unknown, source: string, now = Date.now()): Promise<boolean> {
+    const alreadyRunning = error instanceof LoopAlreadyRunningError;
+    const key = `${loopId}:${alreadyRunning ? "already_running" : "error"}`;
+    const windowMs = alreadyRunning ? LOOP_ALREADY_RUNNING_NOTIFY_THROTTLE_MS : LOOP_UNEXPECTED_ERROR_NOTIFY_THROTTLE_MS;
+    const last = this.unexpectedErrorNotifiedAt.get(key);
+    if (last !== undefined && now - last < windowMs) {
+      this.logger.debug({ component: "loops", event: "unexpected_error_notify_throttled", loopId, source }, "loop error admin notification throttled");
+      return false;
+    }
+    this.unexpectedErrorNotifiedAt.set(key, now);
+    const message = error instanceof Error ? error.message : String(error);
+    const text = alreadyRunning
+      ? `Loop ${loopId} was skipped (${source}): a previous run still holds its lock. If this repeats, the lock may be stuck and the loop is not running.`
+      : `Loop ${loopId} could not run (${source}): ${message}`;
+    return this.safeSendAdmins(text, loopId);
+  }
+
+  private async safeSendAdmins(text: string, loopId: string): Promise<boolean> {
+    try {
+      await this.callbacks.sendAdmins(text);
+      return true;
+    } catch (notifyError) {
+      this.logger.error({ component: "loops", event: "admin_notify_failed", loopId, error: notifyError }, "failed to notify admins about loop");
+      return false;
     }
   }
 
@@ -282,9 +340,11 @@ export class LoopManager {
     for (const file of (await readdir(spoolDir)).sort()) {
       if (!file.endsWith(".json")) continue;
       const path = join(spoolDir, file);
+      let spooledLoopId: string | undefined;
       try {
         const body = JSON.parse(await readFile(path, "utf8")) as { loopId?: string; scheduledAt?: string };
         if (!body.loopId) throw new Error("Spooled loop run is missing loopId");
+        spooledLoopId = body.loopId;
         const scheduledAt = body.scheduledAt ?? nowIso();
         const dedupeKey = `${body.loopId}:${scheduledAt}`;
         if (seen.has(dedupeKey)) {
@@ -306,6 +366,7 @@ export class LoopManager {
           this.logger.error({ component: "loops", event: "spool_quarantine_failed", file, error: quarantineError }, "failed to quarantine spooled loop run");
         });
         this.logger.error({ component: "loops", event: "spool_run_failed", file, error }, "spooled loop run failed");
+        await this.notifyUnexpectedRunError(spooledLoopId ?? file, error, "spool replay");
       }
     }
   }

@@ -703,6 +703,9 @@ export class ServiceSupervisor {
       if (message.type === "loop_run") {
         void this.loops.handleRun(message.loopId, message.scheduledAt).catch((error) => {
           this.logger.error({ component: "loops", event: "async_run_failed", loopId: message.loopId, error }, "asynchronous loop run failed");
+          void this.loops.notifyUnexpectedRunError(message.loopId, error, "scheduled run").catch((notifyError) => {
+            this.logger.error({ component: "loops", event: "async_run_notify_failed", loopId: message.loopId, error: notifyError }, "failed to notify admins about loop run failure");
+          });
         });
         return { enqueued: true };
       }

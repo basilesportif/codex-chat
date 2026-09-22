@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import type { AppConfig } from "../config.js";
-import { buildManagedCronText, formatLoopsStatus, generateCronLines, loadLoopsConfig, LoopManager, runLoopCli, type LoopsConfig } from "../loops.js";
+import { buildManagedCronText, formatLoopsStatus, generateCronLines, loadLoopsConfig, LOOP_ALREADY_RUNNING_NOTIFY_THROTTLE_MS, LOOP_UNEXPECTED_ERROR_NOTIFY_THROTTLE_MS, LoopAlreadyRunningError, LoopManager, runLoopCli, type LoopsConfig } from "../loops.js";
 import { StateStore } from "../state.js";
 
 const tempDirs: string[] = [];
@@ -336,6 +336,149 @@ test("spools a durable loop run when reading the IPC token fails", async () => {
   expect(payload.error).toContain("EISDIR");
 });
 
+describe("loop run lock and failure handling", () => {
+  const lockedDispatchLoops = {
+    version: 1,
+    loops: [{
+      id: "locked",
+      enabled: true,
+      schedule: "*/5 * * * *",
+      type: "dispatch_subagent",
+      prompt: "work",
+      notifyOnFailure: true
+    }]
+  };
+
+  test("releases the lock and notifies admins when the initial run save fails", async () => {
+    const config = await writeLoops(lockedDispatchLoops);
+    const adminMessages: string[] = [];
+    let dispatches = 0;
+    const { manager, state } = await createLoopManager(config, {
+      sendAdmins: async (text) => { adminMessages.push(text); },
+      dispatchSubagent: async () => { dispatches += 1; }
+    });
+    const originalSave = state.saveLoopRun.bind(state);
+    let saveCalls = 0;
+    state.saveLoopRun = async (run) => {
+      saveCalls += 1;
+      if (saveCalls === 1) throw Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
+      return originalSave(run);
+    };
+
+    await expect(manager.handleRun("locked")).resolves.toBeUndefined();
+
+    expect(dispatches).toBe(0);
+    expect(adminMessages).toEqual(["Loop locked failed: ENOSPC: no space left on device"]);
+    const [failedRun] = await state.listLoopRuns();
+    expect(failedRun).toMatchObject({ loopId: "locked", status: "failed", error: "ENOSPC: no space left on device" });
+
+    await expect(manager.handleRun("locked")).resolves.toBeUndefined();
+    expect(dispatches).toBe(1);
+    expect((await state.listLoopRuns()).map((run) => run.status).sort()).toEqual(["completed", "failed"]);
+  });
+
+  test("does not throw out of finally or double-notify when the final save also fails", async () => {
+    const config = await writeLoops(lockedDispatchLoops);
+    const adminMessages: string[] = [];
+    let dispatches = 0;
+    const { manager, state } = await createLoopManager(config, {
+      sendAdmins: async (text) => { adminMessages.push(text); throw new Error("telegram down"); },
+      dispatchSubagent: async () => { dispatches += 1; }
+    });
+    const originalSave = state.saveLoopRun.bind(state);
+    let failSaves = true;
+    state.saveLoopRun = async (run) => {
+      if (failSaves) throw new Error("ENOSPC");
+      return originalSave(run);
+    };
+
+    await expect(manager.handleRun("locked")).resolves.toBeUndefined();
+    expect(adminMessages).toEqual(["Loop locked failed: ENOSPC"]);
+
+    failSaves = false;
+    await expect(manager.handleRun("locked")).resolves.toBeUndefined();
+    expect(dispatches).toBe(1);
+  });
+
+  test("notifies admins when only the final save fails", async () => {
+    const config = await writeLoops(lockedDispatchLoops);
+    const adminMessages: string[] = [];
+    const { manager, state } = await createLoopManager(config, {
+      sendAdmins: async (text) => { adminMessages.push(text); }
+    });
+    const originalSave = state.saveLoopRun.bind(state);
+    let saveCalls = 0;
+    state.saveLoopRun = async (run) => {
+      saveCalls += 1;
+      if (saveCalls === 2) throw new Error("ENOSPC");
+      return originalSave(run);
+    };
+
+    await expect(manager.handleRun("locked")).resolves.toBeUndefined();
+    expect(adminMessages).toEqual(["Loop locked run completed but its final state could not be saved: ENOSPC"]);
+  });
+
+  test("overlapping run throws LoopAlreadyRunningError without releasing the first run's lock", async () => {
+    const config = await writeLoops(lockedDispatchLoops);
+    let releaseFirst: () => void = () => undefined;
+    let dispatches = 0;
+    const { manager, state } = await createLoopManager(config, {
+      dispatchSubagent: async () => {
+        dispatches += 1;
+        if (dispatches === 1) await new Promise<void>((resolve) => { releaseFirst = resolve; });
+      }
+    });
+
+    const first = manager.handleRun("locked");
+    await waitFor(async () => dispatches === 1);
+
+    const overlap = manager.handleRun("locked");
+    await expect(overlap).rejects.toBeInstanceOf(LoopAlreadyRunningError);
+    await expect(overlap).rejects.toThrow("Loop already running: locked");
+    // The first run's lock must still be held.
+    await expect(manager.handleRun("locked")).rejects.toBeInstanceOf(LoopAlreadyRunningError);
+    expect(dispatches).toBe(1);
+
+    releaseFirst();
+    await first;
+    await expect(manager.handleRun("locked")).resolves.toBeUndefined();
+    expect(dispatches).toBe(2);
+    expect((await state.listLoopRuns()).filter((run) => run.status === "completed")).toHaveLength(2);
+  });
+
+  test("throttles unexpected loop error notifications per loop and error kind", async () => {
+    const config = await writeLoops(lockedDispatchLoops);
+    const adminMessages: string[] = [];
+    const { manager } = await createLoopManager(config, {
+      sendAdmins: async (text) => { adminMessages.push(text); }
+    });
+    const t0 = 1_000_000;
+    const busy = new LoopAlreadyRunningError("locked");
+
+    expect(await manager.notifyUnexpectedRunError("locked", busy, "scheduled run", t0)).toBe(true);
+    expect(await manager.notifyUnexpectedRunError("locked", busy, "scheduled run", t0 + 5 * 60_000)).toBe(false);
+    expect(await manager.notifyUnexpectedRunError("other", new LoopAlreadyRunningError("other"), "scheduled run", t0)).toBe(true);
+    expect(await manager.notifyUnexpectedRunError("locked", new Error("boom"), "scheduled run", t0)).toBe(true);
+    expect(await manager.notifyUnexpectedRunError("locked", new Error("boom"), "scheduled run", t0 + LOOP_UNEXPECTED_ERROR_NOTIFY_THROTTLE_MS - 1)).toBe(false);
+    expect(await manager.notifyUnexpectedRunError("locked", new Error("boom"), "scheduled run", t0 + LOOP_UNEXPECTED_ERROR_NOTIFY_THROTTLE_MS)).toBe(true);
+    // A persistently stuck lock re-alerts hourly.
+    expect(await manager.notifyUnexpectedRunError("locked", busy, "scheduled run", t0 + LOOP_ALREADY_RUNNING_NOTIFY_THROTTLE_MS)).toBe(true);
+
+    expect(adminMessages).toHaveLength(5);
+    expect(adminMessages[0]).toContain("Loop locked was skipped (scheduled run)");
+    expect(adminMessages[2]).toBe("Loop locked could not run (scheduled run): boom");
+  });
+
+  test("unexpected error notification swallows admin notification failures", async () => {
+    const config = await writeLoops(lockedDispatchLoops);
+    const { manager } = await createLoopManager(config, {
+      sendAdmins: async () => { throw new Error("telegram down"); }
+    });
+
+    await expect(manager.notifyUnexpectedRunError("locked", new Error("boom"), "scheduled run")).resolves.toBe(false);
+  });
+});
+
 describe("loop spool replay", () => {
   test("deletes spool files after successful replay", async () => {
     const config = await writeLoops({
@@ -367,8 +510,11 @@ describe("loop spool replay", () => {
     await mkdir(spoolDir, { recursive: true });
     const spoolFile = join(spoolDir, "1000-missing.json");
     await writeFile(spoolFile, JSON.stringify({ loopId: "missing", scheduledAt: new Date().toISOString() }));
+    const adminMessages: string[] = [];
 
-    await processSpooled(config);
+    await processSpooled(config, { sendAdmins: async (text) => { adminMessages.push(text); } });
+
+    expect(adminMessages).toEqual(["Loop missing could not run (spool replay): Loop not found or disabled: missing"]);
 
     expect(await exists(spoolFile)).toBe(false);
     const quarantined = await readdir(join(config.rootDir, "data", "spool", "loops-quarantine", "failed"));

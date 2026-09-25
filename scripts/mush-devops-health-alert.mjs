@@ -87,7 +87,18 @@ async function main() {
     process.exit(run.exitCode || 1);
   }
 
-  const findings = collectFindings(payload.value, { lowBalanceThreshold });
+  // Re-check HTTP targets that only failed on a transient SSH drop. Any bug here must degrade to
+  // the old behaviour (alert on the raw payload), never to silence or a crash.
+  let findingsPayload = payload.value;
+  try {
+    findingsPayload = await resolveTransientHttpFailures(payload.value, {
+      runner: (componentId) => runRemoteComponentHealthCheck({ host, remoteDir, componentId, timeoutSec }),
+    });
+  } catch (error) {
+    console.error(`mush-devops health: transient SSH retry failed, using first result: ${errorText(error)}`);
+  }
+
+  const findings = collectFindings(findingsPayload, { lowBalanceThreshold });
 
   // Auto-remediation must never take the plain alert down with it: a bug here degrades to a
   // short "auto-remediation itself failed" note appended to the findings Tim would have gotten
@@ -116,6 +127,32 @@ async function main() {
 
   const alert = formatAlert({ checkedAt: payload.value.checkedAt, host, remoteDir, findings });
   console.log(remediationSection ? `${alert}\n${remediationSection}` : alert);
+}
+
+/**
+ * Production retry runner: re-run ONLY the HTTP health check for one component on the mush-devops
+ * box (`scripts/health-check.js --component <id> --json`) and return its fresh `results[]`.
+ * health-check.js exits 1 whenever anything is failing, so the exit code is ignored and the JSON
+ * is what counts. Throws when no JSON comes back (e.g. the jump host itself is unreachable).
+ */
+async function runRemoteComponentHealthCheck({ host, remoteDir, componentId, timeoutSec }) {
+  const remoteCommand = [
+    `cd ${shellQuote(remoteDir)}`,
+    "set -a",
+    "{ [ ! -f .env ] || . ./.env; }",
+    "set +a",
+    `node scripts/health-check.js --component ${shellQuote(componentId)} --json`,
+  ].join(" && ");
+  const run = await runCommand(
+    "ssh",
+    ["-o", "BatchMode=yes", "-o", "ConnectTimeout=20", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=2", host, remoteCommand],
+    Math.min(timeoutSec, 120) * 1000,
+  );
+  const parsed = parseJsonOutput(run.stdout);
+  if (!parsed.ok || !Array.isArray(parsed.value?.results)) {
+    throw new Error(`${parsed.error || "no results array"} (exit ${run.exitCode ?? "unknown"}) ${preview(run.stderr).slice(0, 200)}`);
+  }
+  return parsed.value.results;
 }
 
 /**
@@ -506,8 +543,252 @@ function collectHttpFindings(check, findings) {
     if (result.status === "healthy" || result.status === "skipped") continue;
     if (result.error === NO_TARGET_ERROR) continue;
 
+    // Set only by `resolveTransientHttpFailures` (see below). A plain payload never carries it, so
+    // collectFindings on a raw payload behaves exactly as it always did.
+    const transient = result[TRANSIENT_SSH_MARKER];
+    if (transient?.outcome === "suppressed") continue;
+    if (transient?.outcome === "inconclusive") {
+      findings.push(formatInconclusiveHttpFinding(result, transient));
+      continue;
+    }
+
     findings.push(formatHttpFinding(result));
   }
+}
+
+// ---------------------------------------------------------------------------
+// Transient SSH transport failures on HTTP targets
+//
+// Some HTTP targets (e.g. the staging load balancer) are checked by SSHing into the box and curling
+// a loopback admin endpoint. When internet scanning bots saturate that box's sshd, new connections
+// are dropped ("kex_exchange_identification: ... Exceeded MaxStartups", "Connection closed by <ip>
+// port 22") before any HTTP request is made. That says nothing about the service, so those results
+// are re-checked a couple of times before anything is reported, and if every attempt dies the same
+// way the finding is downgraded to an "inconclusive" warning instead of "HTTP health unreachable".
+//
+// Remote result shape (mush-devops scripts/lib/health-engine.js `formatResult`):
+//   { componentId, componentName, instance, url, status, responseTimeMs, httpStatus, error, attempts }
+// For SSH transport, `error` is the trimmed ssh stderr (or the execFile message when stderr was
+// empty). There is no separate stderr / exit-code field today; `exitCode`/`sshExitCode`/`stderr` are
+// honoured when present so a future producer that adds them keeps working.
+// ---------------------------------------------------------------------------
+
+export const TRANSIENT_SSH_MARKER = "transientSsh";
+export const TRANSIENT_SSH_MAX_ATTEMPTS = 3;
+/** Base backoff before retry #1 and retry #2; each is jittered by +/-25%. */
+export const TRANSIENT_SSH_BACKOFF_MS = [2000, 5000];
+export const HTTP_INCONCLUSIVE_STATE_PATH = path.join(
+  REPO_ROOT,
+  "data/state/mush_devops_http_inconclusive.json",
+);
+
+/** sshd dropped the connection before the session (and therefore before any HTTP request). */
+export const TRANSIENT_SSH_PATTERNS = [
+  /Connection closed by \S+ port \d+/i,
+  /kex_exchange_identification/i,
+  /ssh_exchange_identification/i,
+  /Exceeded MaxStartups/i,
+  /Connection reset by \S+ port \d+/i,
+  /Connection timed out during banner exchange/i,
+];
+
+/**
+ * Anything here is a real failure even if a transient phrase also appears: auth problems, a host
+ * that is down or unroutable, DNS, and anything curl itself reported (which means SSH worked and the
+ * service did not — e.g. "curl: (7) ... Connection refused" or "curl: (56) Connection reset by peer").
+ */
+export const HARD_SSH_FAILURE_PATTERNS = [
+  /Permission denied/i,
+  /Authentication failed/i,
+  /Host key verification failed/i,
+  /No route to host/i,
+  /Could not resolve hostname/i,
+  /Name or service not known/i,
+  /Connection refused/i,
+  /connect to host \S+ port \d+: (Connection|Operation) timed out/i,
+  /Network is unreachable/i,
+  /\bcurl: \(\d+\)/i,
+];
+
+/**
+ * Pure classifier: true only when an HTTP target failed before any HTTP response was received and
+ * its error text is an SSH transport drop (see TRANSIENT_SSH_PATTERNS) with no hard-failure signal.
+ */
+export function isTransientSshTransportFailure(result) {
+  if (!result || typeof result !== "object") return false;
+  if (result.status === "healthy" || result.status === "skipped") return false;
+  // Any HTTP status means the request reached the service; that is a real answer, never transient.
+  if (result.httpStatus != null) return false;
+
+  // ssh exits 255 for its own errors; any other exit code is the remote command's (e.g. curl's), so
+  // the connection was established.
+  for (const field of ["sshExitCode", "exitCode"]) {
+    const code = result[field];
+    if (code != null && code !== "" && Number(code) !== 255) return false;
+  }
+
+  const text = [result.error, result.stderr]
+    .filter((value) => typeof value === "string" && value.trim() !== "")
+    .join("\n");
+  if (!text) return false;
+  if (HARD_SSH_FAILURE_PATTERNS.some((pattern) => pattern.test(text))) return false;
+  return TRANSIENT_SSH_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+function httpResultKey(result) {
+  return `${result?.componentId ?? ""}::${result?.instance ?? ""}`;
+}
+
+function jitteredDelay(baseMs, random) {
+  const r = Number(random());
+  const factor = 0.75 + 0.5 * (Number.isFinite(r) ? Math.min(Math.max(r, 0), 1) : 0.5);
+  return Math.round(baseMs * factor);
+}
+
+/**
+ * Re-check HTTP targets that failed only with a transient SSH transport error, and return a payload
+ * whose `http` results carry the outcome. The input payload is never mutated.
+ *
+ *  - a retry that comes back healthy replaces the result (so it produces no finding);
+ *  - a retry that comes back with a real (non-transient) failure replaces the result (so it is
+ *    reported exactly like any other failure);
+ *  - if all TRANSIENT_SSH_MAX_ATTEMPTS attempts are transient, the result is marked
+ *    `transientSsh.outcome = "inconclusive"` (lower-severity warning), or `"suppressed"` the first
+ *    time it happens, when the consecutive-run gate is on: it only alerts on the 2nd consecutive run.
+ *
+ * `runner(componentId)` must resolve to the fresh `results[]` of
+ * `node scripts/health-check.js --component <id> --json` on the mush-devops box. `sleep`, `random`,
+ * `log` (stderr) and the gate state helpers are injectable for tests.
+ */
+export async function resolveTransientHttpFailures(payload, options = {}) {
+  const runner = options.runner;
+  const sleep = options.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const random = options.random || Math.random;
+  const log = options.log || ((line) => console.error(line));
+  const maxAttempts = options.maxAttempts || TRANSIENT_SSH_MAX_ATTEMPTS;
+  const backoffMs = options.backoffMs || TRANSIENT_SSH_BACKOFF_MS;
+  const gate = options.requireConsecutive !== false;
+  const statePath = options.inconclusiveStatePath || HTTP_INCONCLUSIVE_STATE_PATH;
+  const readState = options.readInconclusiveState || readInconclusiveState;
+  const writeState = options.writeInconclusiveState || writeInconclusiveState;
+
+  if (!payload || !Array.isArray(payload.results)) return payload;
+  const httpIndex = payload.results.findIndex((check) => check?.key === "http");
+  const httpCheck = httpIndex >= 0 ? payload.results[httpIndex] : null;
+  if (!httpCheck || !Array.isArray(httpCheck.parsed?.results)) return payload;
+
+  const current = httpCheck.parsed.results.map((result) => result);
+  // Index of every result still stuck on a transient SSH error, keyed by component+instance.
+  let pending = [];
+  current.forEach((result, index) => {
+    if (result?.componentId && isTransientSshTransportFailure(result)) pending.push(index);
+  });
+
+  if (pending.length > 0 && typeof runner === "function") {
+    for (let attempt = 2; attempt <= maxAttempts && pending.length > 0; attempt += 1) {
+      const delay = jitteredDelay(backoffMs[Math.min(attempt - 2, backoffMs.length - 1)] ?? 2000, random);
+      await sleep(delay);
+
+      const components = [...new Set(pending.map((index) => current[index].componentId))];
+      const stillPending = [];
+      for (const componentId of components) {
+        let fresh = null;
+        try {
+          fresh = await runner(componentId);
+        } catch (error) {
+          log(`mush-devops health: retry ${attempt}/${maxAttempts} for ${componentId} could not run: ${errorText(error)}`);
+        }
+        for (const index of pending.filter((i) => current[i].componentId === componentId)) {
+          const previous = current[index];
+          const match = Array.isArray(fresh)
+            ? fresh.find((candidate) => httpResultKey(candidate) === httpResultKey(previous))
+            : null;
+          if (!match) {
+            // No fresh evidence at all (runner failed or target missing): still unresolved.
+            stillPending.push(index);
+            continue;
+          }
+          current[index] = match;
+          if (isTransientSshTransportFailure(match)) {
+            stillPending.push(index);
+          } else if (match.status === "healthy" || match.status === "skipped") {
+            log(
+              `mush-devops health: ${previous.componentName || componentId} recovered on retry ${attempt}/${maxAttempts} ` +
+                `after a transient SSH failure; no alert.`,
+            );
+          }
+        }
+      }
+      pending = stillPending;
+    }
+  }
+
+  const inconclusiveKeys = pending.map((index) => httpResultKey(current[index]));
+  let previousKeys = [];
+  if (gate) {
+    try {
+      previousKeys = readState(statePath);
+    } catch (error) {
+      log(`mush-devops health: could not read ${statePath}: ${errorText(error)}`);
+    }
+    const unchanged =
+      previousKeys.length === inconclusiveKeys.length &&
+      previousKeys.every((key) => inconclusiveKeys.includes(key));
+    if (!unchanged) {
+      try {
+        writeState(statePath, inconclusiveKeys);
+      } catch (error) {
+        log(`mush-devops health: could not write ${statePath}: ${errorText(error)}`);
+      }
+    }
+  }
+
+  const attempts = typeof runner === "function" ? maxAttempts : 1;
+  for (const index of pending) {
+    const result = current[index];
+    const key = httpResultKey(result);
+    const outcome = !gate || previousKeys.includes(key) ? "inconclusive" : "suppressed";
+    if (outcome === "suppressed") {
+      log(
+        `mush-devops health: ${result.componentName || result.componentId} check inconclusive (SSH transient failure ` +
+          `after ${attempts} attempts: ${preview(result.error).slice(0, 160)}); silent until it repeats next run.`,
+      );
+    }
+    current[index] = { ...result, [TRANSIENT_SSH_MARKER]: { outcome, attempts } };
+  }
+
+  const results = payload.results.slice();
+  results[httpIndex] = { ...httpCheck, parsed: { ...httpCheck.parsed, results: current } };
+  return { ...payload, results };
+}
+
+function formatInconclusiveHttpFinding(result, transient) {
+  const label = [result.componentName || result.componentId || "Unknown component", result.instance]
+    .filter(Boolean)
+    .join(" / ");
+  const detail = preview(String(result.error || "").replace(/\s+/g, " ").trim()).slice(0, 160);
+  return (
+    `Warning: ${label} check inconclusive — SSH transient failure after ${transient.attempts} attempts ` +
+    `(${detail}); service itself not verified.`
+  );
+}
+
+/** Keys (componentId::instance) that were inconclusive last run. Missing/corrupt file => []. */
+export function readInconclusiveState(filePath) {
+  try {
+    const parsed = JSON.parse(readFileSync(filePath, "utf8"));
+    return Array.isArray(parsed?.keys) ? parsed.keys.filter((key) => typeof key === "string") : [];
+  } catch (_error) {
+    return [];
+  }
+}
+
+export function writeInconclusiveState(filePath, keys) {
+  const dir = path.dirname(filePath);
+  mkdirSync(dir, { recursive: true, mode: 0o755 });
+  const tmp = path.join(dir, `.${path.basename(filePath)}.${process.pid}.${Date.now()}.tmp`);
+  writeFileSync(tmp, `${JSON.stringify({ version: 1, keys: keys.slice(0, 32) }, null, 2)}\n`, { mode: 0o644 });
+  renameSync(tmp, filePath);
 }
 
 function collectVastStatusFindings(check, findings, lowBalanceThreshold) {

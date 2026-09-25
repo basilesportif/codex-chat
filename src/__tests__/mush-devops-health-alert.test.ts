@@ -27,6 +27,8 @@ type HealthAlertModule = {
     gatewaySshOverride: string | null;
   };
   runRemediationPhase(options: Record<string, unknown>): Promise<string>;
+  isTransientSshTransportFailure(result: unknown): boolean;
+  resolveTransientHttpFailures(payload: unknown, options?: Record<string, unknown>): Promise<unknown>;
   formatAlert(options: {
     checkedAt?: string;
     host?: string;
@@ -44,6 +46,8 @@ const {
   parseBooleanFlag,
   parseCliOptions,
   parsePositiveNumber,
+  isTransientSshTransportFailure,
+  resolveTransientHttpFailures,
   runRemediationPhase
 } = await import("../../scripts/mush-devops-health-alert.mjs") as HealthAlertModule;
 
@@ -1568,5 +1572,190 @@ describe("benign Vast SSH-port renumbering is debounced", () => {
     expect(keys).toHaveLength(32);
     expect(keys).toContain("instance-99");
     expect(keys).not.toContain("instance-0");
+  });
+});
+
+describe("transient SSH transport failures on HTTP targets", () => {
+  const MAXSTARTUPS =
+    "kex_exchange_identification: read: Connection reset by peer\r\nConnection reset by 167.235.230.130 port 22";
+  const CLOSED = "kex_exchange_identification: Connection closed by remote host\r\nConnection closed by 167.235.230.130 port 22";
+
+  function lb(overrides: Record<string, unknown> = {}) {
+    return {
+      componentId: "staging-backend-load-balancer",
+      componentName: "Staging Backend Load Balancer",
+      instance: null,
+      url: "ssh://root@167.235.230.130 http://127.0.0.1:3082/admin/backends",
+      status: "unreachable",
+      responseTimeMs: 120,
+      httpStatus: null,
+      error: CLOSED,
+      attempts: [],
+      ...overrides
+    };
+  }
+
+  function payloadWith(results: unknown[]) {
+    return {
+      checkedAt: "2026-09-25T10:00:00.000Z",
+      results: [
+        { key: "http", label: "HTTP health", exitCode: 1, status: "fail", parsed: { results } },
+        { key: "vastStatus", label: "Vast status", exitCode: 0, parsed: { healthy: true, balance: 50 } },
+        { key: "vastDrift", label: "Vast drift", exitCode: 0, parsed: { drifted: false, comparisons: [] } }
+      ]
+    };
+  }
+
+  function harness(freshSequence: unknown[][], { previousKeys = [] as string[], requireConsecutive = true } = {}) {
+    const calls: string[] = [];
+    const sleeps: number[] = [];
+    const logs: string[] = [];
+    let written: string[] | null = null;
+    let call = 0;
+    const options = {
+      runner: async (componentId: string) => {
+        calls.push(componentId);
+        const next = freshSequence[Math.min(call, freshSequence.length - 1)];
+        call += 1;
+        return next;
+      },
+      sleep: async (ms: number) => {
+        sleeps.push(ms);
+      },
+      random: () => 0.5,
+      log: (line: string) => logs.push(line),
+      requireConsecutive,
+      readInconclusiveState: () => previousKeys,
+      writeInconclusiveState: (_p: string, keys: string[]) => {
+        written = keys;
+      }
+    };
+    return { options, calls, sleeps, logs, written: () => written };
+  }
+
+  test("classifier: SSH transport drops before any HTTP response are transient", () => {
+    for (const error of [
+      CLOSED,
+      MAXSTARTUPS,
+      "kex_exchange_identification: Exceeded MaxStartups",
+      "Connection closed by 167.235.230.130 port 22",
+      "Connection timed out during banner exchange\r\nConnection to 167.235.230.130 port 22 timed out",
+      "ssh_exchange_identification: read: Connection reset by peer"
+    ]) {
+      expect(isTransientSshTransportFailure(lb({ error })), error).toBe(true);
+    }
+    expect(isTransientSshTransportFailure(lb({ exitCode: 255 }))).toBe(true);
+    expect(isTransientSshTransportFailure(lb({ error: "", stderr: CLOSED }))).toBe(true);
+  });
+
+  test("classifier: real failures are never transient", () => {
+    for (const error of [
+      "root@167.235.230.130: Permission denied (publickey).",
+      "ssh: connect to host 167.235.230.130 port 22: No route to host",
+      "ssh: Could not resolve hostname staging-lb: Name or service not known",
+      "ssh: connect to host 167.235.230.130 port 22: Connection timed out",
+      "ssh: connect to host 167.235.230.130 port 22: Connection refused",
+      "curl: (7) Failed to connect to 127.0.0.1 port 3082 after 0 ms: Connection refused",
+      "curl: (56) Recv failure: Connection reset by peer",
+      "Expected HTTP 200, received 502.",
+      "Command failed: ssh -o BatchMode=yes root@167.235.230.130 curl"
+    ]) {
+      expect(isTransientSshTransportFailure(lb({ error })), error).toBe(false);
+    }
+    // An HTTP status means the service answered.
+    expect(isTransientSshTransportFailure(lb({ status: "unhealthy", httpStatus: 503 }))).toBe(false);
+    // A non-255 exit code is the remote command's, so ssh connected.
+    expect(isTransientSshTransportFailure(lb({ exitCode: 7 }))).toBe(false);
+    expect(isTransientSshTransportFailure(lb({ status: "healthy", error: CLOSED }))).toBe(false);
+    expect(isTransientSshTransportFailure(null)).toBe(false);
+  });
+
+  test("retry that comes back healthy drops the finding entirely", async () => {
+    const h = harness([[lb({ status: "healthy", httpStatus: 200, error: null })]]);
+    const resolved = await resolveTransientHttpFailures(payloadWith([lb()]), h.options);
+    expect(collectFindings(resolved)).toEqual([]);
+    expect(h.calls).toEqual(["staging-backend-load-balancer"]);
+    expect(h.sleeps).toEqual([2000]);
+    expect(h.logs.join("\n")).toContain("recovered on retry 2/3");
+  });
+
+  test("all attempts transient: inconclusive warning, never 'unreachable' (2nd consecutive run)", async () => {
+    const h = harness([[lb({ error: MAXSTARTUPS })]], {
+      previousKeys: ["staging-backend-load-balancer::"]
+    });
+    const findings = collectFindings(await resolveTransientHttpFailures(payloadWith([lb()]), h.options));
+    expect(h.calls).toHaveLength(2);
+    expect(h.sleeps).toEqual([2000, 5000]);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatch(
+      /^Warning: Staging Backend Load Balancer check inconclusive — SSH transient failure after 3 attempts \(.*Connection reset by 167\.235\.230\.130 port 22.*\); service itself not verified\.$/
+    );
+    expect(findings.join("\n")).not.toContain("HTTP health unreachable");
+  });
+
+  test("all attempts transient on the first run: silent on stdout, remembered for next run", async () => {
+    const h = harness([[lb()]]);
+    const findings = collectFindings(await resolveTransientHttpFailures(payloadWith([lb()]), h.options));
+    expect(findings).toEqual([]);
+    expect(h.written()).toEqual(["staging-backend-load-balancer::"]);
+    expect(h.logs.join("\n")).toContain("silent until it repeats next run");
+  });
+
+  test("gating disabled: all-transient warns immediately", async () => {
+    const h = harness([[lb()]], { requireConsecutive: false });
+    const findings = collectFindings(await resolveTransientHttpFailures(payloadWith([lb()]), h.options));
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toContain("check inconclusive");
+  });
+
+  test("jitter stays within +/-25% of the 2s / 5s backoff", async () => {
+    for (const r of [0, 1]) {
+      const h = harness([[lb()]]);
+      h.options.random = () => r;
+      await resolveTransientHttpFailures(payloadWith([lb()]), h.options);
+      expect(h.sleeps).toEqual(r === 0 ? [1500, 3750] : [2500, 6250]);
+    }
+  });
+
+  test("a real failure is reported unchanged and never retried", async () => {
+    const real = lb({ error: "ssh: connect to host 167.235.230.130 port 22: Connection refused" });
+    const h = harness([[lb({ status: "healthy", httpStatus: 200, error: null })]]);
+    const resolved = await resolveTransientHttpFailures(payloadWith([real]), h.options);
+    expect(h.calls).toEqual([]);
+    expect(h.sleeps).toEqual([]);
+    expect(collectFindings(resolved)).toEqual(collectFindings(payloadWith([real])));
+    expect(collectFindings(resolved)[0]).toMatch(/^HTTP health unreachable: Staging Backend Load Balancer/);
+  });
+
+  test("retry that returns a real failure reports that failure as usual", async () => {
+    const real = lb({ status: "unhealthy", httpStatus: 502, error: "Expected HTTP 200, received 502." });
+    const h = harness([[real]]);
+    const findings = collectFindings(await resolveTransientHttpFailures(payloadWith([lb()]), h.options));
+    expect(h.calls).toHaveLength(1);
+    expect(findings).toEqual([
+      "HTTP health unhealthy: Staging Backend Load Balancer at ssh://root@167.235.230.130 http://127.0.0.1:3082/admin/backends. HTTP 502. 120ms. Expected HTTP 200, received 502."
+    ]);
+  });
+
+  test("a runner that throws counts as another transient attempt", async () => {
+    const h = harness([[lb()]], { previousKeys: ["staging-backend-load-balancer::"] });
+    h.options.runner = async () => {
+      throw new Error("ssh to jump host failed");
+    };
+    const findings = collectFindings(await resolveTransientHttpFailures(payloadWith([lb()]), h.options));
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toContain("check inconclusive");
+    expect(h.logs.join("\n")).toContain("could not run");
+  });
+
+  test("healthy payload: no runner calls, no state write, input not mutated", async () => {
+    const payload = payloadWith([lb({ status: "healthy", httpStatus: 200, error: null })]);
+    const snapshot = JSON.stringify(payload);
+    const h = harness([[]]);
+    const resolved = await resolveTransientHttpFailures(payload, h.options);
+    expect(h.calls).toEqual([]);
+    expect(h.written()).toBeNull();
+    expect(collectFindings(resolved)).toEqual([]);
+    expect(JSON.stringify(payload)).toBe(snapshot);
   });
 });

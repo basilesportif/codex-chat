@@ -294,6 +294,8 @@ Do not use the main loop for README changes, documentation edits, code edits, re
 
 For main-loop work, the user-facing reply must include a short line identifying it as main-loop work and stating the model/effort/tier actually being used — your ACTUAL current model, never a copied example (e.g. `main_loop: model=gpt-5.6-sol effort=high tier=standard` on the Codex provider, or `main_loop: model=claude-sonnet-5-5 effort=high tier=standard` on the Claude provider).
 
+**Exception — todo replies (Tim's explicit request, 2026-09-28):** replies to direct todo operations (adding, deleting, or listing todos via the assistant-agent-logic todo scripts, including combined add+delete commands and the mandatory post-mutation numbered list) must NOT include the `main_loop` disclosure line. This overrides the disclosure requirement above and the "disclose it as `main_loop`" note under "Either provider" below. The line remains required for all other main-loop work, and whenever it is disclosed the service-stamped runtime values must still be used verbatim.
+
 The main-loop service tier is config-driven. On the Codex provider the current deployment default is the standard service tier — disclose `tier=standard` unless the active config/workspace settings such as `[codex].serviceTier` or `CODEX_CHAT_CODEX_SERVICE_TIER` explicitly override it. On the Claude provider disclose `tier=standard` (fast mode applies only to Opus models).
 
 For any reasoning, investigation, repo inspection, code or docs editing, code review, debugging, architecture, calendar/email lookup, external-data lookup, ambiguous, multi-step, or potentially slow task, dispatch a subagent. The top-level Codex loop must choose `model`, `effort`, and `serviceTier` explicitly for the task from the rubric below; do not rely on subagent/profile defaults as the routing decision. **Choose the model from the work itself, not from the profile name or whether the task writes data.** Routine CRM, calendar, project, todo, research, and other external-data operations remain non-coding work even when they update/delete records, run JavaScript scripts, or use an `operator`/`implementer` role. Before or with every `dispatch_subagent`, provide a concise task summary via `summary`, and set explicit `model`, `effort`, and `serviceTier` fields. Default subagent dispatches to `serviceTier: "standard"`; use `serviceTier: "fast"` only when Tim explicitly asks for fast mode / the fast tier, or when an explicit config/workspace override requires it. Never pick Fast on your own initiative. The service will send a visible dispatch status containing the task, profile, model, effort, and tier, and the job will be visible in `agents` / `subagents`.
@@ -330,7 +332,7 @@ Claude main loop (you are a Claude model — Sonnet/Fable/Opus):
 
 Either provider:
 
-- Simple deterministic main-loop work: use the current top-level model/effort and disclose it as `main_loop` with your ACTUAL model id — never echo a model name from these examples.
+- Simple deterministic main-loop work: use the current top-level model/effort and disclose it as `main_loop` with your ACTUAL model id — never echo a model name from these examples. (Direct todo operations are exempt — see the todo exception above.)
 
 Profile/model examples:
 

@@ -78,16 +78,12 @@ function explicitlyRequestsFable(text: string): boolean {
 /** Current flagship Opus for Claude-mode coding/intensive subagents. */
 export const CLAUDE_CODING_MODEL = "claude-opus-5-5";
 
-const INTENSIVE_WORK = /\b(?:very intensive|intensive|high[- ]stakes|risky|large[- ]scope)\b/i;
-
 /**
- * True when the dispatch describes very intensive / risky / high-stakes /
- * large-scope work, which keeps high effort on Opus 5.5 (the rubric's
- * "intensive" tier) instead of the medium coding default.
+ * Default effort for every Opus 5.5 and Sonnet 5.5 launch, whatever the
+ * workload (intensive/risky/high-stakes work included). Only an effort the
+ * user explicitly requested overrides it.
  */
-function isIntensiveWork(action: DispatchSubagentAction): boolean {
-  return INTENSIVE_WORK.test(`${action.summary}\n${action.prompt}`);
-}
+export const CLAUDE_DEFAULT_EFFORT = "medium" as const;
 
 /**
  * Version token of an Opus model older than Opus 5.5 (`"5"` for
@@ -112,14 +108,11 @@ function isOpus55(model: string | undefined): boolean {
   return (model ?? "").trim().toLowerCase().startsWith(CLAUDE_CODING_MODEL);
 }
 
-const EFFORT_RANK: Record<string, number> = { none: 0, minimal: 1, low: 2, medium: 3, high: 4, xhigh: 5 };
-
 /**
  * Claude-mode Opus enforcement applied to directives that otherwise pass
  * through untouched (Claude overrides): a superseded Opus the user did not
  * name is upgraded to Opus 5.5, and any Opus 5.5 dispatch (whatever the
- * workload) whose effort exceeds the rubric (high for intensive work, medium
- * otherwise) without the user asking for an effort is lowered to that level.
+ * workload) runs at medium effort unless the user asked for an effort.
  */
 function enforceClaudeOpusDefaults(
   action: DispatchSubagentAction,
@@ -130,14 +123,19 @@ function enforceClaudeOpusDefaults(
   if (olderVersion && !explicitlyRequestsOpusVersion(olderVersion, originText)) {
     next = { ...next, model: CLAUDE_CODING_MODEL };
   }
-  const intensive = isIntensiveWork(next);
-  if (isOpus55(next.model) && !explicitlyRequestsEffort(originText)) {
-    const target = intensive ? "high" : "medium";
-    if ((EFFORT_RANK[next.effort] ?? 0) > EFFORT_RANK[target]) {
-      next = { ...next, effort: target };
-    }
+  return pinOpus55Effort(next, originText);
+}
+
+/**
+ * Opus 5.5 launches at medium effort unless the user explicitly asked for an
+ * effort level (raised or lowered to medium, like Fable). Older Opus
+ * snapshots and the `opus` alias are not touched here.
+ */
+function pinOpus55Effort(action: DispatchSubagentAction, originText: string): DispatchSubagentAction {
+  if (isOpus55(action.model) && !explicitlyRequestsEffort(originText) && action.effort !== CLAUDE_DEFAULT_EFFORT) {
+    return { ...action, effort: CLAUDE_DEFAULT_EFFORT };
   }
-  return next;
+  return action;
 }
 
 export interface NormalizedSubagentRouting {
@@ -160,10 +158,16 @@ export function normalizeSubagentRouting(
   // Fable defaults to medium reasoning effort unless the user explicitly asked
   // for an effort level. Without this, the main agent's rubric tends to pick
   // xhigh for Fable dispatches.
-  let changedByFableDefault = false;
+  let changedByEffortDefault = false;
   if (isFableModel(action.model) && !explicitlyRequestsEffort(originText) && action.effort !== "medium") {
     action = { ...action, effort: "medium" };
-    changedByFableDefault = true;
+    changedByEffortDefault = true;
+  }
+  // Opus 5.5 likewise defaults to medium in every main-loop mode.
+  const opusPinned = pinOpus55Effort(action, originText);
+  if (opusPinned !== action) {
+    action = opusPinned;
+    changedByEffortDefault = true;
   }
 
   const workload = classifySubagentWorkload(action);
@@ -174,17 +178,16 @@ export function normalizeSubagentRouting(
     const unrequestedFable = isFableModel(action.model) && !explicitlyRequestsFable(originText);
     if (!unrequestedFable && isClaudeOrProviderOverride(action)) {
       const enforced = enforceClaudeOpusDefaults(action, originText);
-      return { action: enforced, changed: changedByFableDefault || enforced !== action, workload };
+      return { action: enforced, changed: changedByEffortDefault || enforced !== action, workload };
     }
 
     if (unrequestedFable || !explicitlyRequestsModel(originText)) {
-      // Coding runs on Opus 5.5 at medium; very intensive work keeps Opus 5.5
-      // at high; everything else runs on Sonnet 5.5 at high.
-      const defaults = workload === "coding" && isIntensiveWork(action)
-        ? { model: CLAUDE_CODING_MODEL, effort: "high" as const }
-        : workload === "coding"
-          ? { model: CLAUDE_CODING_MODEL, effort: "medium" as const }
-          : { model: "claude-sonnet-5-5", effort: "high" as const };
+      // Coding (including intensive/high-stakes coding) runs on Opus 5.5;
+      // everything else runs on Sonnet 5.5. Both default to medium effort.
+      const defaults = {
+        model: workload === "coding" ? CLAUDE_CODING_MODEL : "claude-sonnet-5-5",
+        effort: CLAUDE_DEFAULT_EFFORT
+      };
       const normalized: DispatchSubagentAction = {
         ...action,
         model: defaults.model,
@@ -200,7 +203,7 @@ export function normalizeSubagentRouting(
   }
 
   if (isClaudeOrProviderOverride(action) || explicitlyRequestsModel(originText)) {
-    return { action, changed: changedByFableDefault, workload };
+    return { action, changed: changedByEffortDefault, workload };
   }
 
   // Coding/debugging/review/implementation runs on Astra at high effort; every

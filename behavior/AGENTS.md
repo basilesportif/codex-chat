@@ -292,7 +292,7 @@ Use the main loop only for extremely direct deterministic operations:
 
 Do not use the main loop for README changes, documentation edits, code edits, repo/file inspection, calendar lookup, email/Gmail lookup, research, external-data lookup, debugging, architecture, multi-step work, or ambiguous work. Even a read-only calendar or email lookup must dispatch a subagent.
 
-For main-loop work, the user-facing reply must include a short line identifying it as main-loop work and stating the model/effort/tier actually being used — your ACTUAL current model, never a copied example (e.g. `main_loop: model=gpt-5.6-sol effort=high tier=standard` on the Codex provider, or `main_loop: model=claude-sonnet-5-5 effort=high tier=standard` on the Claude provider).
+For main-loop work, the user-facing reply must include a short line identifying it as main-loop work and stating the model/effort/tier actually being used — your ACTUAL current model, never a copied example (e.g. `main_loop: model=gpt-5.6-sol effort=high tier=standard` on the Codex provider, or `main_loop: model=claude-sonnet-5-5 effort=medium tier=standard` on the Claude provider).
 
 **Exception — todo replies (Tim's explicit request, 2026-09-28):** replies to direct todo operations (adding, deleting, or listing todos via the assistant-agent-logic todo scripts, including combined add+delete commands and the mandatory post-mutation numbered list) must NOT include the `main_loop` disclosure line. This overrides the disclosure requirement above and the "disclose it as `main_loop`" note under "Either provider" below. The line remains required for all other main-loop work, and whenever it is disclosed the service-stamped runtime values must still be used verbatim.
 
@@ -324,9 +324,9 @@ Codex/GPT main loop (you are a `gpt-*` model):
 
 Claude main loop (you are a Claude model — Sonnet/Fable/Opus):
 
-- **Routine domain work** (the same CRM/calendar/email/project/todo/finance/health/betting/messaging/research/repo-inspection/docs categories as above): `model: "claude-sonnet-5-5"`, `effort: "high"`, `serviceTier: "standard"`, `backend: "claude_agent_sdk"`.
+- **Routine domain work** (the same CRM/calendar/email/project/todo/finance/health/betting/messaging/research/repo-inspection/docs categories as above): `model: "claude-sonnet-5-5"`, `effort: "medium"`, `serviceTier: "standard"`, `backend: "claude_agent_sdk"`.
 - **Coding and engineering work** (source-code implementation, debugging, code review, architecture, cross-module changes, deploy-sensitive work): `model: "claude-opus-5-5"`, `effort: "medium"`, `serviceTier: "standard"`, `backend: "claude_agent_sdk"`. Hand it one bounded end-to-end task — Claude-backed children can orchestrate their native implementer/investigator/reviewer subagents.
-- **Very intensive, risky, high-stakes, or large-scope analysis:** `model: "claude-opus-5-5"`, `effort: "high"` (xhigh only when Tim asks), `serviceTier: "standard"`, `backend: "claude_agent_sdk"`.
+- **Very intensive, risky, high-stakes, or large-scope analysis:** `model: "claude-opus-5-5"`, `effort: "medium"` (use `high`/`xhigh` only when Tim explicitly asks for that effort — an effort Tim names always wins), `serviceTier: "standard"`, `backend: "claude_agent_sdk"`. Opus 5.5 and Sonnet 5.5 always launch at medium by default; the service coerces an unrequested other effort on Opus 5.5 to medium.
 - **Fable is explicit-only — never dispatch `claude-fable-5-1` unless Tim asked for Fable by name in this request** (his Fable quota is precious; the service also enforces this by rewriting unrequested Fable dispatches to the workload default). When Tim does ask for Fable: `effort: "medium"` unless he names one, and brief it as an ORCHESTRATOR — delegate the coding/repo research to its native subagents, review what comes back, follow the leads, and report.
 - Always emit `backend: "claude_agent_sdk"` on these dispatches and never include Codex provider fields (`codexProfile`, `modelProvider`, `serviceTierMode`).
 

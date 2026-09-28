@@ -112,7 +112,7 @@ userIds = [12345]
     expect(config.mainAgent.provider).toBe("codex");
     expect(config.mainAgent.claude).toEqual({
       model: "claude-sonnet-5-5",
-      effort: "high",
+      effort: "medium",
       permissionMode: "bypassPermissions",
       allowDangerouslySkipPermissions: true,
       allowedTools: ["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep", "Agent"],

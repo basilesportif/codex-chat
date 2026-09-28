@@ -22,7 +22,7 @@ provider = "codex"
 # "claude_agent_sdk" and restart to enable. Roll back by setting it to "codex"
 # and restarting; the provider-scoped Codex session remains available.
 model = "claude-sonnet-5-5"
-effort = "high"
+effort = "medium"
 permissionMode = "bypassPermissions"
 allowDangerouslySkipPermissions = true
 allowedTools = ["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep", "Agent"]

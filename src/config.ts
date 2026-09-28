@@ -149,7 +149,7 @@ const claudeSubagentSchema = z.object({
 
 const claudeMainAgentSchema = z.object({
   model: z.string().default("claude-sonnet-5-5"),
-  effort: z.enum(["low", "medium", "high", "xhigh"]).default("high"),
+  effort: z.enum(["low", "medium", "high", "xhigh"]).default("medium"),
   permissionMode: claudePermissionModeSchema.default("bypassPermissions"),
   allowDangerouslySkipPermissions: z.boolean().default(true),
   allowedTools: z.array(z.string()).default(["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep", "Agent"]),

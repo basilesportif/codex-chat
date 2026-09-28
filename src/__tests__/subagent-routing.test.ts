@@ -32,7 +32,7 @@ describe("Claude-main subagent routing enforcement", () => {
       workload: "routine_non_coding",
       action: {
         model: "claude-sonnet-5-5",
-        effort: "high",
+        effort: "medium",
         serviceTier: "standard",
         backend: "claude_agent_sdk"
       }
@@ -84,7 +84,7 @@ describe("Claude-main subagent routing enforcement", () => {
     expect(normalizeSubagentRouting(routine, "Look up next event on football calendar", "claude_agent_sdk")).toMatchObject({
       changed: true,
       workload: "routine_non_coding",
-      action: { model: "claude-sonnet-5-5", effort: "high", serviceTier: "standard", backend: "claude_agent_sdk" }
+      action: { model: "claude-sonnet-5-5", effort: "medium", serviceTier: "standard", backend: "claude_agent_sdk" }
     });
   });
 
@@ -96,7 +96,7 @@ describe("Claude-main subagent routing enforcement", () => {
       workload: "unknown",
       action: {
         model: "claude-sonnet-5-5",
-        effort: "high",
+        effort: "medium",
         serviceTier: "standard",
         backend: "claude_agent_sdk"
       }
@@ -196,8 +196,10 @@ describe("Claude-main Opus 5.5 enforcement", () => {
     ["opus alias passes through", "opus", "high", "Fix the bug in the parser.", "fix it", "opus", "high"],
     ["Opus 5.5 coding high lowered to medium", "claude-opus-5-5", "high", "Fix the bug in the parser.", "fix it", "claude-opus-5-5", "medium"],
     ["explicit effort request preserved", "claude-opus-5-5", "high", "Fix the bug in the parser.", "fix it with high effort", "claude-opus-5-5", "high"],
-    ["intensive work keeps high", "claude-opus-5", "high", "High-stakes refactor of the service code.", "do it", "claude-opus-5-5", "high"],
-    ["intensive xhigh lowered to high", "claude-opus-5-5", "xhigh", "Risky refactor of the service code.", "do it", "claude-opus-5-5", "high"]
+    ["intensive work also defaults to medium", "claude-opus-5", "high", "High-stakes refactor of the service code.", "do it", "claude-opus-5-5", "medium"],
+    ["intensive xhigh lowered to medium", "claude-opus-5-5", "xhigh", "Risky refactor of the service code.", "do it", "claude-opus-5-5", "medium"],
+    ["Opus 5.5 low raised to medium", "claude-opus-5-5", "low", "Fix the bug in the parser.", "fix it", "claude-opus-5-5", "medium"],
+    ["explicit xhigh on intensive work preserved", "claude-opus-5-5", "xhigh", "Risky refactor of the service code.", "do it at xhigh effort", "claude-opus-5-5", "xhigh"]
   ] as const)("%s", (_label, model, effort, prompt, origin, expectedModel, expectedEffort) => {
     const input = action({ summary: prompt, prompt, model, effort, serviceTier: "standard", backend: "claude_agent_sdk" });
     const result = normalizeSubagentRouting(input, origin, "claude_agent_sdk");
@@ -221,13 +223,23 @@ describe("Claude-main Opus 5.5 enforcement", () => {
 
   test.each([
     // [label, profile, prompt, expected workload, expected model, expected effort]
-    ["non-coding risky work stays on Sonnet high", "operator", "Risky cleanup of the calendar invites.", "routine_non_coding", "claude-sonnet-5-5", "high"],
-    ["coding high-stakes work goes to Opus 5.5 high", undefined, "High-stakes refactor of the service code.", "coding", "claude-opus-5-5", "high"]
+    ["non-coding risky work stays on Sonnet 5.5 medium", "operator", "Risky cleanup of the calendar invites.", "routine_non_coding", "claude-sonnet-5-5", "medium"],
+    ["coding high-stakes work goes to Opus 5.5 medium", undefined, "High-stakes refactor of the service code.", "coding", "claude-opus-5-5", "medium"]
   ] as const)("default path: %s", (_label, profile, prompt, workload, expectedModel, expectedEffort) => {
     const input = action({ ...(profile ? { profile } : {}), prompt, model: "gpt-5.6-sol" });
     const result = normalizeSubagentRouting(input, "do it", "claude_agent_sdk");
     expect(result).toMatchObject({ changed: true, workload });
     expect(result.action).toMatchObject({ model: expectedModel, effort: expectedEffort, backend: "claude_agent_sdk" });
+  });
+
+  test("Codex mode also launches Opus 5.5 at medium unless an effort was requested", () => {
+    const input = action({ prompt: "Fix the bug in src/service.ts.", model: "claude-opus-5-5", effort: "high", backend: "claude_agent_sdk" });
+    expect(normalizeSubagentRouting(input, "use Opus for this")).toEqual({
+      action: { ...input, effort: "medium" },
+      changed: true,
+      workload: "coding"
+    });
+    expect(normalizeSubagentRouting(input, "use Opus at high effort")).toEqual({ action: input, changed: false, workload: "coding" });
   });
 
   test("Codex mode leaves the same claude-opus-5/high directive untouched", () => {

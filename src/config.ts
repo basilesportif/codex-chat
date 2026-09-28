@@ -148,7 +148,7 @@ const claudeSubagentSchema = z.object({
 });
 
 const claudeMainAgentSchema = z.object({
-  model: z.string().default("claude-sonnet-5"),
+  model: z.string().default("claude-sonnet-5-5"),
   effort: z.enum(["low", "medium", "high", "xhigh"]).default("high"),
   permissionMode: claudePermissionModeSchema.default("bypassPermissions"),
   allowDangerouslySkipPermissions: z.boolean().default(true),
@@ -205,7 +205,7 @@ const claudeMainAgentSchema = z.object({
   handoffSummaryEnabled: z.boolean().default(true),
   // Cheap and fast on purpose: the summarizer is a throwaway one-shot session
   // with no tools, and nothing waits on it.
-  handoffSummaryModel: z.string().default("claude-sonnet-5"),
+  handoffSummaryModel: z.string().default("claude-sonnet-5-5"),
 }).prefault({});
 
 export type ClaudeSubagentConfig = z.infer<typeof claudeSubagentSchema>;

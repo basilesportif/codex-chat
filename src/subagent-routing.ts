@@ -179,12 +179,12 @@ export function normalizeSubagentRouting(
 
     if (unrequestedFable || !explicitlyRequestsModel(originText)) {
       // Coding runs on Opus 5.5 at medium; very intensive work keeps Opus 5.5
-      // at high; everything else runs on Sonnet 5 at high.
+      // at high; everything else runs on Sonnet 5.5 at high.
       const defaults = workload === "coding" && isIntensiveWork(action)
         ? { model: CLAUDE_CODING_MODEL, effort: "high" as const }
         : workload === "coding"
           ? { model: CLAUDE_CODING_MODEL, effort: "medium" as const }
-          : { model: "claude-sonnet-5", effort: "high" as const };
+          : { model: "claude-sonnet-5-5", effort: "high" as const };
       const normalized: DispatchSubagentAction = {
         ...action,
         model: defaults.model,

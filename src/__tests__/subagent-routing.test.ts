@@ -31,7 +31,7 @@ describe("Claude-main subagent routing enforcement", () => {
       changed: true,
       workload: "routine_non_coding",
       action: {
-        model: "claude-sonnet-5",
+        model: "claude-sonnet-5-5",
         effort: "high",
         serviceTier: "standard",
         backend: "claude_agent_sdk"
@@ -84,7 +84,7 @@ describe("Claude-main subagent routing enforcement", () => {
     expect(normalizeSubagentRouting(routine, "Look up next event on football calendar", "claude_agent_sdk")).toMatchObject({
       changed: true,
       workload: "routine_non_coding",
-      action: { model: "claude-sonnet-5", effort: "high", serviceTier: "standard", backend: "claude_agent_sdk" }
+      action: { model: "claude-sonnet-5-5", effort: "high", serviceTier: "standard", backend: "claude_agent_sdk" }
     });
   });
 
@@ -95,7 +95,7 @@ describe("Claude-main subagent routing enforcement", () => {
       changed: true,
       workload: "unknown",
       action: {
-        model: "claude-sonnet-5",
+        model: "claude-sonnet-5-5",
         effort: "high",
         serviceTier: "standard",
         backend: "claude_agent_sdk"
@@ -129,7 +129,7 @@ describe("Claude-main subagent routing enforcement", () => {
 
     expect(result).toMatchObject({ changed: true, workload: "routine_non_coding" });
     expect(result.action).toMatchObject({
-      model: "claude-sonnet-5",
+      model: "claude-sonnet-5-5",
       effort: "xhigh",
       serviceTier: "standard",
       backend: "claude_agent_sdk"
@@ -221,7 +221,7 @@ describe("Claude-main Opus 5.5 enforcement", () => {
 
   test.each([
     // [label, profile, prompt, expected workload, expected model, expected effort]
-    ["non-coding risky work stays on Sonnet high", "operator", "Risky cleanup of the calendar invites.", "routine_non_coding", "claude-sonnet-5", "high"],
+    ["non-coding risky work stays on Sonnet high", "operator", "Risky cleanup of the calendar invites.", "routine_non_coding", "claude-sonnet-5-5", "high"],
     ["coding high-stakes work goes to Opus 5.5 high", undefined, "High-stakes refactor of the service code.", "coding", "claude-opus-5-5", "high"]
   ] as const)("default path: %s", (_label, profile, prompt, workload, expectedModel, expectedEffort) => {
     const input = action({ ...(profile ? { profile } : {}), prompt, model: "gpt-5.6-sol" });

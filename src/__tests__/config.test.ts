@@ -111,7 +111,7 @@ userIds = [12345]
     expect(config.codex.model).toBe("gpt-test");
     expect(config.mainAgent.provider).toBe("codex");
     expect(config.mainAgent.claude).toEqual({
-      model: "claude-sonnet-5",
+      model: "claude-sonnet-5-5",
       effort: "high",
       permissionMode: "bypassPermissions",
       allowDangerouslySkipPermissions: true,
@@ -127,7 +127,7 @@ userIds = [12345]
       contextRolloverInputTokens: 800_000,
       contextRolloverHardCapTokens: 900_000,
       handoffSummaryEnabled: true,
-      handoffSummaryModel: "claude-sonnet-5",
+      handoffSummaryModel: "claude-sonnet-5-5",
     });
     expect(config.service.timezone).toBe("America/New_York");
     // Watchdog budgets: silence, not age, and a far looser runaway ceiling.

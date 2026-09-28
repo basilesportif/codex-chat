@@ -242,6 +242,33 @@ describe("Claude-main Opus 5.5 enforcement", () => {
     expect(normalizeSubagentRouting(input, "use Opus at high effort")).toEqual({ action: input, changed: false, workload: "coding" });
   });
 
+  test.each([
+    // [label, profile, model, effort, origin, expected model, expected effort]
+    ["Sonnet 5.5 main-loop high lowered to medium", "operator", "claude-sonnet-5-5", "high", "update the CRM note", "claude-sonnet-5-5", "medium"],
+    ["Sonnet 5.5 low raised to medium", "operator", "claude-sonnet-5-5", "low", "update the CRM note", "claude-sonnet-5-5", "medium"],
+    ["Sonnet 5.5 Tim-explicit xhigh preserved", "operator", "claude-sonnet-5-5", "xhigh", "update the CRM note at xhigh effort", "claude-sonnet-5-5", "xhigh"],
+    ["Sonnet 5.5 coding high lowered to medium", "implementer", "claude-sonnet-5-5", "high", "fix it", "claude-sonnet-5-5", "medium"],
+    ["older Sonnet 5 snapshot untouched", "operator", "claude-sonnet-5", "high", "update the CRM note", "claude-sonnet-5", "high"],
+    ["sonnet alias untouched", "operator", "sonnet", "high", "update the CRM note", "sonnet", "high"]
+  ] as const)("%s", (_label, profile, model, effort, origin, expectedModel, expectedEffort) => {
+    const prompt = profile === "implementer" ? "Fix the bug in the parser." : "Update Neville's CRM follow-up note.";
+    const input = action({ profile, summary: prompt, prompt, model, effort, serviceTier: "standard", backend: "claude_agent_sdk" });
+    for (const provider of ["claude_agent_sdk", "codex"] as const) {
+      const result = normalizeSubagentRouting(input, origin, provider);
+      expect(result.action).toMatchObject({ model: expectedModel, effort: expectedEffort });
+      expect(result.changed).toBe(expectedModel !== model || expectedEffort !== effort);
+    }
+  });
+
+  test("routine dispatch without a Claude model choice defaults to Sonnet 5.5 medium", () => {
+    // `model` is required by the directive schema; a non-Claude default model
+    // is the "service picks the model" path.
+    const input = action({ profile: "operator", prompt: "Update Neville's CRM follow-up note.", model: "gpt-5.6-sol", effort: "high" });
+    const result = normalizeSubagentRouting(input, "update the CRM note", "claude_agent_sdk");
+    expect(result).toMatchObject({ changed: true, workload: "routine_non_coding" });
+    expect(result.action).toMatchObject({ model: "claude-sonnet-5-5", effort: "medium", backend: "claude_agent_sdk" });
+  });
+
   test("Codex mode leaves the same claude-opus-5/high directive untouched", () => {
     const input = action({ prompt: "Fix the bug in src/service.ts.", model: "claude-opus-5", effort: "high", backend: "claude_agent_sdk" });
     expect(normalizeSubagentRouting(input, "fix it")).toEqual({ action: input, changed: false, workload: "coding" });

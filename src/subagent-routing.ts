@@ -108,6 +108,10 @@ function isOpus55(model: string | undefined): boolean {
   return (model ?? "").trim().toLowerCase().startsWith(CLAUDE_CODING_MODEL);
 }
 
+function isSonnet55(model: string | undefined): boolean {
+  return (model ?? "").trim().toLowerCase().startsWith("claude-sonnet-5-5");
+}
+
 /**
  * Claude-mode Opus enforcement applied to directives that otherwise pass
  * through untouched (Claude overrides): a superseded Opus the user did not
@@ -127,12 +131,12 @@ function enforceClaudeOpusDefaults(
 }
 
 /**
- * Opus 5.5 launches at medium effort unless the user explicitly asked for an
- * effort level (raised or lowered to medium, like Fable). Older Opus
- * snapshots and the `opus` alias are not touched here.
+ * Opus 5.5 and Sonnet 5.5 launch at medium effort unless the user explicitly
+ * asked for an effort level (raised or lowered to medium, like Fable). Older
+ * Opus/Sonnet snapshots and the `opus`/`sonnet` aliases are not touched here.
  */
 function pinOpus55Effort(action: DispatchSubagentAction, originText: string): DispatchSubagentAction {
-  if (isOpus55(action.model) && !explicitlyRequestsEffort(originText) && action.effort !== CLAUDE_DEFAULT_EFFORT) {
+  if ((isOpus55(action.model) || isSonnet55(action.model)) && !explicitlyRequestsEffort(originText) && action.effort !== CLAUDE_DEFAULT_EFFORT) {
     return { ...action, effort: CLAUDE_DEFAULT_EFFORT };
   }
   return action;
@@ -163,7 +167,7 @@ export function normalizeSubagentRouting(
     action = { ...action, effort: "medium" };
     changedByEffortDefault = true;
   }
-  // Opus 5.5 likewise defaults to medium in every main-loop mode.
+  // Opus 5.5 and Sonnet 5.5 likewise default to medium in every main-loop mode.
   const opusPinned = pinOpus55Effort(action, originText);
   if (opusPinned !== action) {
     action = opusPinned;

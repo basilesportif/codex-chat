@@ -40,7 +40,7 @@ export const MAX_DRIFT_NOTICE_ENTRIES = 32;
 export const DRIFT_CLASS_BENIGN = "ssh-port-renumber";
 export const DRIFT_CLASS_UNEXPECTED = "unexpected";
 
-const DEFAULT_HOST = "devbox";
+const DEFAULT_HOST = "dev-server-galebach";
 const DEFAULT_REMOTE_DIR = "/home/tim/pkg/mush/mush-devops";
 const DEFAULT_TIMEOUT_SEC = 240;
 const DEFAULT_LOW_BALANCE_THRESHOLD = 5;

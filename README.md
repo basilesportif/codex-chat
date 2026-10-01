@@ -590,6 +590,6 @@ workflows, and `assistant-agent-data` supplies user-specific state. Other
 deployments can replace the control plane, logic, or data layers while keeping
 codex-chat as the internal runtime service.
 
-A separate web repo, `codex-chat-web`, lives at `tim@89.167.72.52:~/pkg/tim/codex-chat-web`. `me.galebach.com` is an on-demand static HTML/CSS/JS scratch page host, not a dashboard. `codex-chat-web` owns publisher/pruner/tooling and generic shared page-host code only; request-specific pages publish by default as Clerk-protected `/private/pages/<id>/` URLs with TTL/pruning and stay out of git unless Tim explicitly promotes them. Durable page metadata belongs in `assistant-agent-data` at `data/web-pages/manifest.json`.
+A separate web repo, `codex-chat-web`, lives at `devbox:~/pkg/tim/codex-chat-web` (devbox = tim@159.69.19.179). `me.galebach.com` is an on-demand static HTML/CSS/JS scratch page host, not a dashboard. `codex-chat-web` owns publisher/pruner/tooling and generic shared page-host code only; request-specific pages publish by default as Clerk-protected `/private/pages/<id>/` URLs with TTL/pruning and stay out of git unless Tim explicitly promotes them. Durable page metadata belongs in `assistant-agent-data` at `data/web-pages/manifest.json`.
 
 The canonical documentation for this deployment's repo relationships lives in `assistant-agent-data` at `docs/assistant-system-architecture.md`.

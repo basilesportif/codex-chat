@@ -635,6 +635,24 @@ export function isTransientSshTransportFailure(result) {
   return TRANSIENT_SSH_PATTERNS.some((pattern) => pattern.test(text));
 }
 
+// A check whose remote command was killed for exceeding its time limit (mush-devops
+// health-engine.js reports e.g. "SSH MongoDB ping/hello check timed out after 30s.") says nothing
+// definite about the service, but unlike an sshd drop a persistent hang can be a real outage. So
+// it is retried ONCE (TIMED_OUT_MAX_ATTEMPTS total) and, if it times out again, alerted normally.
+export const TIMED_OUT_MAX_ATTEMPTS = 2;
+export const TIMED_OUT_COMMAND_PATTERN = /\btimed out after \d+(?:\.\d+)?\s*s\b/i;
+
+/** Pure classifier: true when a failed result (no HTTP response) reports a killed/timed-out command. */
+export function isTimedOutCommandFailure(result) {
+  if (!result || typeof result !== "object") return false;
+  if (result.status === "healthy" || result.status === "skipped") return false;
+  if (result.httpStatus != null) return false;
+  const text = [result.error, result.stderr]
+    .filter((value) => typeof value === "string" && value.trim() !== "")
+    .join("\n");
+  return Boolean(text) && TIMED_OUT_COMMAND_PATTERN.test(text);
+}
+
 function httpResultKey(result) {
   return `${result?.componentId ?? ""}::${result?.instance ?? ""}`;
 }
@@ -666,6 +684,7 @@ export async function resolveTransientHttpFailures(payload, options = {}) {
   const random = options.random || Math.random;
   const log = options.log || ((line) => console.error(line));
   const maxAttempts = options.maxAttempts || TRANSIENT_SSH_MAX_ATTEMPTS;
+  const timedOutMaxAttempts = Math.min(options.timedOutMaxAttempts || TIMED_OUT_MAX_ATTEMPTS, maxAttempts);
   const backoffMs = options.backoffMs || TRANSIENT_SSH_BACKOFF_MS;
   const gate = options.requireConsecutive !== false;
   const statePath = options.inconclusiveStatePath || HTTP_INCONCLUSIVE_STATE_PATH;
@@ -681,8 +700,12 @@ export async function resolveTransientHttpFailures(payload, options = {}) {
   // Index of every result still stuck on a transient SSH error, keyed by component+instance.
   let pending = [];
   current.forEach((result, index) => {
-    if (result?.componentId && isTransientSshTransportFailure(result)) pending.push(index);
+    if (!result?.componentId) return;
+    if (isTransientSshTransportFailure(result) || isTimedOutCommandFailure(result)) pending.push(index);
   });
+  // Should `result` (still failing after `attempt` attempts) get another attempt?
+  const retryable = (result, attempt) =>
+    isTransientSshTransportFailure(result) || (isTimedOutCommandFailure(result) && attempt < timedOutMaxAttempts);
 
   if (pending.length > 0 && typeof runner === "function") {
     for (let attempt = 2; attempt <= maxAttempts && pending.length > 0; attempt += 1) {
@@ -705,16 +728,21 @@ export async function resolveTransientHttpFailures(payload, options = {}) {
             : null;
           if (!match) {
             // No fresh evidence at all (runner failed or target missing): still unresolved.
-            stillPending.push(index);
+            if (retryable(previous, attempt)) stillPending.push(index);
             continue;
           }
           current[index] = match;
-          if (isTransientSshTransportFailure(match)) {
+          if (retryable(match, attempt)) {
             stillPending.push(index);
           } else if (match.status === "healthy" || match.status === "skipped") {
+            const cause = isTransientSshTransportFailure(previous) ? "a transient SSH failure" : "a timed-out check";
             log(
               `mush-devops health: ${previous.componentName || componentId} recovered on retry ${attempt}/${maxAttempts} ` +
-                `after a transient SSH failure; no alert.`,
+                `after ${cause}; no alert.`,
+            );
+          } else if (isTimedOutCommandFailure(match)) {
+            log(
+              `mush-devops health: ${previous.componentName || componentId} timed out again on retry ${attempt}; alerting.`,
             );
           }
         }
@@ -723,6 +751,9 @@ export async function resolveTransientHttpFailures(payload, options = {}) {
     }
   }
 
+  // Only SSH transport drops are downgraded to "inconclusive"; a timed-out check that never got a
+  // retry result is alerted on as-is.
+  pending = pending.filter((index) => isTransientSshTransportFailure(current[index]));
   const inconclusiveKeys = pending.map((index) => httpResultKey(current[index]));
   let previousKeys = [];
   if (gate) {

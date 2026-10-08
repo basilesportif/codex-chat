@@ -28,6 +28,7 @@ type HealthAlertModule = {
   };
   runRemediationPhase(options: Record<string, unknown>): Promise<string>;
   isTransientSshTransportFailure(result: unknown): boolean;
+  isTimedOutCommandFailure(result: unknown): boolean;
   resolveTransientHttpFailures(payload: unknown, options?: Record<string, unknown>): Promise<unknown>;
   formatAlert(options: {
     checkedAt?: string;
@@ -47,6 +48,7 @@ const {
   parseCliOptions,
   parsePositiveNumber,
   isTransientSshTransportFailure,
+  isTimedOutCommandFailure,
   resolveTransientHttpFailures,
   runRemediationPhase
 } = await import("../../scripts/mush-devops-health-alert.mjs") as HealthAlertModule;
@@ -1757,5 +1759,82 @@ describe("transient SSH transport failures on HTTP targets", () => {
     expect(h.written()).toBeNull();
     expect(collectFindings(resolved)).toEqual([]);
     expect(JSON.stringify(payload)).toBe(snapshot);
+  });
+
+  describe("timed-out (killed) commands", () => {
+    const TIMED_OUT = "SSH MongoDB ping/hello check timed out after 30s.";
+
+    function mongo(overrides: Record<string, unknown> = {}) {
+      return {
+        componentId: "mush-db-prod",
+        componentName: "Mush Production MongoDB",
+        instance: null,
+        url: "ssh://root@167.233.107.107 mongodb://db.mush.style:27017/admin",
+        status: "unreachable",
+        responseTimeMs: 30010,
+        httpStatus: null,
+        error: TIMED_OUT,
+        attempts: [],
+        ...overrides
+      };
+    }
+
+    test("classifier: 'timed out after Ns' is a timed-out command; bare failures are not", () => {
+      expect(isTimedOutCommandFailure(mongo())).toBe(true);
+      expect(isTimedOutCommandFailure(mongo({ error: "SSH MongoDB service check timed out after 30s." }))).toBe(true);
+      expect(isTimedOutCommandFailure(mongo({ error: "Command failed: ssh -o BatchMode=yes root@x" }))).toBe(false);
+      expect(isTimedOutCommandFailure(mongo({ error: "MongoDB hello reported primary=false." }))).toBe(false);
+      expect(isTimedOutCommandFailure(mongo({ status: "healthy" }))).toBe(false);
+      expect(isTimedOutCommandFailure(mongo({ httpStatus: 504 }))).toBe(false);
+      // Timed-out commands are a separate class, not an SSH transport drop.
+      expect(isTransientSshTransportFailure(mongo())).toBe(false);
+    });
+
+    test("a timed-out check is retried once and a healthy retry drops the alert", async () => {
+      const h = harness([[mongo({ status: "healthy", error: null })]]);
+      const resolved = await resolveTransientHttpFailures(payloadWith([mongo()]), h.options);
+      expect(h.calls).toEqual(["mush-db-prod"]);
+      expect(h.sleeps).toEqual([2000]);
+      expect(collectFindings(resolved)).toEqual([]);
+      expect(h.logs.join("\n")).toContain("recovered on retry 2/3 after a timed-out check");
+    });
+
+    test("a check that times out again alerts normally after exactly one retry", async () => {
+      const h = harness([[mongo()]]);
+      const findings = collectFindings(await resolveTransientHttpFailures(payloadWith([mongo()]), h.options));
+      expect(h.calls).toEqual(["mush-db-prod"]);
+      expect(h.written()).toBeNull();
+      expect(findings).toHaveLength(1);
+      expect(findings[0]).toMatch(/^HTTP health unreachable: Mush Production MongoDB/);
+      expect(findings[0]).toContain("timed out after 30s");
+      expect(findings[0]).not.toContain("inconclusive");
+      expect(h.logs.join("\n")).toContain("timed out again on retry 2; alerting");
+    });
+
+    test("a timed-out check whose retry cannot run alerts as-is (never inconclusive)", async () => {
+      const h = harness([[]]);
+      h.options.runner = async () => {
+        throw new Error("ssh to jump host failed");
+      };
+      const findings = collectFindings(await resolveTransientHttpFailures(payloadWith([mongo()]), h.options));
+      expect(findings).toEqual(collectFindings(payloadWith([mongo()])));
+      expect(findings[0]).toMatch(/^HTTP health unreachable: Mush Production MongoDB/);
+    });
+
+    test("a retry that returns a real failure reports that failure", async () => {
+      const real = mongo({ status: "unhealthy", error: "MongoDB hello reported primary=false." });
+      const h = harness([[real]]);
+      const findings = collectFindings(await resolveTransientHttpFailures(payloadWith([mongo()]), h.options));
+      expect(h.calls).toHaveLength(1);
+      expect(findings).toHaveLength(1);
+      expect(findings[0]).toContain("primary=false");
+    });
+
+    test("a bare 'Command failed' (no timeout) is still not retried", async () => {
+      const bare = mongo({ error: "Command failed: ssh -o BatchMode=yes root@167.233.107.107" });
+      const h = harness([[mongo({ status: "healthy", error: null })]]);
+      await resolveTransientHttpFailures(payloadWith([bare]), h.options);
+      expect(h.calls).toEqual([]);
+    });
   });
 });

@@ -114,10 +114,10 @@ const claudeSubagentSchema = z.object({
   enabled: z.boolean().default(false),
   pathToClaudeCodeExecutable: z.string().default(""),
   implementerModel: z.string().default("claude-opus-5-5"),
-  investigatorModel: z.string().default("sonnet"),
+  investigatorModel: z.string().default("claude-opus-5-5"),
   reviewerModel: z.string().default("claude-opus-5-5"),
   // Reasoning effort for the native nested agents. Medium across the board:
-  // Opus 5.5 at medium is the coding default; raise per role only deliberately.
+  // Opus 5.5 at medium is the default for every role; raise only deliberately.
   implementerEffort: claudeNestedEffortSchema.default("medium"),
   investigatorEffort: claudeNestedEffortSchema.default("medium"),
   reviewerEffort: claudeNestedEffortSchema.default("medium"),
@@ -148,7 +148,7 @@ const claudeSubagentSchema = z.object({
 });
 
 const claudeMainAgentSchema = z.object({
-  model: z.string().default("claude-sonnet-5-5"),
+  model: z.string().default("claude-opus-5-5"),
   effort: z.enum(["low", "medium", "high", "xhigh"]).default("medium"),
   permissionMode: claudePermissionModeSchema.default("bypassPermissions"),
   allowDangerouslySkipPermissions: z.boolean().default(true),

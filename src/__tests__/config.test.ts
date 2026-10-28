@@ -111,7 +111,7 @@ userIds = [12345]
     expect(config.codex.model).toBe("gpt-test");
     expect(config.mainAgent.provider).toBe("codex");
     expect(config.mainAgent.claude).toEqual({
-      model: "claude-sonnet-5-5",
+      model: "claude-opus-5-5",
       effort: "medium",
       permissionMode: "bypassPermissions",
       allowDangerouslySkipPermissions: true,
@@ -147,7 +147,7 @@ userIds = [12345]
       enabled: false,
       pathToClaudeCodeExecutable: "",
       implementerModel: "claude-opus-5-5",
-      investigatorModel: "sonnet",
+      investigatorModel: "claude-opus-5-5",
       reviewerModel: "claude-opus-5-5",
       implementerEffort: "medium",
       investigatorEffort: "medium",
@@ -197,7 +197,7 @@ maxThreadMessages = 5
       enabled: false,
       pathToClaudeCodeExecutable: "",
       implementerModel: "claude-opus-5-5",
-      investigatorModel: "sonnet",
+      investigatorModel: "claude-opus-5-5",
       reviewerModel: "claude-opus-5-5",
       implementerEffort: "medium",
       investigatorEffort: "medium",

@@ -178,7 +178,8 @@ export function normalizeSubagentRouting(
   if (mainProvider === "claude_agent_sdk") {
     // Fable is quota-precious: it runs only when the USER explicitly asked for
     // it. A Fable dispatch the main loop invented on its own (precedent drift)
-    // is rewritten to the workload default like any other non-explicit choice.
+    // is rewritten to the default (claude-opus-5-5) like any other
+    // non-explicit choice.
     const unrequestedFable = isFableModel(action.model) && !explicitlyRequestsFable(originText);
     if (!unrequestedFable && isClaudeOrProviderOverride(action)) {
       const enforced = enforceClaudeOpusDefaults(action, originText);
@@ -186,10 +187,11 @@ export function normalizeSubagentRouting(
     }
 
     if (unrequestedFable || !explicitlyRequestsModel(originText)) {
-      // Coding (including intensive/high-stakes coding) runs on Opus 5.5;
-      // everything else runs on Sonnet 5.5. Both default to medium effort.
+      // Every workload (coding and non-coding alike) runs on Opus 5.5 at
+      // medium effort (Tim's explicit preference, 2026-10-28). Sonnet 5.5 runs
+      // only when Tim names it explicitly.
       const defaults = {
-        model: workload === "coding" ? CLAUDE_CODING_MODEL : "claude-sonnet-5-5",
+        model: CLAUDE_CODING_MODEL,
         effort: CLAUDE_DEFAULT_EFFORT
       };
       const normalized: DispatchSubagentAction = {
